@@ -45,12 +45,14 @@ async def _prompt(text: str, secret: bool = False, choices: list[str] | None = N
     return (await asyncio.get_running_loop().run_in_executor(None, ask, text)).strip()
 
 
-def _print_devices(devices: list[Device]) -> None:
+def _print_devices(devices: list[Device], verbose: bool = False) -> None:
     if not devices:
         print("No AirPlay devices found. Try --host <ip> if mDNS is blocked on your network.")
         return
     for i, dev in enumerate(devices, 1):
         print(f"{i:>2}. {dev.name:<28} {dev.address:<16} {dev.model:<22} {dev.status}")
+        if verbose:  # what the receiver advertises, for bug reports
+            print(f"    {dev.details()}")
 
 
 async def _choose(manager: DeviceManager, args) -> Device:
@@ -96,7 +98,7 @@ async def _pair_if_needed(manager: DeviceManager, device: Device, force: bool = 
 
 async def cmd_scan(args) -> int:
     manager = DeviceManager(asyncio.get_running_loop())
-    _print_devices(await manager.scan(timeout=args.timeout, hosts=args.host))
+    _print_devices(await manager.scan(timeout=args.timeout, hosts=args.host), args.verbose)
     return 0
 
 
@@ -183,7 +185,7 @@ async def cmd_doctor(args) -> int:
         print("Display:  ", mon.label)
     manager = DeviceManager(asyncio.get_running_loop())
     print("\nScanning network...")
-    _print_devices(await manager.scan(timeout=args.timeout, hosts=args.host))
+    _print_devices(await manager.scan(timeout=args.timeout, hosts=args.host), args.verbose)
     return 0
 
 
@@ -196,6 +198,9 @@ def build_parser() -> argparse.ArgumentParser:
     def common(p):
         p.add_argument("--host", action="append", help="receiver IP to scan directly (repeatable)")
         p.add_argument("--timeout", type=float, default=5, help="scan time in seconds")
+        # Also accepted after the command ("scan -v"); SUPPRESS keeps a -v given before it.
+        p.add_argument("-v", "--verbose", action="store_true", default=argparse.SUPPRESS,
+                       help="debug logging, and what each receiver advertises")
         return p
 
     common(sub.add_parser("scan", help="list AirPlay receivers"))
