@@ -118,3 +118,9 @@ def open_folder(path: str) -> None:
         os.startfile(path)  # type: ignore[attr-defined]  # pylint: disable=no-member
     else:
         subprocess.Popen(["xdg-open", path])  # pylint: disable=consider-using-with
+
+
+def open_device_manager() -> None:
+    """Device Manager, where a disabled virtual display adapter is turned back on. Through the
+    shell, so Windows can offer the elevation that enabling a device needs."""
+    os.startfile("devmgmt.msc")  # type: ignore[attr-defined]  # pylint: disable=no-member

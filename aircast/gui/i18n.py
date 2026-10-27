@@ -23,6 +23,15 @@ _STRINGS: dict[str, dict[str, str]] = {
     "primary": {"en": " (main)", "es": " (principal)"},
     "window_menu": {"en": "A single window", "es": "Una sola ventana"},
     "no_windows": {"en": "No windows found", "es": "No hay ventanas"},
+    "extend_screen": {"en": "Extend screen (virtual display)", "es": "Extender pantalla (pantalla virtual)"},
+    "extend_size": {"en": "Extended screen size", "es": "Tamaño de la pantalla extendida"},
+    "extend_hint": {
+        "en": "The TV becomes a second screen: drag windows onto it. Needs a free driver from Parsec, "
+              "installed the first time.",
+        "es": "La TV pasa a ser una segunda pantalla: arrastra ventanas hacia ella. Usa un controlador "
+              "gratuito de Parsec que se instala la primera vez.",
+    },
+    "vdd_remove": {"en": "Remove the virtual display driver", "es": "Quitar el controlador de pantalla virtual"},
     "audio": {"en": "Include computer sound", "es": "Incluir el sonido del equipo"},
     "cursor": {"en": "Show mouse pointer", "es": "Mostrar el puntero del mouse"},
     "quality_menu": {"en": "Quality", "es": "Calidad"},
@@ -90,6 +99,105 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "scan_failed": {"en": "Search failed: {error}", "es": "La búsqueda falló: {error}"},
     "ffmpeg_missing": {"en": "FFmpeg problem", "es": "Problema con FFmpeg"},
+    # Extend screen: virtual display driver
+    "vdd_install_title": {"en": "Install the virtual screen", "es": "Instalar la pantalla virtual"},
+    "vdd_install_text": {
+        "en": "To extend your desktop to the TV, AirCast uses the free \"Parsec Virtual Display Driver\" "
+              "from Parsec (Unity). AirCast will download it from parsec.app (about 500 KB) and Windows "
+              "will ask for your permission once. The virtual screen only exists while you cast. By "
+              "installing it you accept Parsec's terms.",
+        "es": "Para extender tu escritorio a la TV, AirCast usa el controlador gratuito \"Parsec Virtual "
+              "Display Driver\" de Parsec (Unity). AirCast lo descargará de parsec.app (unos 500 KB) y "
+              "Windows te pedirá permiso una vez. La pantalla virtual solo existe mientras transmites. "
+              "Al instalarlo aceptas los términos de Parsec.",
+    },
+    "vdd_terms": {"en": "Parsec's terms", "es": "Términos de Parsec"},
+    "vdd_install": {"en": "Install", "es": "Instalar"},
+    "vdd_not_now": {"en": "Not now", "es": "Ahora no"},
+    "vdd_reinstall": {"en": "Reinstall", "es": "Reinstalar"},
+    "vdd_open_devmgmt": {"en": "Open Device Manager", "es": "Abrir Administrador de dispositivos"},
+    "vdd_downloading": {"en": "Downloading the driver… {pct}%", "es": "Descargando el controlador… {pct}%"},
+    "vdd_asking": {
+        "en": "Windows will ask for permission to install the driver…",
+        "es": "Windows te pedirá permiso para instalar el controlador…",
+    },
+    "vdd_installing": {"en": "Installing the driver…", "es": "Instalando el controlador…"},
+    "vdd_finishing": {"en": "Waiting for the driver to start…", "es": "Esperando a que arranque el controlador…"},
+    "vdd_ready": {"en": "Virtual screen ready", "es": "Pantalla virtual lista"},
+    "vdd_ready_hint": {
+        "en": "Start casting and the TV becomes a second screen.",
+        "es": "Empieza a transmitir y la TV será una segunda pantalla.",
+    },
+    "vdd_uac_cancelled": {
+        "en": "Not installed: the Windows permission was cancelled.",
+        "es": "No se instaló: se canceló el permiso de Windows.",
+    },
+    "vdd_restart_to_finish": {
+        "en": "Restart Windows to finish the installation.",
+        "es": "Reinicia Windows para terminar la instalación.",
+    },
+    "vdd_enable_hint": {
+        "en": "Turn it on in Device Manager → Display adapters → Parsec Virtual Display Adapter → Enable.",
+        "es": "Actívala en Administrador de dispositivos → Adaptadores de pantalla → Parsec Virtual Display "
+              "Adapter → Habilitar.",
+    },
+    "vdd_no_answer": {
+        "en": "The driver did not respond. Restart Windows or reinstall it.",
+        "es": "El controlador no respondió. Reinicia Windows o reinstálalo.",
+    },
+    "vdd_download_failed": {
+        "en": "Could not download the driver.\n\n{error}",
+        "es": "No se pudo descargar el controlador.\n\n{error}",
+    },
+    "vdd_install_failed": {"en": "Could not install the driver", "es": "No se pudo instalar el controlador"},
+    "vdd_winget": {"en": "Install with winget", "es": "Instalar con winget"},
+    "vdd_manual": {"en": "Download manually", "es": "Descargar manualmente"},
+    "vdd_choose_again": {
+        "en": "When the installation finishes, choose Extend screen again.",
+        "es": "Cuando termine la instalación, vuelve a elegir Extender pantalla.",
+    },
+    "vdd_winget_missing": {
+        "en": "winget is not available on this PC. Use Download manually instead.",
+        "es": "winget no está disponible en este equipo. Usa Descargar manualmente.",
+    },
+    "vdd_remove_hint": {
+        "en": "Look for \"Parsec Virtual Display Driver\" in the list and choose Uninstall.",
+        "es": "Busca \"Parsec Virtual Display Driver\" en la lista y elige Desinstalar.",
+    },
+    "vdd_st_missing": {
+        "en": "The virtual screen driver is not installed.",
+        "es": "El controlador de pantalla virtual no está instalado.",
+    },
+    "vdd_st_disabled": {
+        "en": "The virtual screen is turned off in Windows.",
+        "es": "La pantalla virtual está desactivada en Windows.",
+    },
+    "vdd_st_restart": {
+        "en": "Restart Windows to use the virtual screen.",
+        "es": "Reinicia Windows para usar la pantalla virtual.",
+    },
+    "vdd_st_broken": {
+        "en": "The virtual screen driver is not responding.",
+        "es": "El controlador de pantalla virtual no responde.",
+    },
+    "vdd_add_failed": {
+        "en": "Windows did not allow another virtual screen.",
+        "es": "Windows no permitió crear otra pantalla virtual.",
+    },
+    "vdd_not_attached": {
+        "en": "Windows did not turn on the virtual screen. Press Win+P, choose \"Extend\" and try again.",
+        "es": "Windows no activó la pantalla virtual. Pulsa Win+P, elige \"Extender\" y vuelve a intentarlo.",
+    },
+    "vdd_lost": {
+        "en": "The virtual screen closed (for example, when the PC went to sleep). Start casting again.",
+        "es": "La pantalla virtual se cerró (por ejemplo, al suspender el equipo). Vuelve a iniciar la "
+              "transmisión.",
+    },
+    "extend_tip": {
+        "en": "Drag windows past the right edge of your screen to see them on the TV.",
+        "es": "Arrastra ventanas hacia la derecha de tu pantalla para verlas en la TV.",
+    },
+    "close": {"en": "Close", "es": "Cerrar"},
     # Device status
     "st_paired": {"en": "Paired", "es": "Emparejado"},
     "st_ready": {"en": "Ready", "es": "Listo"},
@@ -112,6 +220,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     # Cast states
     "state_idle": {"en": "Idle", "es": "Inactivo"},
     "state_starting": {"en": "Starting the encoder", "es": "Iniciando el codificador"},
+    "state_extending": {"en": "Creating the virtual screen", "es": "Creando la pantalla virtual"},
     "state_buffering": {"en": "Preparing video", "es": "Preparando el video"},
     "state_connecting": {"en": "Connecting to the TV", "es": "Conectando con la TV"},
     "state_casting": {"en": "Casting", "es": "Transmitiendo"},

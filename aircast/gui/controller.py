@@ -19,10 +19,11 @@ from typing import Any, Callable, Coroutine, Optional
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import QApplication, QInputDialog, QLineEdit, QMessageBox, QWidget
 
-from .. import airplay_patch, ffmpeg
+from .. import airplay_patch, ffmpeg, vdisplay
 from ..config import Settings, app_data_dir
 from ..devices import Device, DeviceManager
 from ..session import CastSession, State
+from .extend import ExtendScreenSetup, error_text
 from .i18n import state_text, tr
 
 _LOGGER = logging.getLogger(__name__)
@@ -139,6 +140,8 @@ class Controller(QObject):
         self.cast_message = ""
         self.casting_to = ""
         self.pairing = False
+        self.vdd_status: Optional[vdisplay.DriverStatus] = None  # last known, for the menu
+        self.extend = ExtendScreenSetup(self)
         # The main window sets this so dialogs are parented to it while it is open.
         self.dialog_parent: Callable[[], Optional[QWidget]] = lambda: None
 
@@ -198,6 +201,21 @@ class Controller(QObject):
             _LOGGER.warning("Could not save settings: %s", ex)
         self.settings_changed.emit()
 
+    def run_blocking(
+        self,
+        fn: Callable[..., Any],
+        *args: Any,
+        on_ok: Callable[[Any], None] | None = None,
+        on_err: Callable[[BaseException], None] | None = None,
+    ) -> concurrent.futures.Future:
+        """Run a blocking call (Win32, disk, network) on the background loop's executor, so the
+        menu never freezes; on_ok / on_err run on the Qt thread."""
+
+        async def call():
+            return await asyncio.get_running_loop().run_in_executor(None, fn, *args)
+
+        return self.runner.submit(call(), on_ok, on_err)
+
     # -- startup -----------------------------------------------------------
 
     def detect_capabilities(self) -> None:
@@ -229,6 +247,22 @@ class Controller(QObject):
                 self.notify.emit(tr("ffmpeg_missing"), str(exc), True)
 
         self.runner.submit(probe_async(), done, failed)
+
+    def check_virtual_screen(self) -> None:
+        """Remove a virtual screen an AirCast that crashed left behind, and learn whether the
+        driver is installed (the menu offers to remove it only then)."""
+        if not vdisplay.available():
+            return
+
+        def check() -> vdisplay.DriverStatus:
+            vdisplay.recover_stale()
+            return vdisplay.backend().status()
+
+        def done(status: vdisplay.DriverStatus) -> None:
+            self.vdd_status = status
+            _LOGGER.debug("Virtual screen driver: %s", status.value)
+
+        self.run_blocking(check, on_ok=done, on_err=lambda exc: _LOGGER.debug("Virtual screen check failed: %s", exc))
 
     def refresh_encoders_if_stale(self, max_age: float = 120) -> None:
         """Re-test GPU encoders that failed earlier (busy at logon, driver update...).
@@ -295,7 +329,7 @@ class Controller(QObject):
         return self.dialog_parent()
 
     @staticmethod
-    def _bring_to_front(dialog: QWidget) -> None:
+    def bring_to_front(dialog: QWidget) -> None:
         # Modality must be set before the first show(); exec() cannot change it afterwards.
         dialog.setWindowModality(Qt.ApplicationModal)
         dialog.setWindowFlag(Qt.WindowStaysOnTopHint, True)
@@ -308,7 +342,7 @@ class Controller(QObject):
         dialog.setWindowTitle(title)
         dialog.setLabelText(label)
         dialog.setTextEchoMode(QLineEdit.Password if password else QLineEdit.Normal)
-        self._bring_to_front(dialog)
+        self.bring_to_front(dialog)
         ok = dialog.exec()
         return dialog.textValue().strip() if ok else None
 
@@ -324,7 +358,7 @@ class Controller(QObject):
                 else:
                     box = QMessageBox(QMessageBox.Information, tr("pair_title", device=device.name),
                                       tr("pair_show_pin", pin=our_pin), parent=self._parent())
-                    self._bring_to_front(box)
+                    self.bring_to_front(box)
                     box.exec()
                     value = our_pin
                 self.runner.loop.call_soon_threadsafe(fut.set_result, value)
@@ -336,7 +370,7 @@ class Controller(QObject):
 
     def show_error(self, title: str, message: str) -> None:
         box = QMessageBox(QMessageBox.Warning, title, message, parent=self._parent())
-        self._bring_to_front(box)
+        self.bring_to_front(box)
         box.exec()
 
     # -- pairing -----------------------------------------------------------
@@ -399,6 +433,14 @@ class Controller(QObject):
         else:
             self.start_cast()
 
+    @property
+    def virtual_device(self) -> str:
+        """\\\\.\\DISPLAYn of the virtual screen the current cast added, if any."""
+        return self.session.virtual_device if self.session else ""
+
+    def choose_extend_screen(self, *_args) -> None:
+        self.extend.choose()
+
     def start_cast(self, *_args) -> None:
         device = self.selected_device
         if self.is_active or device is None or not device.can_cast_video:
@@ -408,11 +450,13 @@ class Controller(QObject):
             return
 
         def on_status(state: State, message: str) -> None:
+            if state == State.FAILED and session.error is not None:
+                message = error_text(session.error)
             self.bridge.call(lambda: self._on_cast_state(state, message, device))
 
         self.casting_to = device.name
         self.cast_state, self.cast_message = State.STARTING, ""
-        self.session = CastSession(self.manager, device, self.settings, on_status)
+        self.session = session = CastSession(self.manager, device, self.settings, on_status)
 
         def finished(_=None):
             self.session_future = None
@@ -422,8 +466,12 @@ class Controller(QObject):
 
         def failed(exc):
             finished()
-            if not isinstance(exc, concurrent.futures.CancelledError):
-                self.notify.emit(tr("cast_failed"), str(exc), True)
+            if isinstance(exc, concurrent.futures.CancelledError):
+                return
+            if isinstance(exc, vdisplay.VddError) and exc.status is not None:
+                self.extend.handle_status(exc.status)  # driver missing or broken: offer the fix
+            else:
+                self.notify.emit(tr("cast_failed"), error_text(exc), True)
 
         self.session_future = self.runner.submit(self.session.run(), finished, failed)
         self.activity_changed.emit()
@@ -433,7 +481,11 @@ class Controller(QObject):
         self.cast_message = message
         self.cast_state_changed.emit(state, message)
         if state == State.CASTING:
-            self.notify.emit(tr("cast_started", device=device.name), "", False)
+            tip = ""
+            if self.virtual_device and not self.settings.extend_tip_shown:
+                tip = tr("extend_tip")  # once: where the new screen is
+                self.update_settings(extend_tip_shown=True)
+            self.notify.emit(tr("cast_started", device=device.name), tip, False)
         elif state == State.STOPPED:
             self.notify.emit(tr("cast_stopped"), "", False)
 

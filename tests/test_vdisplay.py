@@ -76,6 +76,24 @@ def test_every_string_has_english_and_spanish():
         assert entry.get("en") and entry.get("es"), key
 
 
+def test_every_problem_has_english_and_spanish_text():
+    pytest.importorskip("PySide6.QtWidgets")  # aircast.gui.extend shows Qt dialogs
+    from aircast.gui import extend, i18n
+
+    for status in DriverStatus:
+        if status is not DriverStatus.OK:
+            assert extend.STATUS_KEYS[status] in i18n._STRINGS  # pylint: disable=protected-access
+    for key in list(extend.STATUS_KEYS.values()) + list(extend._ERROR_KEYS.values()):  # pylint: disable=protected-access
+        assert key in i18n._STRINGS  # pylint: disable=protected-access
+    i18n.set_language("es")
+    try:
+        assert extend.error_text(VddError("lost")).startswith("La pantalla virtual se cerró")
+        assert extend.error_text(VddError("driver:restart_required")) == i18n.tr("vdd_st_restart")
+        assert extend.error_text(RuntimeError("other")) == "other"
+    finally:
+        i18n.set_language("en")
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="checks the non-Windows path")
 def test_driver_calls_fail_cleanly_off_windows():
     assert not vdisplay.available()

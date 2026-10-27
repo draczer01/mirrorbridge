@@ -59,6 +59,7 @@ class AirCastApp:
             open_window = True
 
         self.controller.detect_capabilities()
+        self.controller.check_virtual_screen()
         self.controller.refresh_devices()
         if open_window:
             self.open_window()

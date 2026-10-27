@@ -47,6 +47,7 @@ def apply_dark_theme(app: QApplication) -> None:
         QPalette.ButtonText: text, QPalette.Highlight: QColor(ACCENT),
         QPalette.HighlightedText: QColor("white"), QPalette.ToolTipBase: alt,
         QPalette.ToolTipText: text, QPalette.PlaceholderText: QColor(140, 140, 150),
+        QPalette.Link: QColor(100, 170, 255),  # readable on the dark background (Parsec's terms)
     }.items():
         pal.setColor(role, color)
     pal.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(110, 110, 115))

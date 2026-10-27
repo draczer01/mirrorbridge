@@ -13,9 +13,10 @@ from PySide6.QtWidgets import (
     QSlider, QSplitter, QStyle, QVBoxLayout, QWidget,
 )
 
-from .. import ffmpeg
+from .. import ffmpeg, vdisplay
 from ..session import State
 from .controller import Controller
+from .extend import EXTEND_SIZES, size_label
 from .i18n import state_text, tr
 from .theme import app_icon
 from .tray import LATENCIES, RESOLUTIONS, display_label
@@ -94,8 +95,16 @@ class MainWindow(QMainWindow):
         wrow = QHBoxLayout()
         wrow.addWidget(self.window_combo, 1)
         wrow.addWidget(refresh_win)
+        self.rb_extend = QRadioButton(tr("extend_screen"))
+        self.rb_extend.setToolTip(tr("extend_hint"))
+        self.rb_extend.setEnabled(vdisplay.available())
+        self.extend_combo = QComboBox()
+        self.extend_combo.setToolTip(tr("extend_size"))
+        for _name, mode in EXTEND_SIZES:
+            self.extend_combo.addItem(size_label(mode), mode)
         sf.addRow(self.rb_display, self.monitor_combo)
         sf.addRow(self.rb_window, wrow)
+        sf.addRow(self.rb_extend, self.extend_combo)
         self.audio_cb = QCheckBox(tr("audio"))
         self.cursor_cb = QCheckBox(tr("cursor"))
         sf.addRow(self.audio_cb)
@@ -159,6 +168,8 @@ class MainWindow(QMainWindow):
 
         # Every control writes straight to the shared settings, so the tray menu agrees.
         self.rb_display.toggled.connect(self._source_changed)
+        self.rb_extend.toggled.connect(self._source_changed)
+        self.extend_combo.currentIndexChanged.connect(lambda _i: self._save(extend_mode=self.extend_combo.currentData()))
         self.monitor_combo.currentIndexChanged.connect(self._source_changed)
         self.window_combo.activated.connect(self._source_changed)
         self.window_combo.lineEdit().editingFinished.connect(self._source_changed)
@@ -201,17 +212,20 @@ class MainWindow(QMainWindow):
         if self._loading:
             return
         window_mode = self.rb_window.isChecked()
-        self.monitor_combo.setEnabled(not window_mode)
+        self.monitor_combo.setEnabled(self.rb_display.isChecked())
         self.window_combo.setEnabled(window_mode)
-        if window_mode:
+        if self.rb_extend.isChecked():
+            if not self.c.settings.extend_screen:
+                self.c.choose_extend_screen()  # checks (or installs) the driver, then saves the choice
+        elif window_mode:
             title = self.window_combo.currentText().strip()
             if not title and self.window_combo.count():
                 self.window_combo.setCurrentIndex(0)
                 title = self.window_combo.currentText().strip()
             if title:  # with no window picked yet, keep the radio on and wait for one
-                self._save(window_title=title)
+                self._save(window_title=title, extend_screen=False)
         else:
-            self._save(window_title="", monitor_index=int(self.monitor_combo.currentData() or 0))
+            self._save(window_title="", monitor_index=int(self.monitor_combo.currentData() or 0), extend_screen=False)
 
     def _fill_monitors(self) -> None:
         self.monitor_combo.clear()
@@ -233,10 +247,11 @@ class MainWindow(QMainWindow):
             if self.monitor_combo.count() == 0:
                 self._fill_monitors()
                 self._fill_windows()
-            (self.rb_window if s.window_title else self.rb_display).setChecked(True)
+            (self.rb_extend if s.extend_screen else self.rb_window if s.window_title else self.rb_display).setChecked(True)
             if s.window_title:
                 self.window_combo.setCurrentText(s.window_title)
             self.monitor_combo.setCurrentIndex(max(0, self.monitor_combo.findData(s.monitor_index)))
+            self.extend_combo.setCurrentIndex(max(0, self.extend_combo.findData(s.extend_mode)))
             self.audio_cb.setChecked(s.capture_audio)
             self.cursor_cb.setChecked(s.show_cursor)
             self.res_combo.setCurrentIndex(max(0, self.res_combo.findData(s.output_height)))
@@ -245,8 +260,8 @@ class MainWindow(QMainWindow):
             self.bitrate_label.setText(f"{self.bitrate.value()} Mbps")
             self.latency_combo.setCurrentIndex(max(0, self.latency_combo.findData(s.latency_mode)))
             self.encoder_combo.setCurrentIndex(max(0, self.encoder_combo.findData(s.encoder)))
-            self.monitor_combo.setEnabled(not s.window_title)
-            self.window_combo.setEnabled(bool(s.window_title))
+            self.monitor_combo.setEnabled(not s.window_title and not s.extend_screen)
+            self.window_combo.setEnabled(bool(s.window_title) and not s.extend_screen)
 
     def _render_encoders(self, encoders) -> None:
         with self._filling():

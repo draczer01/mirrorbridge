@@ -10,10 +10,11 @@ from PySide6.QtCore import QObject
 from PySide6.QtGui import QAction, QActionGroup, QCursor, QFont
 from PySide6.QtWidgets import QFileDialog, QMenu, QSystemTrayIcon
 
-from .. import ffmpeg
+from .. import ffmpeg, vdisplay
 from ..config import app_data_dir
 from . import winintegration
 from .controller import Controller
+from .extend import EXTEND_SIZES, size_label, size_name
 from .i18n import tr
 from .theme import app_icon
 
@@ -142,6 +143,9 @@ class TrayMenu(QObject):
                      checked=winintegration.autostart_enabled())
         self._action(more, tr("desktop_shortcut"), self._create_shortcut)
         self._action(more, tr("log_folder"), lambda: winintegration.open_folder(str(app_data_dir())))
+        if vdisplay.available():
+            installed = c.vdd_status not in (None, vdisplay.DriverStatus.NOT_INSTALLED)
+            self._action(more, tr("vdd_remove"), c.extend.remove_driver, enabled=installed and not c.is_active)
         menu.addSeparator()
         self._action(menu, tr("quit"), lambda: self.quit_app())
 
@@ -170,9 +174,21 @@ class TrayMenu(QObject):
         c, s = self.c, self.c.settings
         group = QActionGroup(sub)
         for mon in ffmpeg.list_monitors():
+            if c.virtual_device and mon.device == c.virtual_device:
+                continue  # the virtual screen this cast added; it is gone once the cast ends
             self._action(sub, display_label(mon),
-                         (lambda _=False, i=mon.index: c.update_settings(monitor_index=i, window_title="")),
-                         checkable=True, checked=not s.window_title and s.monitor_index == mon.index, group=group)
+                         (lambda _=False, i=mon.index: c.update_settings(monitor_index=i, window_title="",
+                                                                         extend_screen=False)),
+                         checkable=True, checked=not s.extend_screen and not s.window_title and s.monitor_index == mon.index,
+                         group=group)
+        # Checks the driver (and offers to install it) before it is really selected.
+        self._action(sub, tr("extend_screen"), c.choose_extend_screen, checkable=True, checked=s.extend_screen,
+                     group=group, enabled=vdisplay.available() and not c.extend.busy)
+        sizes = self._submenu(sub, f"{tr('extend_size')}: {size_name(s.extend_mode)}")
+        sgroup = QActionGroup(sizes)
+        for _name, mode in EXTEND_SIZES:
+            self._action(sizes, size_label(mode), (lambda _=False, m=mode: c.update_settings(extend_mode=m)),
+                         checkable=True, checked=s.extend_mode == mode, group=sgroup)
         windows = self._submenu(sub, tr("window_menu") + (": " + s.window_title[:40].replace("&", "&&") if s.window_title else ""))
         titles = [t for t in ffmpeg.list_windows() if not t.startswith("AirCast")]
         if not titles:
@@ -180,8 +196,8 @@ class TrayMenu(QObject):
         wgroup = QActionGroup(windows)
         for title in titles[:40]:
             text = (title if len(title) <= 60 else title[:57] + "…").replace("&", "&&")  # & = mnemonic
-            self._action(windows, text, (lambda _=False, t=title: c.update_settings(window_title=t)),
-                         checkable=True, checked=s.window_title == title, group=wgroup)
+            self._action(windows, text, (lambda _=False, t=title: c.update_settings(window_title=t, extend_screen=False)),
+                         checkable=True, checked=not s.extend_screen and s.window_title == title, group=wgroup)
         if titles:
             windows.addSeparator()
             self._action(windows, tr("window_moved_hint"), enabled=False)
