@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aircast"
+version = "0.2.0"
+description = "Cast your Windows screen and audio to Apple TV / AirPlay receivers"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "pyatv>=0.16,<0.19",
+    "srptools>=1.0,<2",  # srptools 2.0 breaks pyatv PIN pairing (keyword-only arg)
+    "aiohttp>=3.9",
+    "mss>=9",
+    "numpy>=1.26",
+    "soundcard>=0.4.3; sys_platform == 'win32'",
+    "PySide6-Essentials>=6.6",
+    "imageio-ffmpeg>=0.6; sys_platform == 'win32'",  # FFmpeg 7.1 with ddagrab and GPU encoders
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+build = ["pyinstaller>=6", "imageio-ffmpeg>=0.6"]
+
+[project.scripts]
+aircast = "aircast.cli:main"
+
+[project.gui-scripts]
+aircast-gui = "aircast.gui.app:run_gui"
+
+[tool.setuptools.packages.find]
+include = ["aircast*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
