@@ -17,6 +17,7 @@ language (Spanish or English). There is also a command line.
 | PIN pairing (Apple TV shows a 4-digit code, you type it in), saved for next time | Works |
 | AirPlay password-protected receivers | Works |
 | Cast a display or a single window, with system audio | Works, with a 3 to 7 second delay (see below) |
+| Extend screen: the TV as a second monitor | Works, with a free driver from Parsec installed the first time |
 | Hardware encoding: NVIDIA NVENC, Intel Quick Sync, AMD AMF, Media Foundation, x264 fallback | Auto-detected |
 | Play a local video file on the TV | Works |
 | Real-time screen mirroring like a Mac or iPhone (under 0.5 s delay) | Not possible yet, see below |
@@ -64,6 +65,30 @@ AirCast captures the rectangle the window occupies on screen when the cast start
 not black). Anything you drag over it is cast too, and if you move the window, stop and
 start the cast again. Minimized windows cannot be cast.
 
+### Extend screen (the TV as a second screen)
+
+Choose **What to cast** > **Extend screen (virtual display)**. While you cast, Windows has
+one more monitor that only the TV shows, so the TV works as a second screen: drag windows
+past the right edge of your screen to move them onto it. The screen disappears when the
+cast stops. **Extended screen size** picks 1080p (the default), 720p (bigger text and a
+lighter stream, like AirParrot's "force 720p") or 4K (sent at 20 Mbps or more). The TV gets
+exactly that size, so the Resolution setting does not apply in this mode.
+
+Windows cannot add a monitor by itself, so AirCast uses the free **Parsec Virtual Display
+Driver**, a Microsoft-signed driver from Parsec (now part of Unity). AirCast does not
+include it. The first time, AirCast asks before doing anything; if you agree, it downloads
+Parsec's official installer from parsec.app (about 500 KB), checks that it is exactly the
+expected file (SHA-256), and runs it. Windows asks for permission once; AirCast itself never
+runs as administrator. By installing the driver you accept
+[Parsec's terms](https://parsec.app/terms). If the download is blocked, the same dialog
+offers `winget install -e --id Parsec.ParsecVDD` or a manual download.
+
+To remove the driver, choose *More options* > *Remove the virtual display driver*. It opens
+Settings > Apps, where you uninstall **Parsec Virtual Display Driver**.
+
+If AirCast crashes or is ended from Task Manager, the driver removes the screen by itself
+about a second later. Sleep also removes it; start the cast again after waking the PC.
+
 ### Running from source
 
 ```powershell
@@ -87,6 +112,10 @@ AirCast.exe cast -d "Living Room"         # cast the main display with audio
 AirCast.exe cast --monitor 2 --fps 60 --bitrate 15000 --latency smooth
 AirCast.exe cast --window "PowerPoint"    # cast a single window
 AirCast.exe cast --file movie.mp4         # play a video file on the TV
+AirCast.exe cast --extend                 # the TV as a second screen (a new virtual monitor)
+AirCast.exe cast --extend --extend-mode 4k   # ... at 4K (1080p, 720p or 4k)
+AirCast.exe vdd status                    # is the virtual display driver installed and working?
+AirCast.exe vdd install                   # download and install it (asks first; one UAC prompt)
 AirCast.exe forget -d "Living Room"       # remove the saved pairing
 ```
 
@@ -113,16 +142,21 @@ pyatv: mDNS discovery → PIN pair-setup → pair-verify → AirPlay /play (URL 
 | `aircast/hls_server.py` | Serves only the playlist and segments, with no caching |
 | `aircast/session.py` | Runs a cast from start to stop, watches every part, and cleans up |
 | `aircast/airplay_patch.py` | Keeps pyatv's playback session open for an endless live stream |
-| `aircast/winmonitors.py` | Displays at their real resolution, window rectangles, and a job object that ends FFmpeg with AirCast |
+| `aircast/winmonitors.py` | Displays at their real resolution and GPU, window rectangles, and a job object that ends FFmpeg with AirCast |
+| `aircast/vdisplay.py` | Extend screen: adds and removes the virtual monitor through the Parsec driver, keeps it alive, installs the driver |
 | `aircast/gui/tray.py` | The tray icon and its menu, with every feature |
 | `aircast/gui/window.py` | The full window, opened from the menu's *Open* |
 | `aircast/gui/controller.py` | State shared by the menu and the window; runs pyatv on a background asyncio loop |
+| `aircast/gui/extend.py` | The Extend screen choice: driver check, consent and install dialogs |
 | `aircast/gui/app.py` | Single instance, startup and quit |
 | `aircast/cli.py` | Command line |
 
 Settings are saved in `%APPDATA%\AirCast\settings.json`, pairings in
 `%APPDATA%\AirCast\pairings.json`, and the log in `%APPDATA%\AirCast\aircast.log`
-(*More options* > *Open log folder*).
+(*More options* > *Open log folder*). While a virtual screen exists it is also noted in
+`%APPDATA%\AirCast\vdd_state.json`, so the next start can remove one a crash left behind
+(possible only when another program, such as the Parsec app, keeps the driver awake). The
+downloaded driver installer stays in `%LOCALAPPDATA%\AirCast\downloads`.
 
 ## Troubleshooting
 
@@ -143,6 +177,11 @@ Settings are saved in `%APPDATA%\AirCast\settings.json`, pairings in
 * **Black picture when casting a window**: pick *Entire display*, or make sure the window
   is not minimized. Protected video (Netflix in Edge, for example) is always black in any
   screen capture.
+* **Extend screen**: if Windows does not show the new screen, press Win+P and choose
+  *Extend*. If AirCast says the virtual screen is turned off, enable it in Device Manager >
+  Display adapters > Parsec Virtual Display Adapter. `AirCast.exe vdd status` shows the
+  driver's state. On laptops with two GPUs the screen may be drawn by the integrated GPU;
+  AirCast then captures it with GDI, which uses more CPU.
 * The full log is in `%APPDATA%\AirCast\aircast.log`; `AirCast.exe -v cast ...` adds
   debug detail.
 
@@ -161,7 +200,10 @@ a test source with audio over TCP, the HTTP server (including path-traversal att
 the playlist fix for sub-second segments), the live-stream keepalive, legacy and
 HomeKit-style (AirPlay 2) PIN pairing, wrong-PIN rejection, a full pair-and-cast run
 against the fake Apple TV, falling back from Desktop Duplication to GDI capture, and
-stopping while a cast is still starting.
+stopping while a cast is still starting. For Extend screen they cover the driver's IOCTL
+codes and payloads, finding its monitor, the mode fallback, the installer check, the
+clean-up after a crash, and the virtual screen being removed only after FFmpeg has stopped
+(on stop, failure and cancel), all with a fake driver, so no real monitor is ever created.
 
 ## Building AirCast.exe
 

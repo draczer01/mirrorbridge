@@ -16,7 +16,8 @@ trae FFmpeg adentro: no hay que instalar nada.
 4. En el menú: **Dispositivo** > elige tu TV, luego **Transmitir a ...**. La primera vez
    la TV muestra un PIN: escríbelo y queda emparejado para siempre.
 5. Todo lo demás también está en el menú:
-   * **Qué transmitir**: la pantalla, o una sola ventana, y si se ve el puntero.
+   * **Qué transmitir**: la pantalla, una sola ventana, o **Extender pantalla** (la TV
+     como segunda pantalla), y si se ve el puntero.
    * **Calidad**: resolución, cuadros por segundo, retardo, calidad del video y codificador.
    * **Incluir el sonido del equipo**.
    * **Reproducir un archivo de video** en la TV.
@@ -24,6 +25,27 @@ trae FFmpeg adentro: no hay que instalar nada.
      la carpeta de registros.
 6. **Abrir AirCast** muestra la ventana completa. Al cerrarla, AirCast sigue en la bandeja.
    **Salir** detiene la transmisión y cierra AirCast.
+
+## Extender pantalla (la TV como segunda pantalla)
+
+En el menú, **Qué transmitir** > **Extender pantalla (pantalla virtual)**. Mientras
+transmites, Windows tiene un monitor más que solo se ve en la TV: arrastra ventanas hacia
+la derecha de tu pantalla para llevarlas a la TV. Al detener la transmisión, esa pantalla
+desaparece. En **Tamaño de la pantalla extendida** eliges 1080p (el normal), 720p (letra
+más grande y menos datos) o 4K (se envía a 20 Mbps o más).
+
+Windows no puede crear un monitor por sí solo, así que AirCast usa el controlador gratuito
+**Parsec Virtual Display Driver** de Parsec (hoy parte de Unity), firmado por Microsoft.
+AirCast no lo incluye. La primera vez te pregunta antes de hacer nada; si aceptas, descarga
+el instalador oficial de parsec.app (unos 500 KB), comprueba que sea exactamente el archivo
+esperado y lo ejecuta. Windows te pide permiso una sola vez. Al instalarlo aceptas los
+[términos de Parsec](https://parsec.app/terms).
+
+Para quitarlo: *Más opciones* > *Quitar el controlador de pantalla virtual* abre
+Configuración > Aplicaciones; desinstala ahí **Parsec Virtual Display Driver**.
+
+Si AirCast se cierra de golpe, el controlador quita la pantalla solo, en un segundo. Al
+suspender el equipo también desaparece: vuelve a transmitir al despertarlo.
 
 ## Lo que hay que saber
 
@@ -47,5 +69,6 @@ En una ventana de PowerShell o cmd, en la carpeta del exe:
 ```
 
 Se abre una consola que muestra FFmpeg, los codificadores de tu tarjeta de video, si se
-puede capturar el sonido, las pantallas y las TVs encontradas. Una captura de esa
-ventana sirve mucho para encontrar problemas.
+puede capturar el sonido, las pantallas, si el controlador de pantalla virtual está listo
+y las TVs encontradas. Una captura de esa ventana sirve mucho para encontrar problemas.
+`.\AirCast.exe vdd status` muestra solo el estado del controlador de pantalla virtual.
