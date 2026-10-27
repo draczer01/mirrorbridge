@@ -16,7 +16,7 @@ language (Spanish or English). There is also a command line.
 | Discover Apple TVs / AirPlay receivers (mDNS, or by IP when mDNS is blocked) | Works |
 | PIN pairing (Apple TV shows a 4-digit code, you type it in), saved for next time | Works |
 | AirPlay password-protected receivers | Works |
-| Cast a display or a single window, with system audio | Works, with a 3 to 7 second delay (see below) |
+| Cast a display or a single window, with system audio | Works, with a 3 to 7 second delay on Apple TV, about 7 or more on other TVs (see below) |
 | Hardware encoding: NVIDIA NVENC, Intel Quick Sync, AMD AMF, Media Foundation, x264 fallback | Auto-detected |
 | Play a local video file on the TV | Works |
 | Real-time screen mirroring like a Mac or iPhone (under 0.5 s delay) | Not possible yet, see below |
@@ -39,6 +39,11 @@ buffers a few segments before it starts playing:
 * **Low**: about 3 seconds. Good for presentations, photos and documents.
 * **Balanced**: about 4 seconds.
 * **Smooth**: about 7 seconds. Best for watching video, and handles weak Wi-Fi.
+
+AirPlay TVs from other brands (LG, Samsung, TCL...) play the stream with their own
+video players, so AirCast sends them, and any receiver that does not say what it is,
+what Apple's rules for AirPlay 2 TVs ask for: 2-second segments and a 12-second playlist
+whatever the Delay setting. Expect about 7 seconds of delay or more on those TVs.
 
 It is not suited to gaming or anything where you interact with the mouse while you watch
 the TV.
@@ -82,6 +87,7 @@ or installed with winget, Chocolatey or Scoop.
 AirCast.exe doctor                        # check FFmpeg, GPU encoders, audio capture, and scan
 AirCast.exe scan                          # list receivers
 AirCast.exe scan --host 192.168.1.50      # scan one IP directly (when mDNS is blocked)
+AirCast.exe scan -v                       # also show what each receiver advertises
 AirCast.exe pair -d "Living Room"         # pair using the on-screen PIN
 AirCast.exe cast -d "Living Room"         # cast the main display with audio
 AirCast.exe cast --monitor 2 --fps 60 --bitrate 15000 --latency smooth
@@ -112,7 +118,7 @@ pyatv: mDNS discovery → PIN pair-setup → pair-verify → AirPlay /play (URL 
 | `aircast/audio.py` | Captures system audio with WASAPI loopback and sends it to FFmpeg |
 | `aircast/hls_server.py` | Serves only the playlist and segments, with no caching |
 | `aircast/session.py` | Runs a cast from start to stop, watches every part, and cleans up |
-| `aircast/airplay_patch.py` | Keeps pyatv's playback session open for an endless live stream |
+| `aircast/airplay_patch.py` | Keeps pyatv's playback session open for an endless live stream, and plays on TVs that skip Apple's optional requests |
 | `aircast/winmonitors.py` | Displays at their real resolution, window rectangles, and a job object that ends FFmpeg with AirCast |
 | `aircast/gui/tray.py` | The tray icon and its menu, with every feature |
 | `aircast/gui/window.py` | The full window, opened from the menu's *Open* |
@@ -135,7 +141,15 @@ Settings are saved in `%APPDATA%\AirCast\settings.json`, pairings in
   inbound TCP 7878) in Windows Firewall, and set the network profile to *Private*.
 * **Third-party AirPlay TVs** (LG, Samsung, Sony, Roku, Hisense, TCL...): many support
   AirPlay 2 video, but some only accept audio or photos from non-Apple senders. AirCast
-  marks those as "audio only" or "restricted" in the device list.
+  marks those as "audio only" or "restricted" in the device list. A TV that pairs but
+  refuses video sent from a URL gets an error listing what it answered to each request.
+* **"The TV downloaded the playlist but none of the video"**: the TV does not accept
+  the video format. On an Apple TV choose Smooth; on other TVs try a lower resolution or
+  30 frames per second.
+* **Reporting a TV that does not work**: run `AirCast.exe -v scan` and
+  `AirCast.exe -v cast -d "TV name"`, and send their output with `aircast.log`. They show
+  what the TV advertises, what it answered to each AirPlay request, and when (and with
+  which video player) it fetched the stream.
 * **Choppy video**: choose Smooth latency, lower the bitrate or resolution, or use 5 GHz
   Wi-Fi or Ethernet.
 * **No audio**: `aircast doctor` shows whether system audio capture works. Audio is taken
@@ -158,7 +172,11 @@ PYATV_SRC=/tmp/p/pyatv-0.18.0 pytest -q
 The tests cover command building for every encoder and capture mode (including window
 cropping and even-size rounding), a real FFmpeg run that produces H.264 and AAC HLS from
 a test source with audio over TCP, the HTTP server (including path-traversal attempts and
-the playlist fix for sub-second segments), the live-stream keepalive, legacy and
+the playlist fix for sub-second segments), the stream for TVs of other brands (master
+playlist with CODECS, PROGRAM-DATE-TIME), the live-stream keepalive, AirPlay 2 playback
+against mock receivers (PUT refused on every protocol, error replies without CSeq,
+/play answering 500, everything refused, and a byte-for-byte check that Apple TVs still
+get exactly pyatv's requests), when a cast gives up on a TV that never plays, legacy and
 HomeKit-style (AirPlay 2) PIN pairing, wrong-PIN rejection, a full pair-and-cast run
 against the fake Apple TV, falling back from Desktop Duplication to GDI capture, and
 stopping while a cast is still starting.

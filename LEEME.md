@@ -27,14 +27,18 @@ trae FFmpeg adentro: no hay que instalar nada.
 
 ## Lo que hay que saber
 
-* **Hay un retardo de 3 a 7 segundos.** El espejo en tiempo real que hace un Mac o un
-  iPhone usa un cifrado privado de Apple (FairPlay) que ningún programa libre puede
-  enviar. AirCast usa "AirPlay video", lo mismo que usa YouTube para mandar un video a la
-  TV. Sirve para presentaciones, fotos y videos, no para juegos.
+* **Hay un retardo de 3 a 7 segundos** con un Apple TV (unos 7 segundos o más con TVs
+  de otras marcas). El espejo en tiempo real que hace un Mac o un iPhone usa un cifrado
+  privado de Apple (FairPlay) que ningún programa libre puede enviar. AirCast usa
+  "AirPlay video", lo mismo que usa YouTube para mandar un video a la TV. Sirve para
+  presentaciones, fotos y videos, no para juegos.
 * **Una sola ventana**: se captura el lugar que ocupa la ventana al empezar. Si la mueves,
   detén y vuelve a transmitir. No puede estar minimizada.
 * **TVs que no son Apple** (LG, Samsung, Sony, Hisense, TCL...): muchas aceptan video por
-  AirPlay 2, pero algunas solo aceptan audio o fotos de equipos que no son Apple.
+  AirPlay 2, pero algunas solo aceptan audio o fotos de equipos que no son Apple. A estas
+  TVs AirCast les manda segmentos de 2 segundos, como pide Apple para TVs con AirPlay 2,
+  sin importar el ajuste de retardo. Si la TV rechaza el video, el mensaje dice qué
+  contestó a cada pedido de AirCast.
 * Si algo falla, el registro está en `%APPDATA%\AirCast\aircast.log` (menú *Más opciones*
   > *Abrir carpeta de registros*).
 

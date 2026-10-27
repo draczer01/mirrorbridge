@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -30,6 +31,22 @@ ENCODER_LABELS = {
 # Segment length (seconds) per latency mode. Apple TV buffers ~3 segments before
 # it starts playing, so this is the main latency knob.
 LATENCY_SEGMENT_SECONDS = {"low": 0.5, "balanced": 1.0, "smooth": 2.0}
+
+# AirPlay TVs from other brands (LG, Samsung, TCL...) play the stream with their own
+# HLS players, which are not known to cope with sub-second segments or a 3-second
+# playlist. They get what Apple's HLS rules for AirPlay 2 TVs ask for: segments of at
+# least 2 s, a playlist of at least 12 s whose segments stay on disk a while after
+# they leave it, PROGRAM-DATE-TIME, and a master playlist that declares CODECS,
+# BANDWIDTH and RESOLUTION. Apple TVs keep the stream they have always been sent.
+OTHER_TV_MIN_SEGMENT_SECONDS = 2.0
+OTHER_TV_WINDOW_SECONDS = 12
+MEDIA_PLAYLIST = "stream.m3u8"
+MASTER_PLAYLIST = "master.m3u8"
+
+
+def segment_seconds(settings: Settings, for_apple: bool = True) -> float:
+    seg = LATENCY_SEGMENT_SECONDS.get(settings.latency_mode, 1.0)
+    return seg if for_apple else max(seg, OTHER_TV_MIN_SEGMENT_SECONDS)
 
 _NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
 
@@ -359,15 +376,18 @@ def build_command(
     audio_port: int | None = None,
     audio_rate: int = 48000,
     audio_channels: int = 2,
+    for_apple: bool = True,
 ) -> list[str]:
     """Build the ffmpeg command: capture -> scale -> H.264 + AAC -> live HLS in out_dir.
 
     If audio_port is given, ffmpeg listens on 127.0.0.1:audio_port for raw float32 PCM
     (system audio captured by aircast.audio). Otherwise a silent track is added, since
     some Apple TV versions refuse to start an HLS stream without audio.
+    for_apple=False writes the stream for TVs of other brands (see OTHER_TV_*), with
+    MASTER_PLAYLIST next to the media playlist.
     """
     fps = settings.framerate
-    seg = LATENCY_SEGMENT_SECONDS.get(settings.latency_mode, 1.0)
+    seg = segment_seconds(settings, for_apple)
     gop = max(1, round(fps * seg))
 
     video_in, pre_filters = _video_input(backend, settings, monitor, region)
@@ -399,15 +419,24 @@ def build_command(
         "-af", "aresample=async=1000",
         "-map", "0:v:0", "-map", "1:a:0",
     ]
+    flags = "delete_segments+independent_segments+omit_endlist+temp_file"
+    cmd += ["-f", "hls", "-hls_time", str(seg)]
+    if for_apple:
+        cmd += ["-hls_list_size", "6", "-hls_flags", flags]
+    else:
+        size = max(6, math.ceil(OTHER_TV_WINDOW_SECONDS / seg))
+        cmd += [
+            "-hls_list_size", str(size),
+            "-hls_delete_threshold", str(size),
+            "-hls_flags", flags + "+program_date_time",
+            # FFmpeg takes CODECS from the encoder's SPS and the AAC config.
+            "-master_pl_name", MASTER_PLAYLIST,
+        ]
     cmd += [
-        "-f", "hls",
-        "-hls_time", str(seg),
-        "-hls_list_size", "6",
-        "-hls_flags", "delete_segments+independent_segments+omit_endlist+temp_file",
         "-hls_allow_cache", "0",
         "-hls_segment_type", "mpegts",
         "-hls_segment_filename", str(out_dir / "seg_%05d.ts"),
-        str(out_dir / "stream.m3u8"),
+        str(out_dir / MEDIA_PLAYLIST),
     ]
     return cmd
 

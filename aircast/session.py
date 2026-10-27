@@ -19,7 +19,7 @@ from typing import Callable, Optional
 from . import airplay_patch, audio, ffmpeg
 from .config import Settings
 from .devices import Device, DeviceManager
-from .hls_server import HlsServer
+from .hls_server import Activity, HlsServer
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,8 +37,19 @@ class State(enum.Enum):
 
 StatusCallback = Callable[[State, str], None]
 
-NO_REQUEST_TIMEOUT = 45  # seconds from /play until the TV must have fetched the playlist
+PLAYLIST_TIMEOUT = 20  # seconds from the TV accepting the video until it fetches the playlist
+SEGMENT_TIMEOUT = 15  # seconds from its first playlist until it fetches a video segment
+NO_REQUEST_TIMEOUT = 45  # seconds for the TV to answer and fetch anything at all
 IDLE_REQUEST_TIMEOUT = 20  # a playing TV refetches the live playlist every 0.5-2 s
+SUPERVISE_SECONDS = 0.5
+
+
+class StreamNotFetched(RuntimeError):
+    """The TV accepted the video but never downloaded the playlist."""
+
+
+class StreamRejected(RuntimeError):
+    """The TV downloaded the playlist but none of the video in it."""
 
 
 def local_ip_reaching(remote: str) -> str:
@@ -74,6 +85,7 @@ class CastSession:
         self.encoder = ""
         self.backend = ""
         self.stream_url = ""
+        self.for_apple = True  # Apple TVs get the stream they always had; see ffmpeg.OTHER_TV_*
         self._work_dir = work_dir
         self._own_work_dir = work_dir is None
         self._proc: subprocess.Popen | None = None
@@ -82,6 +94,7 @@ class CastSession:
         self._feeder: audio.LoopbackFeeder | None = None
         self._server: HlsServer | None = None
         self._atv = None
+        self._cast: airplay_patch.CastContext | None = None
         self._play_task: asyncio.Task | None = None
         self._stop_requested = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -109,13 +122,15 @@ class CastSession:
     def ffmpeg_errors(self) -> str:
         return "\n".join(list(self._stderr_tail)[-8:])
 
-    async def _wait_for_segments(self, playlist: Path, count: int = 3, timeout: float = 25) -> None:
+    async def _wait_for_segments(
+        self, playlist: Path, count: int = 3, timeout: float = 25, master: Path | None = None
+    ) -> None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         while loop.time() < deadline:
             if self._proc and self._proc.poll() is not None:
                 raise RuntimeError(f"FFmpeg exited (code {self._proc.returncode}):\n{self.ffmpeg_errors()}")
-            if playlist.exists():
+            if playlist.exists() and (master is None or master.exists()):
                 text = playlist.read_text(encoding="utf-8", errors="replace")
                 if text.count("#EXTINF") >= count:
                     return
@@ -173,6 +188,12 @@ class CastSession:
             # GDI window capture is black for GPU-drawn apps (browsers, players, games).
             monitor, region = ffmpeg.window_region(s.window_title, monitors)
             _LOGGER.info("Window %r is at %s on %s", s.window_title, region, monitor.label)
+        # Apple TVs keep today's stream; other brands, and receivers that do not say
+        # what they are, get the longer segments and master playlist of ffmpeg.OTHER_TV_*.
+        self.for_apple = self.device.is_apple is True
+        kind = {True: "an Apple TV", False: "a TV of another brand", None: "a receiver of unknown make"}
+        _LOGGER.info("Streaming for %s: %.1f s segments", kind[self.device.is_apple],
+                     ffmpeg.segment_seconds(s, self.for_apple))
         encoder = await loop.run_in_executor(None, ffmpeg.pick_encoder, ff, s.encoder)
         backend = await loop.run_in_executor(None, ffmpeg.pick_capture_backend, ff, s, monitor, region)
 
@@ -209,12 +230,24 @@ class CastSession:
             _LOGGER.warning("Port %s busy, using a random port", s.http_port)
             self._server = HlsServer(self._work_dir, host, 0)
             await self._server.start()
-        self.stream_url = self._server.playlist_url
+        if self.for_apple:
+            self.stream_url = self._server.url(ffmpeg.MEDIA_PLAYLIST)
+        else:
+            self.stream_url = self._server.url(ffmpeg.MASTER_PLAYLIST)
+            self._log_master_playlist()
 
         self._set(State.CONNECTING, self.device.name)
         airplay_patch.apply()
         self._atv = await self.manager.connect(self.device)
-        self._play_task = asyncio.ensure_future(self._atv.stream.play_url(self.stream_url))
+        self._cast = airplay_patch.CastContext(apple=self.device.is_apple, live=True)
+        self._play_task = asyncio.ensure_future(airplay_patch.play_url(self._atv, self.stream_url, self._cast))
+
+    def _log_master_playlist(self) -> None:
+        text = (self._work_dir / ffmpeg.MASTER_PLAYLIST).read_text(encoding="utf-8", errors="replace")
+        variant = next((line for line in text.splitlines() if line.startswith("#EXT-X-STREAM-INF")), "")
+        _LOGGER.info("Master playlist: %s", variant or "no variant")
+        if "CODECS=" not in variant:
+            _LOGGER.warning("FFmpeg declared no CODECS for %s; some TVs refuse such a stream", self.encoder)
 
     async def _launch_encoder(
         self, ff: str, monitor: "ffmpeg.Monitor | None", region: "ffmpeg.Region | None" = None
@@ -230,7 +263,7 @@ class CastSession:
 
         cmd = ffmpeg.build_command(
             ff, s, self._work_dir, encoder=self.encoder, backend=self.backend,
-            monitor=monitor, region=region, audio_port=audio_port,
+            monitor=monitor, region=region, audio_port=audio_port, for_apple=self.for_apple,
         )
         self._set(State.STARTING, f"{ffmpeg.ENCODER_LABELS.get(self.encoder, self.encoder)} via {self.backend}")
         self._stderr_tail.clear()
@@ -243,7 +276,8 @@ class CastSession:
             self._feeder.start()
 
         self._set(State.BUFFERING)
-        await self._wait_for_segments(self._work_dir / "stream.m3u8")
+        master = None if self.for_apple else self._work_dir / ffmpeg.MASTER_PLAYLIST
+        await self._wait_for_segments(self._work_dir / ffmpeg.MEDIA_PLAYLIST, master=master)
 
     async def _stop_encoder(self) -> None:
         if self._feeder:
@@ -268,13 +302,49 @@ class CastSession:
             self.encoder_returncode = proc.returncode
         self._proc = None
 
+    def _tv_activity(self) -> Activity:
+        """What the TV fetched. A TV on two networks at once may fetch from an address
+        other than its AirPlay one, so any client counts until the TV's own shows up."""
+        if self._server is None:
+            return Activity()
+        tv = self._server.activity(self.device.address)
+        return tv if tv.requests else self._server.activity()
+
+    def _check_startup(self, tv: Activity, now: float, started_at: float) -> None:
+        """Fail with the likely cause when the TV took the video but does not play it."""
+        accepted = self._cast.accepted_at if self._cast else None
+        if tv.first_playlist_at is None:
+            if accepted is not None and now - accepted > PLAYLIST_TIMEOUT:
+                port = self._server.port if self._server else self.settings.http_port
+                raise StreamNotFetched(
+                    f"The TV accepted the video but never downloaded it from {self.stream_url}. "
+                    f"Allow AirCast (or inbound TCP port {port}) in Windows Firewall on private "
+                    "networks, and check that the PC and the TV are on the same network."
+                )
+            if accepted is None and now - started_at > NO_REQUEST_TIMEOUT:
+                raise RuntimeError(
+                    f"The TV did not start the video within {NO_REQUEST_TIMEOUT} s and never asked for "
+                    f"it at {self.stream_url}. Allow AirCast in Windows Firewall on private networks, "
+                    "and check that the PC and the TV are on the same network."
+                )
+        elif tv.first_segment_at is None and now - tv.first_playlist_at > SEGMENT_TIMEOUT:
+            smooth = ffmpeg.LATENCY_SEGMENT_SECONDS["smooth"]
+            if ffmpeg.segment_seconds(self.settings, self.for_apple) < smooth:
+                hint = "Try Delay > Smooth."
+            else:
+                hint = "Try a lower resolution or 30 frames per second."
+            raise StreamRejected(
+                "The TV downloaded the playlist but none of the video, so it probably does not "
+                f"accept this video format. {hint}"
+            )
+
     async def _supervise(self) -> None:
         stop_wait = asyncio.ensure_future(self._stop_requested.wait())
         announced = False
         started_at = time.monotonic()
         try:
             while True:
-                done, _ = await asyncio.wait({self._play_task, stop_wait}, timeout=0.5)
+                done, _ = await asyncio.wait({self._play_task, stop_wait}, timeout=SUPERVISE_SECONDS)
                 if stop_wait in done:
                     self._set(State.STOPPING)
                     return
@@ -285,20 +355,19 @@ class CastSession:
                     return  # stopped from the TV
                 if self._proc and self._proc.poll() is not None:
                     raise RuntimeError(f"Encoder stopped unexpectedly:\n{self.ffmpeg_errors()}")
-                server = self._server
-                if not announced and server and server.requests >= 1:
-                    announced = True
-                    self._set(State.CASTING, f"{self.device.name} - {self.stream_url}")
                 # The TV's own video requests are the one signal every receiver gives,
                 # including those that do not report playback status over AirPlay.
+                tv = self._tv_activity()
                 now = time.monotonic()
-                if not announced and now - started_at > NO_REQUEST_TIMEOUT:
-                    raise RuntimeError(
-                        f"The TV accepted the cast but never asked for the video at {self.stream_url}. "
-                        "Allow AirCast in Windows Firewall on private networks, and check that the "
-                        "PC and the TV are on the same network."
-                    )
-                if announced and server and now - server.last_request_at > IDLE_REQUEST_TIMEOUT:
+                if not announced and tv.requests >= 1:
+                    announced = True
+                    accepted = self._cast.accepted_at if self._cast else None
+                    if accepted is not None and tv.first_playlist_at is not None:
+                        _LOGGER.info("The TV fetched the playlist %.1f s after accepting the video",
+                                     max(0.0, tv.first_playlist_at - accepted))
+                    self._set(State.CASTING, f"{self.device.name} - {self.stream_url}")
+                self._check_startup(tv, now, started_at)
+                if announced and now - tv.last_request_at > IDLE_REQUEST_TIMEOUT:
                     _LOGGER.info("The TV stopped requesting video; ending the cast")
                     return
         finally:

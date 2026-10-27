@@ -58,7 +58,11 @@ def recorded_keys():
         yield
 
 
-async def test_pair_with_pin_then_cast_screen(fake_atv, recorded_keys, tmp_path):
+@pytest.mark.parametrize("model, playlist", [
+    ({"model": "AppleTV3,2"}, "stream.m3u8"),  # Apple TVs: the same stream as always
+    ({"model": "55QM7L", "manufacturer": "TCL"}, "master.m3u8"),
+])
+async def test_pair_with_pin_then_cast_screen(fake_atv, recorded_keys, tmp_path, model, playlist):
     from pyatv.const import Protocol
     from pyatv.storage.memory_storage import MemoryStorage
     from tests.fake_device.airplay import DEVICE_PIN
@@ -72,7 +76,7 @@ async def test_pair_with_pin_then_cast_screen(fake_atv, recorded_keys, tmp_path)
     usecase.airplay_require_authentication()
 
     manager = DeviceManager(asyncio.get_running_loop(), storage=MemoryStorage())
-    device = _device(fake_atv)
+    device = _device(fake_atv, {"features": "0x1,0x0", **model})
 
     asked = []
 
@@ -95,7 +99,10 @@ async def test_pair_with_pin_then_cast_screen(fake_atv, recorded_keys, tmp_path)
     await asyncio.wait_for(session.run(), timeout=60)
 
     assert state.last_airplay_url == session.stream_url
+    assert session.stream_url.endswith("/" + playlist)
     assert state.last_airplay_content.startswith(b"#EXTM3U")  # the receiver fetched our playlist
+    if playlist == "master.m3u8":
+        assert b"CODECS=" in state.last_airplay_content
     assert State.CASTING in states and states[-1] == State.STOPPED
     assert session._proc is None and session.encoder_returncode is not None  # encoder shut down
 
