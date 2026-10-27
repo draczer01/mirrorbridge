@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import enum
 import logging
 import shutil
@@ -16,7 +17,7 @@ from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import airplay_patch, audio, ffmpeg
+from . import airplay_patch, audio, ffmpeg, vdisplay
 from .config import Settings
 from .devices import Device, DeviceManager
 from .hls_server import HlsServer
@@ -27,6 +28,7 @@ _LOGGER = logging.getLogger(__name__)
 class State(enum.Enum):
     IDLE = "Idle"
     STARTING = "Starting encoder"
+    EXTENDING = "Creating virtual screen"
     BUFFERING = "Buffering"
     CONNECTING = "Connecting to receiver"
     CASTING = "Casting"
@@ -39,6 +41,7 @@ StatusCallback = Callable[[State, str], None]
 
 NO_REQUEST_TIMEOUT = 45  # seconds from /play until the TV must have fetched the playlist
 IDLE_REQUEST_TIMEOUT = 20  # a playing TV refetches the live playlist every 0.5-2 s
+EXTEND_4K_MIN_KBPS = 20000  # a 4K desktop at the usual 8 Mbps is a smeary mess
 
 
 def local_ip_reaching(remote: str) -> str:
@@ -86,6 +89,10 @@ class CastSession:
         self._stop_requested = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._starting = False  # stop() may cancel outright only while starting up
+        self._xscreen: vdisplay.VirtualScreen | None = None
+        self._lost = False  # the virtual screen went away under the cast
+        self.virtual_device = ""  # \\.\DISPLAYn of the virtual screen while there is one
+        self.error: Exception | None = None  # why the cast failed
         self.finished = threading.Event()
 
     # -- helpers -----------------------------------------------------------
@@ -144,6 +151,7 @@ class CastSession:
             raise
         except Exception as ex:  # pylint: disable=broad-except
             _LOGGER.debug("Cast failed", exc_info=True)
+            self.error = ex
             self._set(State.FAILED, str(ex))
             raise
         finally:
@@ -165,14 +173,18 @@ class CastSession:
 
         ff = ffmpeg.find_ffmpeg(s.ffmpeg_path)
         _LOGGER.info("FFmpeg: %s", ff)
-        monitors = ffmpeg.list_monitors()
-        monitor = monitors[max(0, min(s.monitor_index, len(monitors) - 1))] if monitors else None
         region = None
-        if s.window_title and s.capture_backend != "test":
-            # Capture the window's rectangle of the screen rather than the window itself:
-            # GDI window capture is black for GPU-drawn apps (browsers, players, games).
-            monitor, region = ffmpeg.window_region(s.window_title, monitors)
-            _LOGGER.info("Window %r is at %s on %s", s.window_title, region, monitor.label)
+        if s.extend_screen and s.capture_backend != "test" and vdisplay.available():
+            monitor = await self._create_virtual_screen()
+            s = self.settings  # now without the display and window choices
+        else:
+            monitors = ffmpeg.list_monitors()
+            monitor = monitors[max(0, min(s.monitor_index, len(monitors) - 1))] if monitors else None
+            if s.window_title and s.capture_backend != "test":
+                # Capture the window's rectangle of the screen rather than the window itself:
+                # GDI window capture is black for GPU-drawn apps (browsers, players, games).
+                monitor, region = ffmpeg.window_region(s.window_title, monitors)
+                _LOGGER.info("Window %r is at %s on %s", s.window_title, region, monitor.label)
         encoder = await loop.run_in_executor(None, ffmpeg.pick_encoder, ff, s.encoder)
         backend = await loop.run_in_executor(None, ffmpeg.pick_capture_backend, ff, s, monitor, region)
 
@@ -192,6 +204,8 @@ class CastSession:
                 await self._launch_encoder(ff, monitor, region)
                 break
             except RuntimeError as ex:
+                if self._lost:
+                    raise vdisplay.VddError("lost") from ex
                 if number == len(attempts):
                     raise
                 _LOGGER.warning(
@@ -215,6 +229,41 @@ class CastSession:
         airplay_patch.apply()
         self._atv = await self.manager.connect(self.device)
         self._play_task = asyncio.ensure_future(self._atv.stream.play_url(self.stream_url))
+
+    async def _create_virtual_screen(self) -> "ffmpeg.Monitor":
+        """Add the virtual monitor Windows extends the desktop onto; return it as a display."""
+        loop = asyncio.get_running_loop()
+        s = self.settings
+        self._set(State.EXTENDING)
+
+        def lost() -> None:  # called from the driver's keep-alive thread
+            self._lost = True
+            try:
+                loop.call_soon_threadsafe(self._stop_requested.set)
+            except RuntimeError:  # the loop is already closed
+                pass
+
+        self._xscreen = vdisplay.backend()(on_lost=lost)
+        width, height, hz = vdisplay.EXTEND_MODES.get(s.extend_mode, vdisplay.EXTEND_MODES["1080p"])
+        name = await loop.run_in_executor(None, self._xscreen.start, width, height, hz)
+        self.virtual_device = name
+        for _ in range(10):  # the display list can lag a moment behind the driver
+            monitor = next((m for m in ffmpeg.list_monitors() if m.device.lower() == name.lower()), None)
+            if monitor is not None:
+                break
+            await asyncio.sleep(0.2)
+        else:
+            raise vdisplay.VddError("not_attached")
+        if monitor.dxgi_output is None:
+            _LOGGER.info("The virtual screen is drawn by another GPU (DXGI adapter %s)", monitor.dxgi_adapter)
+        # The virtual screen is already the size the TV should get, so send it as it is. The
+        # display and window choices do not apply to this cast.
+        changes: dict = {"window_title": "", "output_height": 0}
+        if monitor.height >= 2160:
+            changes["video_bitrate_kbps"] = max(s.video_bitrate_kbps, EXTEND_4K_MIN_KBPS)
+        self.settings = dataclasses.replace(s, **changes)
+        _LOGGER.info("Casting virtual screen %s: %dx%d", name, monitor.width, monitor.height)
+        return monitor
 
     async def _launch_encoder(
         self, ff: str, monitor: "ffmpeg.Monitor | None", region: "ffmpeg.Region | None" = None
@@ -276,6 +325,8 @@ class CastSession:
             while True:
                 done, _ = await asyncio.wait({self._play_task, stop_wait}, timeout=0.5)
                 if stop_wait in done:
+                    if self._lost:
+                        raise vdisplay.VddError("lost")
                     self._set(State.STOPPING)
                     return
                 if self._play_task in done:
@@ -284,6 +335,8 @@ class CastSession:
                         raise exc
                     return  # stopped from the TV
                 if self._proc and self._proc.poll() is not None:
+                    if self._xscreen and await self._screen_lost():
+                        raise vdisplay.VddError("lost")
                     raise RuntimeError(f"Encoder stopped unexpectedly:\n{self.ffmpeg_errors()}")
                 server = self._server
                 if not announced and server and server.requests >= 1:
@@ -304,6 +357,14 @@ class CastSession:
         finally:
             stop_wait.cancel()
 
+    async def _screen_lost(self, wait: float = 2.5) -> bool:
+        """After FFmpeg died: did the virtual screen vanish under it? Its keep-alive notices
+        within about 2 s (sleep and resume, for example)."""
+        deadline = time.monotonic() + wait
+        while not self._lost and time.monotonic() < deadline:
+            await asyncio.sleep(0.1)
+        return self._lost
+
     async def _cleanup(self) -> None:
         if self._play_task and not self._play_task.done():
             self._play_task.cancel()
@@ -318,6 +379,14 @@ class CastSession:
                 pass
             self._atv = None
         await self._stop_encoder()
+        if self._xscreen:
+            # Only once FFmpeg is gone: ddagrab losing its output would turn a stop into an error.
+            try:
+                await asyncio.get_running_loop().run_in_executor(None, self._xscreen.stop)
+            except Exception:  # pylint: disable=broad-except
+                _LOGGER.warning("Could not remove the virtual screen", exc_info=True)
+            self._xscreen = None
+            self.virtual_device = ""
         if self._server:
             await self._server.close()
             self._server = None

@@ -2,9 +2,10 @@
 
 Resolution comes from the display mode (EnumDisplaySettings), which is in physical
 pixels whatever the DPI scaling, so a 4K panel at 150% shows as 3840x2160, not
-2560x1440. The DXGI output index is what FFmpeg's ddagrab filter needs; ddagrab only
-sees outputs of the default adapter (adapter 0), so displays wired to another GPU get
-no index and are captured with gdigrab instead.
+2560x1440. The DXGI adapter and output index are what FFmpeg's ddagrab filter needs;
+ddagrab only sees outputs of the default adapter (adapter 0), so displays drawn by
+another GPU (a virtual screen on a laptop's integrated GPU, for example) are captured
+with gdigrab instead.
 """
 
 from __future__ import annotations
@@ -55,7 +56,8 @@ class WinDisplay:
     width: int
     height: int
     primary: bool
-    dxgi_output: Optional[int]  # index on adapter 0, None if on another adapter
+    dxgi_output: Optional[int]  # output index on its DXGI adapter, None if DXGI does not list it
+    dxgi_adapter: Optional[int] = None  # 0 = the default adapter, the only one ddagrab captures
 
 
 class _MONITORINFOEXW(ctypes.Structure):
@@ -141,46 +143,53 @@ def _release(obj: ctypes.c_void_p) -> None:
         _com_method(obj, 2, wintypes.ULONG)(obj)  # IUnknown::Release
 
 
-def dxgi_outputs_on_default_adapter() -> list[str]:
-    """Device names (\\\\.\\DISPLAYn) of adapter 0's outputs, in DXGI order."""
-    names: list[str] = []
+def dxgi_map() -> dict[str, tuple[int, int]]:
+    """{\\\\.\\DISPLAYn: (adapter index, output index)} over every DXGI adapter.
+
+    A fresh factory on every call: a factory created before a monitor arrived (a virtual
+    screen added a moment ago) does not list it.
+    """
+    result: dict[str, tuple[int, int]] = {}
     factory = ctypes.c_void_p()
     try:
         dxgi = ctypes.WinDLL("dxgi")
     except OSError:
-        return names
+        return result
     create = dxgi.CreateDXGIFactory1
     create.restype = ctypes.c_long
     create.argtypes = [ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p)]
     if create(ctypes.byref(_IID_IDXGIFactory1), ctypes.byref(factory)) != 0:
-        return names
-    adapter = ctypes.c_void_p()
+        return result
     try:
         # IDXGIFactory1::EnumAdapters1 is vtable slot 12
         enum_adapters1 = _com_method(factory, 12, ctypes.c_long, wintypes.UINT, ctypes.POINTER(ctypes.c_void_p))
-        if enum_adapters1(factory, 0, ctypes.byref(adapter)) != 0:
-            return names
-        # IDXGIAdapter::EnumOutputs is slot 7; IDXGIOutput::GetDesc is slot 7
-        enum_outputs = _com_method(adapter, 7, ctypes.c_long, wintypes.UINT, ctypes.POINTER(ctypes.c_void_p))
-        index = 0
+        adapter_index = 0
         while True:
-            output = ctypes.c_void_p()
-            if enum_outputs(adapter, index, ctypes.byref(output)) != 0:
-                break  # DXGI_ERROR_NOT_FOUND: no more outputs
+            adapter = ctypes.c_void_p()
+            if enum_adapters1(factory, adapter_index, ctypes.byref(adapter)) != 0:
+                break  # DXGI_ERROR_NOT_FOUND: no more adapters
             try:
-                desc = _DXGI_OUTPUT_DESC()
-                get_desc = _com_method(output, 7, ctypes.c_long, ctypes.POINTER(_DXGI_OUTPUT_DESC))
-                if get_desc(output, ctypes.byref(desc)) == 0:
-                    names.append(desc.DeviceName)
-                else:
-                    names.append("")
+                # IDXGIAdapter::EnumOutputs is slot 7; IDXGIOutput::GetDesc is slot 7
+                enum_outputs = _com_method(adapter, 7, ctypes.c_long, wintypes.UINT, ctypes.POINTER(ctypes.c_void_p))
+                output_index = 0
+                while True:
+                    output = ctypes.c_void_p()
+                    if enum_outputs(adapter, output_index, ctypes.byref(output)) != 0:
+                        break  # DXGI_ERROR_NOT_FOUND: no more outputs
+                    try:
+                        desc = _DXGI_OUTPUT_DESC()
+                        get_desc = _com_method(output, 7, ctypes.c_long, ctypes.POINTER(_DXGI_OUTPUT_DESC))
+                        if get_desc(output, ctypes.byref(desc)) == 0:
+                            result.setdefault(desc.DeviceName, (adapter_index, output_index))
+                    finally:
+                        _release(output)
+                    output_index += 1
             finally:
-                _release(output)
-            index += 1
+                _release(adapter)
+            adapter_index += 1
     finally:
-        _release(adapter)
         _release(factory)
-    return names
+    return result
 
 
 def list_displays() -> list[WinDisplay]:
@@ -206,10 +215,10 @@ def _list_displays() -> list[WinDisplay]:
     user32.EnumDisplaySettingsW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(_DEVMODEW)]
 
     try:
-        dxgi_names = dxgi_outputs_on_default_adapter()
+        dxgi = dxgi_map()
     except Exception:  # pylint: disable=broad-except
         _LOGGER.debug("DXGI enumeration failed", exc_info=True)
-        dxgi_names = []
+        dxgi = {}
 
     displays: list[WinDisplay] = []
     for hmon in handles:
@@ -225,7 +234,7 @@ def _list_displays() -> list[WinDisplay]:
         if user32.EnumDisplaySettingsW(info.szDevice, ENUM_CURRENT_SETTINGS & 0xFFFFFFFF, ctypes.byref(mode)):
             left, top = mode.dmPositionX, mode.dmPositionY
             width, height = mode.dmPelsWidth, mode.dmPelsHeight
-        dxgi_index = dxgi_names.index(info.szDevice) if info.szDevice in dxgi_names else None
+        adapter, output = dxgi.get(info.szDevice, (None, None))
         displays.append(
             WinDisplay(
                 device=info.szDevice,
@@ -234,7 +243,8 @@ def _list_displays() -> list[WinDisplay]:
                 width=width,
                 height=height,
                 primary=bool(info.dwFlags & MONITORINFOF_PRIMARY),
-                dxgi_output=dxgi_index,
+                dxgi_output=output,
+                dxgi_adapter=adapter,
             )
         )
     # Primary first, then left-to-right, which is how people number their screens.

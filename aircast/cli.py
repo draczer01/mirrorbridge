@@ -8,7 +8,7 @@ import getpass
 import logging
 import sys
 
-from . import __version__, airplay_patch, audio, ffmpeg
+from . import __version__, airplay_patch, audio, ffmpeg, vdisplay, winmonitors
 from .config import Settings, app_data_dir, credentials_file
 from .devices import Device, DeviceManager
 from .session import CastSession, State
@@ -127,6 +127,12 @@ async def cmd_cast(args) -> int:
         settings.monitor_index = args.monitor - 1
         if args.window_title is None:
             settings.window_title = ""  # --monitor means a whole display
+    if args.extend:
+        settings.extend_screen = True
+    elif args.monitor is not None or args.window_title is not None:
+        settings.extend_screen = False  # a display or a window, not the virtual screen
+    if args.extend_mode:
+        settings.extend_mode = args.extend_mode
     if args.bitrate:
         settings.video_bitrate_kbps = args.bitrate
     if args.height is not None:
@@ -181,10 +187,86 @@ async def cmd_doctor(args) -> int:
     print("Audio:    ", info if ok else f"NO - {info}")
     for mon in ffmpeg.list_monitors():
         print("Display:  ", mon.label)
+    print("Extend:   ", _vdd_summary())
     manager = DeviceManager(asyncio.get_running_loop())
     print("\nScanning network...")
     _print_devices(await manager.scan(timeout=args.timeout, hosts=args.host))
     return 0
+
+
+_VDD_STATUS_TEXT = {
+    vdisplay.DriverStatus.OK: "working",
+    vdisplay.DriverStatus.NOT_INSTALLED: "driver not installed ('aircast vdd install')",
+    vdisplay.DriverStatus.DISABLED: "driver disabled in Device Manager (Display adapters > "
+                                    "Parsec Virtual Display Adapter > Enable)",
+    vdisplay.DriverStatus.RESTART_REQUIRED: "driver installed; restart Windows to finish",
+    vdisplay.DriverStatus.DRIVER_ERROR: "driver not responding (reinstall: 'aircast vdd install')",
+    vdisplay.DriverStatus.UNKNOWN_PROBLEM: "driver has a problem (see Device Manager, or 'aircast vdd install')",
+    vdisplay.DriverStatus.INACCESSIBLE: "cannot check the driver",
+}
+
+
+def _vdd_summary(status: vdisplay.DriverStatus | None = None) -> str:
+    if not vdisplay.available():
+        return "needs Windows"
+    status = status or vdisplay.backend().status()
+    if status is not vdisplay.DriverStatus.OK:
+        return _VDD_STATUS_TEXT[status]
+    return f"Parsec Virtual Display Driver {vdisplay.backend().version() or '(unknown version)'}, working"
+
+
+async def cmd_vdd(args) -> int:
+    if not vdisplay.available():
+        print("The virtual screen (cast --extend) needs Windows 10 or 11.")
+        return 1
+    if args.vdd_command == "install":
+        return await _vdd_install(args)
+    status = vdisplay.backend().status()
+    print("Extend:   ", _vdd_summary(status))
+    dxgi = winmonitors.dxgi_map()
+    for src in vdisplay.vdd_sources():
+        where = dxgi.get(src.device_name)
+        print(f"Screen:    {src.device_name} (UID {src.uid}"
+              f"{', on the desktop' if src.attached_to_desktop else ', not on the desktop'}"
+              f"{f', DXGI adapter {where[0]} output {where[1]}' if where else ''})")
+    return 0 if status is vdisplay.DriverStatus.OK else 1
+
+
+async def _vdd_install(args) -> int:
+    if vdisplay.backend().status() is vdisplay.DriverStatus.OK:
+        print("The virtual display driver is already installed and working.")
+        return 0
+    about = (
+        "AirCast's Extend screen uses the free \"Parsec Virtual Display Driver\" from Parsec (Unity).\n"
+        "It is downloaded from parsec.app (about 500 KB) and Windows asks for permission once.\n"
+        f"By installing it you accept Parsec's terms: {vdisplay.PARSEC_TERMS_URL}"
+    )
+    print(about)
+    if not args.yes:
+        if _ask_in_dialogs():
+            answer = await _prompt(f"{about}\n\nInstall it?", choices=["Install", "Not now"])
+        else:
+            answer = await _prompt("Install it? [y/N] ")
+        if answer.lower() not in ("1", "y", "yes"):
+            return 1
+
+    def progress(done: int, total: int) -> None:
+        print(f"\rDownloading... {done // 1024} KB" + (f" of {total // 1024} KB" if total else ""), end="", flush=True)
+
+    try:
+        installer = vdisplay.download_installer(progress=progress)
+    except vdisplay.VddError as ex:
+        print(f"\n{ex}\nInstall it with winget instead:  winget install -e --id {vdisplay.VDD_WINGET_ID}\n"
+              f"or download it yourself: {vdisplay.VDD_INSTALLER_URL}")
+        return 1
+    print(f"\nVerified {installer}. Windows will ask for permission...")
+    if not vdisplay.run_installer_elevated(installer):
+        print("Not installed: the Windows permission was cancelled.")
+        return 1
+    print("Waiting for the driver to start...")
+    status = vdisplay.wait_until_ready()
+    print("Extend:   ", "ready" if status is vdisplay.DriverStatus.OK else _VDD_STATUS_TEXT[status])
+    return 0 if status in (vdisplay.DriverStatus.OK, vdisplay.DriverStatus.RESTART_REQUIRED) else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -216,6 +298,15 @@ def build_parser() -> argparse.ArgumentParser:
     cast.add_argument("--latency", dest="latency_mode", choices=list(ffmpeg.LATENCY_SEGMENT_SECONDS))
     cast.add_argument("--no-audio", action="store_true")
     cast.add_argument("--ffmpeg", dest="ffmpeg_path")
+    cast.add_argument("--extend", action="store_true",
+                      help="cast a new virtual screen, so the TV works as a second screen")
+    cast.add_argument("--extend-mode", choices=list(vdisplay.EXTEND_MODES), help="size of that screen (default 1080p)")
+
+    vdd = sub.add_parser("vdd", help="the virtual display driver that --extend uses")
+    vdd_sub = vdd.add_subparsers(dest="vdd_command", required=True, metavar="{status,install}")
+    vdd_sub.add_parser("status", help="show whether the driver is installed and working")
+    install = vdd_sub.add_parser("install", help="download Parsec's driver and install it (one UAC prompt)")
+    install.add_argument("-y", "--yes", action="store_true", help="accept Parsec's terms without asking")
 
     gui = sub.add_parser("gui", help="start the tray app (default)")
     gui.add_argument("--open", action="store_true", help="also open the main window")
@@ -240,7 +331,8 @@ def main(argv: list[str] | None = None) -> int:
     if not args.verbose:
         logging.getLogger("pyatv").setLevel(logging.WARNING)
 
-    handler = {"scan": cmd_scan, "pair": cmd_pair, "forget": cmd_forget, "cast": cmd_cast, "doctor": cmd_doctor}[args.command]
+    handler = {"scan": cmd_scan, "pair": cmd_pair, "forget": cmd_forget, "cast": cmd_cast, "doctor": cmd_doctor,
+               "vdd": cmd_vdd}[args.command]
     try:
         return asyncio.run(handler(args))
     except KeyboardInterrupt:

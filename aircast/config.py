@@ -36,6 +36,10 @@ class Settings:
     capture_backend: str = "auto"  # auto | ddagrab | gdigrab | test
     monitor_index: int = 0  # 0-based index into the list of monitors
     window_title: str = ""  # non-empty -> capture this window instead of a monitor
+    # Extend screen: cast a virtual monitor Windows extends the desktop onto, so the TV is a
+    # second screen. Overrides monitor_index and window_title.
+    extend_screen: bool = False
+    extend_mode: str = "1080p"  # 1080p | 720p | 4k (size of the virtual monitor)
     framerate: int = 30
     output_height: int = 1080  # scaled keeping aspect ratio; 0 = native
     show_cursor: bool = True
@@ -57,6 +61,7 @@ class Settings:
     language: str = ""  # "" = follow Windows, "en" or "es"
     tray_hint_shown: bool = False
     hide_hint_shown: bool = False
+    extend_tip_shown: bool = False
 
     # Misc
     ffmpeg_path: str = ""

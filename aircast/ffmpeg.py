@@ -206,6 +206,9 @@ def pick_capture_backend(
         return "ddagrab"
     if wanted == "ddagrab":
         _LOGGER.warning("Using gdigrab instead of ddagrab: %s", reason)
+    elif unreachable:
+        _LOGGER.info("Using gdigrab for %s: %s (DXGI adapter %s)", monitor.device or monitor.label,
+                     reason, monitor.dxgi_adapter)
     return "gdigrab"
 
 
@@ -228,6 +231,8 @@ class Monitor:
     height: int
     primary: bool = False
     dxgi_output: int | None = 0  # ddagrab output_idx; None = use gdigrab
+    device: str = ""  # \\.\DISPLAYn on Windows
+    dxgi_adapter: int | None = 0  # GPU that draws it; ddagrab reaches only adapter 0
 
     @property
     def label(self) -> str:
@@ -243,8 +248,12 @@ def list_monitors() -> list[Monitor]:
 
             displays = list_displays()
             if displays:
+                # `-f lavfi -i ddagrab` always opens the default adapter, so a display drawn
+                # by another GPU gets no output index and is captured with gdigrab.
                 return [
-                    Monitor(i, d.left, d.top, d.width, d.height, d.primary, d.dxgi_output)
+                    Monitor(i, d.left, d.top, d.width, d.height, d.primary,
+                            d.dxgi_output if d.dxgi_adapter == 0 else None,
+                            device=d.device, dxgi_adapter=d.dxgi_adapter)
                     for i, d in enumerate(displays)
                 ]
         except Exception:  # pylint: disable=broad-except

@@ -127,6 +127,34 @@ def test_window_without_region_falls_back_to_gdigrab(monkeypatch):
     assert ff.pick_capture_backend("ffmpeg", Settings(capture_backend="ddagrab"), other_gpu) == "gdigrab"
 
 
+def test_display_drawn_by_another_gpu_is_captured_with_gdigrab(monkeypatch, tmp_path, caplog):
+    """A virtual screen on a laptop's integrated GPU is not on DXGI adapter 0, which is the only
+    one `-f lavfi -i ddagrab` opens: it gets gdigrab over its desktop rectangle."""
+    import logging
+
+    import aircast.ffmpeg as ff
+    from aircast import winmonitors
+    from aircast.config import Settings
+
+    monkeypatch.setattr(ff.sys, "platform", "win32")
+    monkeypatch.setattr(ff, "has_filter", lambda *_a: True)
+    monkeypatch.setattr(winmonitors, "list_displays", lambda: [
+        winmonitors.WinDisplay(r"\\.\DISPLAY1", 0, 0, 2560, 1440, True, dxgi_output=0, dxgi_adapter=0),
+        winmonitors.WinDisplay(r"\\.\DISPLAY5", 2560, 0, 1920, 1080, False, dxgi_output=0, dxgi_adapter=1),
+    ])
+    main, virtual = ff.list_monitors()
+    assert (main.device, main.dxgi_output, main.dxgi_adapter) == (r"\\.\DISPLAY1", 0, 0)
+    assert (virtual.device, virtual.dxgi_output, virtual.dxgi_adapter) == (r"\\.\DISPLAY5", None, 1)
+    assert ff.pick_capture_backend("ffmpeg", Settings(), main) == "ddagrab"
+    with caplog.at_level(logging.INFO, logger="aircast.ffmpeg"):
+        assert ff.pick_capture_backend("ffmpeg", Settings(), virtual) == "gdigrab"
+    assert "DISPLAY5" in caplog.text and "adapter 1" in caplog.text
+    cmd = ff.build_command("ffmpeg", Settings(), tmp_path, encoder="h264_nvenc", backend="gdigrab", monitor=virtual)
+    assert cmd[cmd.index("-f") + 1] == "gdigrab" and cmd[cmd.index("-i") + 1] == "desktop"
+    assert cmd[cmd.index("-offset_x") + 1] == "2560" and cmd[cmd.index("-video_size") + 1] == "1920x1080"
+    assert not any("ddagrab" in a or "init_hw_device" in a for a in cmd)
+
+
 @needs_ffmpeg
 def test_libx264_is_detected():
     assert ffmpeg.encoder_works(FF, "libx264")
