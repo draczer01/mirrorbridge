@@ -10,6 +10,7 @@ import socket
 import subprocess
 import tempfile
 import threading
+import time
 from collections import deque
 from ipaddress import IPv4Address
 from pathlib import Path
@@ -35,6 +36,9 @@ class State(enum.Enum):
 
 
 StatusCallback = Callable[[State, str], None]
+
+NO_REQUEST_TIMEOUT = 45  # seconds from /play until the TV must have fetched the playlist
+IDLE_REQUEST_TIMEOUT = 20  # a playing TV refetches the live playlist every 0.5-2 s
 
 
 def local_ip_reaching(remote: str) -> str:
@@ -267,6 +271,7 @@ class CastSession:
     async def _supervise(self) -> None:
         stop_wait = asyncio.ensure_future(self._stop_requested.wait())
         announced = False
+        started_at = time.monotonic()
         try:
             while True:
                 done, _ = await asyncio.wait({self._play_task, stop_wait}, timeout=0.5)
@@ -280,9 +285,22 @@ class CastSession:
                     return  # stopped from the TV
                 if self._proc and self._proc.poll() is not None:
                     raise RuntimeError(f"Encoder stopped unexpectedly:\n{self.ffmpeg_errors()}")
-                if not announced and self._server and self._server.requests >= 1:
+                server = self._server
+                if not announced and server and server.requests >= 1:
                     announced = True
                     self._set(State.CASTING, f"{self.device.name} - {self.stream_url}")
+                # The TV's own video requests are the one signal every receiver gives,
+                # including those that do not report playback status over AirPlay.
+                now = time.monotonic()
+                if not announced and now - started_at > NO_REQUEST_TIMEOUT:
+                    raise RuntimeError(
+                        f"The TV accepted the cast but never asked for the video at {self.stream_url}. "
+                        "Allow AirCast in Windows Firewall on private networks, and check that the "
+                        "PC and the TV are on the same network."
+                    )
+                if announced and server and now - server.last_request_at > IDLE_REQUEST_TIMEOUT:
+                    _LOGGER.info("The TV stopped requesting video; ending the cast")
+                    return
         finally:
             stop_wait.cancel()
 

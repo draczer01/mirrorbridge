@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from pathlib import Path
 
 from aiohttp import web
@@ -35,6 +36,7 @@ class HlsServer:
         self.host = host
         self.port = port
         self.requests = 0
+        self.last_request_at = 0.0  # time.monotonic() of the receiver's latest fetch
         self._runner: web.AppRunner | None = None
 
     @property
@@ -47,6 +49,7 @@ class HlsServer:
         if path.parent != self.root or path.suffix not in _CONTENT_TYPES or not path.is_file():
             raise web.HTTPNotFound()
         self.requests += 1
+        self.last_request_at = time.monotonic()
         _LOGGER.debug("%s GET %s", request.remote, name)
         try:
             body = path.read_bytes()
