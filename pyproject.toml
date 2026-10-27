@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aircast"
-version = "0.2.0"
+version = "0.2.1"
 description = "Cast your Windows screen and audio to Apple TV / AirPlay receivers"
 readme = "README.md"
 requires-python = ">=3.10"
