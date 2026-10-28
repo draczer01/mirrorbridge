@@ -45,6 +45,19 @@ async def _prompt(text: str, secret: bool = False, choices: list[str] | None = N
     return (await asyncio.get_running_loop().run_in_executor(None, ask, text)).strip()
 
 
+def _cli_words(message: str, device: Device) -> str:
+    """A cast's errors name menu items in English; name the options that do the same here."""
+    paths = {
+        "Device > Forget pairing": f'forget -d "{device.name}"',
+        "Device > Pair with PIN": f'pair -d "{device.name}"',
+        "Quality > Delay > Smooth": "--latency smooth",
+        "Quality > Encoder > x264 (CPU)": "--encoder libx264",
+    }
+    for item, option in paths.items():
+        message = message.replace(item, option)
+    return message
+
+
 def _print_devices(devices: list[Device], verbose: bool = False) -> None:
     if not devices:
         print("No AirPlay devices found. Try --host <ip> if mDNS is blocked on your network.")
@@ -154,6 +167,7 @@ async def cmd_cast(args) -> int:
         return 0
 
     def status(state: State, message: str) -> None:
+        message = _cli_words(message, device)
         print(f"[{state.value}] {message}" if message else f"[{state.value}]")
 
     session = CastSession(manager, device, settings, status)

@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import logging
 import plistlib
 import time
 
@@ -126,8 +127,8 @@ async def test_playback_info_that_keeps_failing_is_given_up_after_three_tries(mo
 class MockReceiver:
     """An AirPlay receiver that answers each request with respond(method, uri, protocol).
 
-    respond returns (code, plist body or None, whether to echo CSeq). pyatv's pairing and
-    event channel are not part of this: MockV2 skips them.
+    respond returns (code, plist body or None, whether to echo CSeq), or None to hang up.
+    pyatv's pairing and event channel are not part of this: MockV2 skips them.
     """
 
     def __init__(self, respond):
@@ -166,7 +167,11 @@ class MockReceiver:
                 buf = rest[size:]
                 method, uri, protocol = lines[0].split(" ")
                 self.requests.append((method, uri, protocol))
-                code, body, echo = self.respond(method, uri, protocol)
+                answer = self.respond(method, uri, protocol)
+                if answer is None:
+                    writer.close()
+                    return
+                code, body, echo = answer
                 payload = plistlib.dumps(body, fmt=plistlib.FMT_BINARY) if body is not None else b""
                 out = f"{protocol} {code} {'OK' if code < 300 else 'Error'}\r\nContent-Length: {len(payload)}\r\n"
                 if payload:
@@ -278,11 +283,12 @@ async def test_apple_tv_gets_exactly_the_requests_pyatv_sends(apple):
                           "rate": 200, "forwardEndTime": 200, "reverseEndTime": 200}
 
 
-async def test_put_refused_on_every_protocol_still_plays():
+async def test_put_refused_on_every_protocol_still_plays(caplog):
     """The 55QM7L case: POST /play works, PUT /setProperty is 501 Not Implemented."""
     cast = CastContext(apple=False, live=True)
     async with MockReceiver(put_refused_everywhere) as tv:
-        resp = await _play(await _connect(tv), cast)
+        with caplog.at_level(logging.INFO, logger="aircast.airplay_patch"):
+            resp = await _play(await _connect(tv), cast)
         sent = tv.sent()
     assert resp.code == 200
     assert sent[2:] == [
@@ -296,6 +302,10 @@ async def test_put_refused_on_every_protocol_still_plays():
     assert cast.steps == {"play": 200, "isInterestedInDateRange": "501/HTTP:501",
                           "actionAtItemEnd": "501/HTTP:501", "rate": 200,
                           "forwardEndTime": "skipped", "reverseEndTime": "skipped"}
+    # One line in aircast.log answers "what did the TV say to each request?"
+    assert "Receiver answered /play with HTTP 200 OK" in caplog.text
+    assert ("AirPlay video requests: play=200 isInterestedInDateRange=501/HTTP:501 "
+            "actionAtItemEnd=501/HTTP:501 rate=200 forwardEndTime=skipped reverseEndTime=skipped") in caplog.text
 
 
 async def test_receiver_that_wants_http_for_these_requests_gets_them_on_retry():
@@ -362,7 +372,7 @@ async def test_receiver_that_refuses_everything():
 
 
 @pytest.mark.parametrize("code, words", [
-    (401, "password"), (403, "Forget pairing"), (453, "busy with another AirPlay sender"),
+    (401, "password .*which AirCast cannot send"), (403, "Forget pairing"), (453, "busy with another AirPlay sender"),
     (470, "restricted"),
 ])
 async def test_refusals_are_explained(code, words):
@@ -376,6 +386,33 @@ async def test_refusals_are_explained(code, words):
     assert "status code" not in str(err.value)
 
 
+def test_menu_items_in_errors_are_named_as_the_gui_and_the_command_line_name_them():
+    """The errors are in English, but a Spanish menu has no "Forget pairing" to click."""
+    from types import SimpleNamespace
+
+    from aircast import cli
+    from aircast.gui import i18n
+
+    message = " ".join(str(e) for e in (
+        airplay_patch.refusal(403, {"play": 403}),
+        airplay_patch.setup_failed({"setup": "not paired"}),
+    )) + " Try Quality > Delay > Smooth. Choose Quality > Encoder > x264 (CPU)."  # session.py's hints
+    assert i18n.menu_paths(message) == message  # English
+    i18n.set_language("es")
+    try:
+        spanish = i18n.menu_paths(message)
+    finally:
+        i18n.set_language("en")
+    for words in ("Dispositivo > Olvidar emparejamiento", "Dispositivo > Emparejar con PIN",
+                  "Calidad > Retraso > Fluido", "Calidad > Codificador > x264 (CPU)"):
+        assert words in spanish
+    options = cli._cli_words(message, SimpleNamespace(name="Sala familiar"))
+    for words in ('forget -d "Sala familiar"', 'pair -d "Sala familiar"', "--latency smooth", "--encoder libx264"):
+        assert words in options
+    assert not any(english in spanish for english in ("Device", "Forget", "Pair with", "Quality", "Delay", "Encoder"))
+    assert " > " not in options
+
+
 async def test_setup_refused_is_explained():
     def busy(method, uri, protocol):
         return (453 if method == "SETUP" else 200), None, True
@@ -384,6 +421,71 @@ async def test_setup_refused_is_explained():
         with pytest.raises(ReceiverRefusedVideo, match="busy") as err:
             await _play(await _connect(tv), CastContext())
     assert err.value.steps == {"setup": 453}
+
+
+@pytest.mark.parametrize("password", [False, True])
+async def test_setup_401_is_not_reported_as_a_403(password):
+    """pyatv raises the same AuthenticationError for a 401 and a 403: name neither."""
+    def wants_password(method, uri, protocol):
+        return (401 if method == "SETUP" else 200), None, True
+
+    async with MockReceiver(wants_password) as tv:
+        with pytest.raises(ReceiverRefusedVideo, match="rejected AirCast's credentials") as err:
+            await _play(await _connect(tv), CastContext(apple=False, password=password))
+    assert err.value.steps == {"setup": "not authenticated"} and err.value.code is None
+    assert "403" not in str(err.value) and "Device > Forget pairing" in str(err.value)
+    assert ("AirPlay password" in str(err.value)) is password  # only when the TV advertises one
+
+
+async def test_tv_that_hangs_up_on_setup_gets_the_pairing_hint():
+    def hangs_up(method, uri, protocol):
+        return None if method == "SETUP" else (200, None, True)
+
+    async with MockReceiver(hangs_up) as tv:
+        with pytest.raises(ReceiverRefusedVideo, match=r"did not finish setting up .*\(setup=connection lost\)"):
+            await _play(await _connect(tv), CastContext(apple=False))
+        assert ("POST", "/play") not in [r[:2] for r in tv.sent()]
+
+
+def _setup_raising(error):
+    class FailingV2(MockV2):
+        async def _setup_base(self, timing_server_port):
+            raise error
+
+    return FailingV2
+
+
+@pytest.mark.parametrize("error, answer, words", [
+    # pyatv ignores the TV's last pair-verify answer: a TV that dropped the pairing never
+    # answers the encrypted SETUP that follows.
+    (TimeoutError("no response to SETUP rtsp://192.168.1.40/1 (RTSP/1.0)"), "no answer", "Forget pairing"),
+    (exceptions.ConnectionLostError("connection was lost"), "connection lost", "Forget pairing"),
+    (ConnectionRefusedError(111, "Connect call failed"), "connection refused", "Forget pairing"),  # event channel
+    (exceptions.InvalidResponseError("got unexpected response"), "unreadable answer", "Forget pairing"),
+    (KeyError(6), "unreadable answer", "Forget pairing"),  # a pair-verify TLV error
+    (exceptions.NotSupportedError("encryption keys not supported"), "not paired", "Device > Pair with PIN"),
+    (exceptions.AuthenticationError("incorrect device response"), "not authenticated", "Forget pairing"),
+])
+async def test_failed_session_setup_is_explained(error, answer, words):
+    async with MockReceiver(apple_tv) as tv:
+        with pytest.raises(ReceiverRefusedVideo, match=words) as err:
+            await _play(await _connect(tv, _setup_raising(error)), CastContext(apple=False))
+    assert err.value.steps == {"setup": answer}
+    assert str(error) not in str(err.value)  # never pyatv's own wording alone
+
+
+async def test_play_without_an_answer_and_an_apple_tv_failing_are_not_blamed_on_the_brand(monkeypatch):
+    monkeypatch.setattr(airplay_patch, "PLAY_RETRY_SECONDS", 0)
+    silent = airplay_patch.refusal(None, {"play": "no answer"})
+    assert "did not answer the request to play" in str(silent) and "Apple devices" not in str(silent)
+
+    def broken(method, uri, protocol):
+        return (500 if uri == "/play" else 200), None, True
+
+    async with MockReceiver(broken) as tv:
+        with pytest.raises(ReceiverRefusedVideo, match=r"Apple TV could not start the video \(play=500/500\)") as err:
+            await _play(await _connect(tv), CastContext(apple=True, live=True))
+    assert "Apple devices" not in str(err.value)
 
 
 class FakeStreamProtocol:
@@ -412,6 +514,71 @@ async def test_player_names_the_refusal_and_cleans_up():
     assert protocol.torn_down
 
 
+async def test_airplay1_play_500_every_time_is_explained(monkeypatch):
+    """pyatv itself asks an AirPlay 1 receiver three times, then says "Max retries exceeded"."""
+    async def no_sleep(_s):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    async with MockReceiver(apple_tv) as tv:
+        conn = await http_connect("127.0.0.1", tv.port)
+        player = AirPlayPlayer(RtspSession(conn), FakeStreamProtocol(500))
+        with pytest.raises(ReceiverRefusedVideo, match=r"refused video sent from a URL \(play=500/500/500\)") as err:
+            await airplay_patch._player_play_url(player, URL)
+        conn.close()
+    assert err.value.code == 500 and "Max retries" not in str(err.value)
+
+
+async def test_airplay1_pair_verify_refused_is_not_reported_as_a_403():
+    class RefusedVerify(FakeStreamProtocol):
+        async def play_url(self, _port, _url, _position):
+            raise exceptions.AuthenticationError("not authenticated")
+
+    async with MockReceiver(apple_tv) as tv:
+        conn = await http_connect("127.0.0.1", tv.port)
+        player = AirPlayPlayer(RtspSession(conn), RefusedVerify(200))
+        with pytest.raises(ReceiverRefusedVideo, match=r"credentials \(pair-verify=not authenticated\)") as err:
+            await airplay_patch._player_play_url(player, URL)
+        conn.close()
+    assert "403" not in str(err.value)
+
+
+@pytest.mark.parametrize("how", ["refused", "stopped"])
+async def test_timing_server_is_closed_however_the_cast_ends(monkeypatch, how):
+    """pyatv closes its timing server's UDP socket only when play_url returns."""
+    airplay_patch.apply()
+    servers = []
+
+    class Recorded(airplay_patch.TimingServer):
+        def connection_made(self, transport):
+            super().connection_made(transport)
+            servers.append(self)
+
+    monkeypatch.setattr(airplay_patch, "TimingServer", Recorded)
+
+    def respond(method, uri, protocol):
+        if how == "refused" and uri == "/play":
+            return 501, None, True
+        return (501 if uri == "/playback-info" else 200), None, True
+
+    async with MockReceiver(respond) as tv:
+        v2 = await _connect(tv)
+        player = AirPlayPlayer(v2.rtsp, v2)
+        task = asyncio.ensure_future(airplay_patch._player_play_url(player, URL))
+        if how == "refused":
+            with pytest.raises(ReceiverRefusedVideo):
+                await asyncio.wait_for(task, 5)
+        else:  # Stop pressed: AirCast cancels the play task
+            while ("GET", "/playback-info", "HTTP/1.1") not in tv.requests:
+                assert not task.done()
+                await asyncio.sleep(0.02)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        v2.rtsp.connection.close()
+    assert len(servers) == 1 and servers[0].transport is None
+
+
 async def test_player_stops_the_keepalive_when_the_cast_ends(monkeypatch):
     """pyatv never calls teardown(): its feedback task would ping the TV forever."""
     airplay_patch.apply()
@@ -424,7 +591,11 @@ async def test_player_stops_the_keepalive_when_the_cast_ends(monkeypatch):
         v2 = await _connect(tv)
         player = AirPlayPlayer(v2.rtsp, v2)
         task = asyncio.ensure_future(airplay_patch._player_play_url(player, URL))
+        deadline = time.monotonic() + 5
         while ("GET", "/playback-info", "HTTP/1.1") not in tv.requests:
+            if task.done():
+                task.result()  # whatever ended the cast early, as the failure
+            assert time.monotonic() < deadline, tv.requests
             await asyncio.sleep(0.02)
         assert v2._feedback_task is not None
         v2.rtsp.connection.close()  # the TV goes away

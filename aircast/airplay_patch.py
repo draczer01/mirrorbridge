@@ -18,10 +18,15 @@ Three pyatv 0.18 behaviours get in the way of casting a screen:
   stream to a TV that is not an Apple one.
 
 * pyatv never tears the playback session down (its keep-alive task pings the TV
-  forever after a cast), retries a "500" from /play by pairing again on a connection
-  that is already encrypted, and reports any refusal as AuthenticationError
-  ("status code: N"). The player is wrapped so that it cleans up after itself, and
-  refusals become ReceiverRefusedVideo with a message a person can act on.
+  forever after a cast, and its timing server's UDP socket stays open unless play_url
+  returns normally), retries a "500" from /play by pairing again on a connection that
+  is already encrypted, and reports any refusal as AuthenticationError
+  ("status code: N") or with its own wording ("no response to SETUP ..."). The player
+  is wrapped so that it cleans up after itself, and refusals and failed set-ups become
+  ReceiverRefusedVideo with a message a person can act on.
+
+Messages name AirCast's menu items in English ("Device > Forget pairing"); the GUI
+and the command line put them in their own words (gui.i18n.menu_paths, cli.py).
 """
 
 from __future__ import annotations
@@ -32,11 +37,13 @@ import logging
 import plistlib
 import re
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Optional
 
 from pyatv import exceptions
 from pyatv.protocols.airplay import player as _player
+from pyatv.protocols.raop.protocols import TimingServer
 from pyatv.protocols.raop.protocols import airplayv2 as _airplayv2
 from pyatv.support.http import HttpResponse, decode_bplist_from_body
 from pyatv.support.rtsp import BPLIST_CONTENT_TYPE, USER_AGENT, RtspSession, get_digest_payload
@@ -61,6 +68,7 @@ class CastContext:
 
     apple: Optional[bool] = None  # receiver made by Apple; None = unknown
     live: bool = False  # an endless live stream rather than a file
+    password: bool = False  # the receiver advertises an AirPlay password
     accepted_at: Optional[float] = None  # time.monotonic() when the TV accepted the video
     steps: dict = field(default_factory=dict)  # each request's answer, for logs and errors
 
@@ -87,7 +95,8 @@ def _cast() -> CastContext:
 
 
 class ReceiverRefusedVideo(exceptions.PlaybackError):
-    """The receiver turned the video down; `code` is its HTTP status (None: no answer)."""
+    """The receiver turned the video down; `code` is its HTTP status, None when it gave
+    none (no answer, or a failure that pyatv reports without one)."""
 
     def __init__(self, message: str, code: Optional[int] = None, steps: Optional[dict] = None) -> None:
         super().__init__(message)
@@ -96,10 +105,12 @@ class ReceiverRefusedVideo(exceptions.PlaybackError):
 
 
 _REFUSALS = {
-    401: "The TV asks for an AirPlay password (HTTP 401). Check the password in the TV's "
-    "AirPlay settings, then use Forget pairing and cast again to enter it.",
-    403: "The TV no longer accepts AirCast's pairing (HTTP 403). Use Forget pairing, then "
-    "cast again and type the new PIN the TV shows.",
+    # pyatv sends no password with a video it plays from a URL, whatever AirCast stores.
+    401: "The TV asks for an AirPlay password (HTTP 401), which AirCast cannot send with "
+    "video it plays from a URL. Turn off the AirPlay password in the TV's AirPlay "
+    "settings, then try again.",
+    403: "The TV no longer accepts AirCast's pairing (HTTP 403). Use Device > Forget pairing, "
+    "then cast again and type the new PIN the TV shows.",
     453: "The TV is busy with another AirPlay sender (HTTP 453). Stop AirPlay on the other "
     "phone, tablet or computer, then try again.",
     470: "AirPlay access is restricted on the TV (HTTP 470). In the TV's AirPlay settings, "
@@ -111,15 +122,87 @@ def format_steps(steps: dict) -> str:
     return " ".join(f"{name}={answer}" for name, answer in steps.items()) or "nothing sent"
 
 
-def refusal(code: Optional[int], steps: dict) -> ReceiverRefusedVideo:
+def refusal(code: Optional[int], steps: dict, apple: Optional[bool] = None) -> ReceiverRefusedVideo:
     """A clear error for a TV that said no, instead of pyatv's "status code: N"."""
     if code in _REFUSALS:
         return ReceiverRefusedVideo(_REFUSALS[code], code, steps)
+    if code is None:
+        text = (f"The TV did not answer the request to play the video ({format_steps(steps)}). "
+                "Check that the PC and the TV are on the same network, then try again.")
+    elif apple:
+        text = (f"The Apple TV could not start the video ({format_steps(steps)}). Try again, "
+                "or restart the Apple TV.")
+    else:
+        text = (f"This TV accepts AirPlay pairing but refused video sent from a URL "
+                f"({format_steps(steps)}). It may only take screen mirroring and audio from "
+                "Apple devices.")
+    return ReceiverRefusedVideo(text, code, steps)
+
+
+def credentials_refused(steps: dict, password: bool = False) -> ReceiverRefusedVideo:
+    """pyatv says "not authenticated" for a 401 and a 403 alike, and for a failed pair-verify."""
+    text = (f"The TV rejected AirCast's credentials ({format_steps(steps)}). Use Device > "
+            "Forget pairing, then cast again and type the new PIN the TV shows.")
+    if password:
+        text += (" The TV also asks for an AirPlay password, which AirCast cannot send with "
+                 "video it plays from a URL: turn it off in the TV's AirPlay settings.")
+    return ReceiverRefusedVideo(text, None, steps)
+
+
+def setup_failed(steps: dict) -> ReceiverRefusedVideo:
+    """The TV stopped answering, hung up or answered nonsense while the session was set up.
+
+    pyatv does not check the TV's last pair-verify answer, so a TV that dropped AirCast's
+    pairing still gets an encrypted SETUP, which it cannot read: it never answers.
+    """
+    if "not paired" in steps.values():
+        advice = "The TV wants AirCast to pair first: use Device > Pair with PIN, then cast again."
+    else:
+        advice = ("Most often the TV has dropped AirCast's pairing: use Device > Forget pairing, "
+                  "then cast again and type the new PIN the TV shows.")
     return ReceiverRefusedVideo(
-        f"This TV accepts AirPlay pairing but refused video sent from a URL ({format_steps(steps)}). "
-        "It may only take screen mirroring and audio from Apple devices.",
-        code, steps,
+        f"The TV did not finish setting up the AirPlay session ({format_steps(steps)}). {advice}",
+        None, steps,
     )
+
+
+# What pair-verify, SETUP, the event channel and RECORD raise when the TV does not
+# play along. NotSupportedError (a RuntimeError) comes from pyatv's "no credentials"
+# verifier, which has no keys for the event channel.
+_SESSION_FAILURES = (
+    TimeoutError, OSError, RuntimeError, ValueError, KeyError,
+    exceptions.ConnectionLostError, exceptions.InvalidResponseError,
+)
+_SESSION_ERRORS = (exceptions.HttpError, exceptions.AuthenticationError, *_SESSION_FAILURES)
+
+
+def _failure(ex: BaseException) -> str:
+    """A step's answer, for a step that raised instead of being answered."""
+    if isinstance(ex, TimeoutError):
+        return "no answer"
+    if isinstance(ex, ConnectionRefusedError):
+        return "connection refused"
+    if isinstance(ex, exceptions.NotSupportedError):
+        return "not paired"
+    if isinstance(ex, (exceptions.ConnectionLostError, ConnectionError, RuntimeError)):
+        return "connection lost"
+    if isinstance(ex, OSError):
+        return "connection failed"
+    return "unreadable answer"
+
+
+def _session_error(step: str, ex: BaseException, cast: CastContext) -> ReceiverRefusedVideo:
+    """What setting up the session raised, as an error a person can act on."""
+    steps = cast.steps
+    if isinstance(ex, exceptions.HttpError):  # refused, with a status code
+        steps[step] = ex.status_code
+        return refusal(ex.status_code, steps, cast.apple)
+    if isinstance(ex, exceptions.AuthenticationError):
+        steps[step] = "not authenticated"
+        return credentials_refused(steps, cast.password)
+    _LOGGER.info("AirPlay %s failed: %r", step, ex)
+    steps[step] = _failure(ex)
+    return setup_failed(steps)
 
 
 def _code(resp: Optional[HttpResponse]) -> object:
@@ -213,16 +296,14 @@ async def _play_url_v2(self, timing_server_port: int, url: str, position: float 
     cast = _cast()
     steps = cast.steps
     try:
-        await self._setup_base(timing_server_port)  # pylint: disable=protected-access
-    except exceptions.HttpError as ex:  # pair-verify or SETUP refused
-        steps["setup"] = ex.status_code
-        raise refusal(ex.status_code, steps) from ex
+        await self._setup_base(timing_server_port)  # pair-verify, SETUP, event channel
+    except _SESSION_ERRORS as ex:
+        raise _session_error("setup", ex, cast) from ex
     await self.start_feedback()
     try:
         await self.rtsp.record()
-    except exceptions.HttpError as ex:
-        steps["record"] = ex.status_code
-        raise refusal(ex.status_code, steps) from ex
+    except _SESSION_ERRORS as ex:
+        raise _session_error("record", ex, cast) from ex
 
     body = {
         "Content-Location": url,
@@ -256,7 +337,7 @@ async def _play_url_v2(self, timing_server_port: int, url: str, position: float 
         resp = await _post_play(self, body)
         steps["play"] = f"500/{_code(resp)}"
     if not _answered(resp):
-        raise refusal(resp.code if resp is not None else None, steps)
+        raise refusal(resp.code if resp is not None else None, steps, cast.apple)
     cast.accepted_at = time.monotonic()
 
     # Apple TVs want these; other receivers often answer 501 Not Implemented. Only
@@ -281,20 +362,29 @@ _pyatv_player_play_url = _player.AirPlayPlayer.play_url
 
 async def _player_play_url(self, url: str, position: float = 0) -> None:
     """AirPlayPlayer.play_url that always tears its session down and names a refusal."""
+    cast = _cast()
     try:
         await _pyatv_player_play_url(self, url, position)
     except exceptions.AuthenticationError as ex:
-        # pyatv's name both for any 4xx/5xx answer to an AirPlay 1 /play and for a
-        # pairing the TV no longer accepts.
+        # pyatv's name both for any 4xx/5xx answer to an AirPlay 1 /play and for
+        # credentials the TV turned down (a 401 or a 403 alike, or a failed pair-verify).
         match = re.fullmatch(r"status code: (\d+)", str(ex))
-        steps = _cast().steps
-        if match:
-            steps.setdefault("play", int(match.group(1)))
-        raise refusal(int(match.group(1)) if match else 403, steps) from ex
+        if match is None:
+            cast.steps.setdefault("pair-verify", "not authenticated")
+            raise credentials_refused(cast.steps, cast.password) from ex
+        cast.steps.setdefault("play", int(match.group(1)))
+        raise refusal(int(match.group(1)), cast.steps, cast.apple) from ex
     except exceptions.HttpError as ex:
         if ex.status_code in _REFUSALS:
-            raise refusal(ex.status_code, _cast().steps) from ex
+            raise refusal(ex.status_code, cast.steps, cast.apple) from ex
         raise
+    except exceptions.PlaybackError as ex:
+        if str(ex) != "Max retries exceeded":
+            raise
+        # An AirPlay 1 receiver answered every /play with 500 (AirPlay 2 ones never
+        # get here: _play_url_v2 asks again itself, then refuses).
+        cast.steps.setdefault("play", "/".join(["500"] * _player.PLAY_RETRIES))
+        raise refusal(500, cast.steps, cast.apple) from ex
     finally:
         # pyatv never does this: its feedback task would ping the TV every 2 s for as
         # long as AirCast runs, and the event channel would stay open.
@@ -391,6 +481,22 @@ async def _keep_alive_blind(self) -> None:
     _LOGGER.info("AirPlay connection closed by receiver")
 
 
+@asynccontextmanager
+async def _timing_server(rtsp: RtspSession):  # replaces player.timing_server
+    """pyatv's timing server, closed however play_url ends.
+
+    pyatv closes it only when play_url returns, so every cast that is stopped (play_url
+    is cancelled) or refused would leave a UDP socket open for as long as AirCast runs.
+    """
+    _, server = await asyncio.get_running_loop().create_datagram_endpoint(
+        TimingServer, local_addr=(rtsp.connection.local_ip, 0)
+    )
+    try:
+        yield server
+    finally:
+        server.close()
+
+
 _applied = False
 
 
@@ -398,11 +504,14 @@ def apply() -> None:
     global _applied  # pylint: disable=global-statement
     if _applied:
         return
-    if not hasattr(_player.AirPlayPlayer, "_wait_for_media_to_end") or not all(
-        hasattr(_airplayv2.AirPlayV2, name) for name in ("_setup_base", "start_feedback", "teardown")
+    if not (
+        hasattr(_player, "timing_server")
+        and hasattr(_player.AirPlayPlayer, "_wait_for_media_to_end")
+        and all(hasattr(_airplayv2.AirPlayV2, name) for name in ("_setup_base", "start_feedback", "teardown"))
     ):
         _LOGGER.warning("pyatv internals changed; AirPlay playback patches not applied")
         return
+    _player.timing_server = _timing_server
     _player.AirPlayPlayer._wait_for_media_to_end = _wait_for_live_stream  # pylint: disable=protected-access
     _player.AirPlayPlayer.play_url = _player_play_url
     _airplayv2.AirPlayV2.play_url = _play_url_v2
