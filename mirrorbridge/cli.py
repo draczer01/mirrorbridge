@@ -8,7 +8,7 @@ import getpass
 import logging
 import sys
 
-from . import APP_NAME, CLI_NAME, __version__, airplay_patch, audio, ffmpeg, vdisplay, winmonitors
+from . import APP_NAME, CLI_NAME, __version__, airplay_patch, audio, ffmpeg, mirror, vdisplay, winmonitors
 from .config import Settings, app_data_dir, credentials_file
 from .devices import Device, DeviceManager
 from .session import CastSession, State
@@ -186,6 +186,40 @@ async def cmd_cast(args) -> int:
     return 0
 
 
+async def cmd_mirror(args) -> int:
+    """Screen mirroring (experimental), or with --probe, how the TV takes it."""
+    settings = Settings.load()
+    manager = DeviceManager(asyncio.get_running_loop())
+    device = await _choose(manager, args)
+    if device.airplay is None:
+        print(f"{device.name}: {device.status}")
+        return 1
+    await _pair_if_needed(manager, device)
+    target = mirror.Target.from_device(device)
+
+    if args.probe:
+        print(f"Finding out how {device.name} takes screen mirroring...")
+        result = await mirror.probe_mirroring(target, settings, seconds=args.seconds or 10,
+                                              send_test_pattern=not args.no_video)
+        print()
+        for line in result.lines():
+            print(_cli_words(line, device))
+        return 0 if result.worked else 1
+
+    def status(state: State, message: str) -> None:
+        message = _cli_words(message, device)
+        print(f"[{state.value}] {message}" if message else f"[{state.value}]")
+
+    source = mirror.TEST_PATTERN if args.test_pattern else mirror.DESKTOP
+    session = mirror.MirrorSession(target, settings, status, source=source, seconds=args.seconds)
+    print("Press Ctrl+C to stop mirroring.")
+    try:
+        await session.run()
+    except Exception:  # pylint: disable=broad-except
+        return 1
+    return 0
+
+
 async def cmd_doctor(args) -> int:
     settings = Settings.load()
     print(f"{APP_NAME} {__version__}  (data folder: {app_data_dir()})")
@@ -338,6 +372,15 @@ def build_parser() -> argparse.ArgumentParser:
     cast.add_argument("--extend-mode", choices=list(vdisplay.EXTEND_MODES),
                       help="size of that screen (default: the app's choice, 1080p at first)")
 
+    mirroring = common(sub.add_parser("mirror", help="mirror the screen with a fraction of a second of delay "
+                                                     "(experimental; AirPlay 2 TVs of other brands)"))
+    mirroring.add_argument("-d", "--device", help="name, IP or id")
+    mirroring.add_argument("--probe", action="store_true",
+                           help="find out how the TV takes screen mirroring and remember what works")
+    mirroring.add_argument("--no-video", action="store_true", help="with --probe: send no test pattern")
+    mirroring.add_argument("--test-pattern", action="store_true", help="mirror a test pattern, not the screen")
+    mirroring.add_argument("--seconds", type=float, help="stop after this many seconds (--probe: 10)")
+
     vdd = sub.add_parser("vdd", help="the virtual display driver that --extend uses")
     vdd_sub = vdd.add_subparsers(dest="vdd_command", required=True, metavar="{status,install}")
     vdd_sub.add_parser("status", help="show whether the driver is installed and working")
@@ -368,7 +411,7 @@ def main(argv: list[str] | None = None) -> int:
         logging.getLogger("pyatv").setLevel(logging.WARNING)
 
     handler = {"scan": cmd_scan, "pair": cmd_pair, "forget": cmd_forget, "cast": cmd_cast, "doctor": cmd_doctor,
-               "vdd": cmd_vdd}[args.command]
+               "vdd": cmd_vdd, "mirror": cmd_mirror}[args.command]
     try:
         return asyncio.run(handler(args))
     except KeyboardInterrupt:

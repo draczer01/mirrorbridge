@@ -1,7 +1,7 @@
 """PyInstaller entry point for MirrorBridge.exe (a windowed app that also has a CLI)."""
 import sys
 
-SUBCOMMANDS = {"scan", "pair", "forget", "cast", "doctor", "vdd"}
+SUBCOMMANDS = {"scan", "pair", "forget", "cast", "doctor", "vdd", "mirror"}
 INFO_FLAGS = {"-h", "--help", "--version"}
 
 
