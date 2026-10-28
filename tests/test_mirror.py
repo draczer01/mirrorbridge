@@ -562,3 +562,9 @@ async def test_the_video_connection_closes_cleanly_once_its_buffer_went_out():
     finally:
         server.close()
     assert len(received) == 300_000
+
+
+def test_an_experiment_shows_frames_as_they_arrive():
+    """MIRRORBRIDGE_ON_ARRIVAL=1: codec packets with 14 01 at [6:8] (without RespectTimestamps)."""
+    assert packets.codec_packet(b"avcc", 0, 1920, 1080, on_arrival=True)[6:8] == b"\x14\x01"
+    assert packets.codec_packet(b"avcc", 0, 1920, 1080, on_arrival=False)[6:8] == b"\x16\x01"

@@ -65,7 +65,7 @@ from .errors import MirrorError, answer_of, data_closed, data_refused, needs_fai
 from .flv import CONFIG, FRAME
 from .h264 import TRAILERS, avcc_record, frame_nals, is_idr, join_avcc, parse_avcc, parse_sps, split_avcc
 from .negotiation import NTP, Established, Feedback, Negotiator
-from .packets import VideoCipher, codec_packet, video_key
+from .packets import ON_ARRIVAL, VideoCipher, codec_packet, video_key
 from .source import DESKTOP, TEST_PATTERN, FFmpegSource, FrameQueue, Unit, build_command, ended_text
 from .stats import LOG_SECONDS, StageTimes
 
@@ -421,7 +421,9 @@ class MirrorSession:
         plan = self.profile.plan()
         plan.lead_ms = negotiation.lead_from_env(plan.lead_ms)
         _LOGGER.info("Experiment knobs: keyframe every %g s (MIRRORBRIDGE_KEYFRAME_SECONDS), lead %d ms "
-                     "(MIRRORBRIDGE_LEAD_MS)", ffmpeg.MIRROR_KEYFRAME_SECONDS, plan.lead_ms)
+                     "(MIRRORBRIDGE_LEAD_MS), /feedback every %g s (MIRRORBRIDGE_FEEDBACK_S), frames shown %s "
+                     "(MIRRORBRIDGE_ON_ARRIVAL)", ffmpeg.MIRROR_KEYFRAME_SECONDS, plan.lead_ms,
+                     negotiation.FEEDBACK_INTERVAL, "as they arrive" if ON_ARRIVAL else "at their timestamps")
         _LOGGER.info("Setting up mirroring to %s (%s): %s", self.target.name,
                      "saved settings" if self.saved else "first time", plan.describe())
         est = self.report.established = await negotiator.establish(plan)

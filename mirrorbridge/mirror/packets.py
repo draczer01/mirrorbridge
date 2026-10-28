@@ -23,9 +23,10 @@ heartbeats stay in the clear.
 
 from __future__ import annotations
 
+import os
 import struct
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Optional
 
 from pyatv.support.chacha20 import Chacha20Cipher8byteNonce
 
@@ -83,8 +84,16 @@ class Header:
         return cls(kind, size, timestamp, bool(flags & IDR_FLAG), width, height, timeline, bytes(data[6:8]))
 
 
-def codec_packet(avcc: bytes, timestamp: int, width: int, height: int) -> bytes:
-    return Header(CODEC, len(avcc), timestamp, width=float(width), height=float(height)).pack() + avcc
+# Experiment: MIRRORBRIDGE_ON_ARRIVAL=1 sends codec packets with 14 01 at [6:8], without 0x02 of [6]
+# (RespectTimestamps), so that the TV shows each frame as it arrives, not at its timestamp.
+ON_ARRIVAL = os.environ.get("MIRRORBRIDGE_ON_ARRIVAL") == "1"
+_CODEC_ON_ARRIVAL = b"\x14\x01"
+
+
+def codec_packet(avcc: bytes, timestamp: int, width: int, height: int, on_arrival: Optional[bool] = None) -> bytes:
+    subtype = _CODEC_ON_ARRIVAL if (ON_ARRIVAL if on_arrival is None else on_arrival) else b""
+    return Header(CODEC, len(avcc), timestamp, width=float(width), height=float(height),
+                  subtype=subtype).pack() + avcc
 
 
 def heartbeat_packet(timestamp: int) -> bytes:
