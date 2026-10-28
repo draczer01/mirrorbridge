@@ -21,7 +21,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "pyyaml>=6"]  # pyyaml: the tests read the workflows
 build = ["pyinstaller>=6", "imageio-ffmpeg>=0.6"]
 
 [project.scripts]

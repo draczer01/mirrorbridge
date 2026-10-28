@@ -1,0 +1,114 @@
+name: Release
+
+# Pushing a tag vX.Y.Z builds MirrorBridge.exe on Windows and publishes it as a pre-release, with
+# the zip (exe, docs, licences), FFmpeg's source and SHA256SUMS. The owner turns it into a full
+# release after trying it on a TV. Started by hand (Actions > Release > Run workflow), it builds the
+# same files and keeps them as an Actions artifact, without publishing anything.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check that the tag, the code and the release notes agree on the version
+        id: version
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $version = python packaging/check_version.py "$env:GITHUB_REF_NAME" --notes
+          } else {
+            $version = python packaging/check_version.py
+          }
+          Write-Host "MirrorBridge $version"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
+      - run: pip install -r packaging/requirements-build.txt pytest pytest-asyncio
+      - run: pip install --no-deps -e .
+      - name: Unit tests that run on Windows
+        run: pytest -q tests/test_ffmpeg.py tests/test_hls_server.py tests/test_patch.py tests/test_vdisplay.py tests/test_migration.py tests/test_session.py tests/test_devices.py tests/test_release.py
+      - run: .\packaging\build_exe.ps1
+      - name: Smoke test the exe
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $out = (& .\dist\MirrorBridge.exe --version | Out-String).Trim()
+          Write-Host $out
+          if ($out -ne "MirrorBridge $env:VERSION") { throw "MirrorBridge.exe --version printed '$out', not 'MirrorBridge $env:VERSION'" }
+          $doctor = & .\dist\MirrorBridge.exe doctor --timeout 2 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $doctor
+          if ($code -ne 0) { throw "MirrorBridge.exe doctor exited with $code" }
+          if ($doctor -notmatch "Encoders:") { throw "MirrorBridge.exe doctor did not get as far as the encoders" }
+      - name: Third-party notices
+        run: python packaging/third_party_notices.py --out build/notices
+      - name: Fetch FFmpeg's source (its GPL asks for it next to the binary)
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ffmpeg = python packaging/third_party_notices.py --ffmpeg-version
+          if ($ffmpeg -notmatch '^\d+\.\d+(\.\d+)?$') { throw "Could not tell which FFmpeg release is inside MirrorBridge.exe ('$ffmpeg')" }
+          $file = "build/ffmpeg-source/ffmpeg-$ffmpeg.tar.xz"
+          New-Item -ItemType Directory -Force -Path build/ffmpeg-source | Out-Null
+          Invoke-WebRequest -Uri "https://ffmpeg.org/releases/ffmpeg-$ffmpeg.tar.xz" -OutFile $file -MaximumRetryCount 3 -RetryIntervalSec 15
+          Add-Content -Path $env:GITHUB_ENV -Value "FFMPEG_SOURCE=$file"
+      - name: Package
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $env:SOURCE_DATE_EPOCH = git log -1 --format=%ct
+          python packaging/package_release.py --exe dist/MirrorBridge.exe --notices build/notices --ffmpeg-source "$env:FFMPEG_SOURCE" --out release
+          Get-Content release/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MirrorBridge-${{ steps.version.outputs.version }}-release
+          path: release/
+          if-no-files-found: error
+
+  publish:
+    # Only a pushed tag publishes; a run started by hand stops at the artifact.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: MirrorBridge-${{ needs.package.outputs.version }}-release
+          path: release
+      - name: Publish the pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          notes="docs/release-notes/v${VERSION}.md"
+          test -s "$notes" || { echo "::error::$notes is missing"; exit 1; }
+          (cd release && sha256sum -c SHA256SUMS)
+          compgen -G "release/ffmpeg-*.tar.xz" > /dev/null || { echo "::error::FFmpeg's source is missing"; exit 1; }
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "Release $TAG exists (a re-run): replacing its files"
+            gh release upload "$TAG" release/* --clobber
+          else
+            gh release create "$TAG" release/* --verify-tag --prerelease \
+              --title "MirrorBridge ${VERSION}" --notes-file "$notes"
+          fi

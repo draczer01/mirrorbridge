@@ -31,7 +31,7 @@ jobs:
           python-version: "3.12"
       - run: pip install -r packaging/requirements-build.txt pytest pytest-asyncio
       - run: pip install --no-deps -e .
-      - run: pytest -q tests/test_ffmpeg.py tests/test_hls_server.py tests/test_patch.py tests/test_vdisplay.py tests/test_migration.py
+      - run: pytest -q tests/test_ffmpeg.py tests/test_hls_server.py tests/test_patch.py tests/test_vdisplay.py tests/test_migration.py tests/test_session.py tests/test_devices.py tests/test_release.py
       - run: .\packaging\build_exe.ps1
         shell: pwsh
       - name: Smoke test the exe
@@ -40,7 +40,21 @@ jobs:
           $out = & .\dist\MirrorBridge.exe --version | Out-String
           Write-Host $out
           if ($out -notmatch "MirrorBridge") { throw "MirrorBridge.exe --version printed nothing" }
+      # The release package as release.yml makes it, less FFmpeg's source, so every change proves it still builds.
+      - name: Third-party notices and the release zip
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python packaging/third_party_notices.py --out build/notices
+          python packaging/third_party_notices.py --ffmpeg-version
+          python packaging/package_release.py --exe dist/MirrorBridge.exe --notices build/notices --out release
+          Get-Content release/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
           name: MirrorBridge-windows
           path: dist/MirrorBridge.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MirrorBridge-windows-zip
+          path: release/*.zip
+          if-no-files-found: error
