@@ -32,7 +32,7 @@ jobs:
           python-version: "3.12"
       - run: pip install -r packaging/requirements-build.txt pytest pytest-asyncio
       - run: pip install --no-deps -e .
-      - run: pytest -q tests/test_ffmpeg.py tests/test_hls_server.py tests/test_patch.py tests/test_vdisplay.py tests/test_migration.py tests/test_session.py tests/test_devices.py tests/test_release.py tests/test_i18n.py
+      - run: pytest -q tests/test_ffmpeg.py tests/test_hls_server.py tests/test_patch.py tests/test_vdisplay.py tests/test_migration.py tests/test_session.py tests/test_devices.py tests/test_release.py tests/test_i18n.py tests/test_probe.py
       - run: .\packaging\build_exe.ps1
         shell: pwsh
       - name: Smoke test the exe

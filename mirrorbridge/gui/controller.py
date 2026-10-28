@@ -19,13 +19,13 @@ from typing import Any, Callable, Coroutine, Optional
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import QApplication, QInputDialog, QLineEdit, QMessageBox, QWidget
 
-from .. import airplay_patch, ffmpeg, vdisplay
+from .. import airplay_patch, ffmpeg, probe, vdisplay
 from ..config import Settings, app_data_dir
 from ..devices import Device, DeviceManager
 from ..session import CastSession, State
-from . import i18n
+from . import i18n, winintegration
 from .extend import ExtendScreenSetup, error_text
-from .i18n import state_text, tr
+from .i18n import say, state_text, tr
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -138,6 +138,8 @@ class Controller(QObject):
         self.session: Optional[CastSession] = None
         self.session_future: Optional[concurrent.futures.Future] = None
         self.file_future: Optional[concurrent.futures.Future] = None
+        self.probe_future: Optional[concurrent.futures.Future] = None  # More options > Test this TV
+        self.probe_step = ""
         self.cast_state = State.IDLE
         self.cast_message = ""
         self.casting_to = ""
@@ -167,10 +169,12 @@ class Controller(QObject):
 
     @property
     def is_active(self) -> bool:
-        return self.session_future is not None or self.file_future is not None
+        return self.session_future is not None or self.file_future is not None or self.probe_future is not None
 
     def status(self) -> tuple[str, str]:
         """(icon state, one-line description) shared by the tray and the window."""
+        if self.probe_future is not None:
+            return "busy", tr("status_probing", device=self.casting_to, step=self.probe_step)
         if self.file_future is not None:
             return "active", tr("status_playing_file", device=self.casting_to)
         if self.session_future is not None:
@@ -510,6 +514,8 @@ class Controller(QObject):
             self.runner.submit(self.session.stop())
         if self.file_future:
             self.file_future.cancel()
+        if self.probe_future:
+            self.probe_future.cancel()
 
     def play_file(self, path: str) -> None:
         device = self.selected_device
@@ -547,11 +553,78 @@ class Controller(QObject):
         self.file_future = self.runner.submit(play(), finished, failed)
         self.activity_changed.emit()
 
+    # -- testing a TV --------------------------------------------------------
+
+    def test_tv(self, *_args) -> None:
+        """More options > Test this TV: the probe's three tests, then a dialog with what they found."""
+        device = self.selected_device
+        if self.is_active or device is None or not device.can_cast_video:
+            return
+        if device.needs_pairing or device.needs_password:
+            self.pair(device, then=self.test_tv)
+            return
+        box = QMessageBox(QMessageBox.Question, tr("probe_title", device=device.name),
+                          tr("probe_intro", device=device.name), parent=self._parent())
+        start = box.addButton(tr("probe_start"), QMessageBox.AcceptRole)
+        box.addButton(tr("cancel"), QMessageBox.RejectRole)
+        self.bring_to_front(box)
+        box.exec()
+        if box.clickedButton() is not start:
+            return
+
+        def progress(number: int, total: int, _name: str) -> None:  # on the asyncio loop
+            self.bridge.call(lambda: self._on_probe_step(tr("probe_step", number=number, total=total)))
+
+        def finished(report: probe.ProbeReport) -> None:
+            ended()
+            self.show_probe_report(report)
+
+        def failed(exc: BaseException) -> None:
+            ended()
+            if not isinstance(exc, concurrent.futures.CancelledError):
+                _LOGGER.error("%s: %s", tr("probe_failed_title"), exc)
+                self.show_error(tr("probe_failed_title"), error_text(exc))
+
+        def ended() -> None:
+            self.probe_future = None
+            self.probe_step = ""
+            self.casting_to = ""
+            self.activity_changed.emit()
+
+        self.casting_to = device.name
+        self.probe_step = tr("probe_step", number=1, total=len(probe.TESTS))
+        self.probe_future = self.runner.submit(probe.run(self.manager, device, self.settings, progress=progress),
+                                               finished, failed)
+        self.activity_changed.emit()
+
+    def _on_probe_step(self, step: str) -> None:
+        if self.probe_future is not None:
+            self.probe_step = step
+            self.activity_changed.emit()
+
+    def probe_report_box(self, report: probe.ProbeReport) -> QMessageBox:
+        """What Test this TV found out: the verdict, each test's result, and the report's file."""
+        box = QMessageBox(QMessageBox.Information if report.worked else QMessageBox.Warning,
+                          tr("probe_done", device=report.device), say(report.conclusion()), parent=self._parent())
+        box.setInformativeText("\n".join([*map(say, report.lines()), "", say(report.where())]))
+        folder = box.addButton(tr("log_folder"), QMessageBox.ActionRole)
+        box.addButton(tr("ok"), QMessageBox.AcceptRole)
+        report_file = report.report_file
+        folder.clicked.connect(lambda: winintegration.open_folder(str(report_file.parent if report_file
+                                                                      else app_data_dir())))
+        return box
+
+    def show_probe_report(self, report: probe.ProbeReport) -> None:
+        box = self.probe_report_box(report)
+        self.bring_to_front(box)
+        box.exec()
+
     # -- shutdown ----------------------------------------------------------
 
     def shutdown(self, timeout: float = 8) -> None:
         """Stop any cast (so FFmpeg does not linger) and stop the background loop."""
         session, session_future, file_future = self.session, self.session_future, self.file_future
+        probe_future = self.probe_future
         try:
             if session is not None:
                 try:
@@ -570,6 +643,8 @@ class Controller(QObject):
                 session_future.cancel()
             if file_future is not None:
                 file_future.cancel()
+            if probe_future is not None:
+                probe_future.cancel()
         finally:
             logging.getLogger().removeHandler(self._log_handler)
             self.runner.shutdown()

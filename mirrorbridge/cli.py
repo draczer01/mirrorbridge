@@ -8,7 +8,7 @@ import getpass
 import logging
 import sys
 
-from . import APP_NAME, CLI_NAME, __version__, airplay_patch, audio, ffmpeg, vdisplay, winmonitors
+from . import APP_NAME, CLI_NAME, __version__, airplay_patch, audio, ffmpeg, probe, vdisplay, winmonitors
 from .config import Settings, app_data_dir, credentials_file
 from .devices import Device, DeviceManager
 from .session import CastSession, State
@@ -193,6 +193,32 @@ def _file_cast(device: Device) -> airplay_patch.CastContext:
                                      device=device.identifier, features=device.features)
 
 
+async def cmd_probe(args) -> int:
+    args.device = args.device or args.name
+    settings = Settings.load()
+    manager = DeviceManager(asyncio.get_running_loop())
+    device = await _choose(manager, args)
+    if not device.can_cast_video:
+        print(f"{device.name}: {device.status}")
+        return 1
+    await _pair_if_needed(manager, device)
+
+    def progress(number: int, total: int, name: str) -> None:
+        print(f"Test {number} of {total}: {name}...")
+
+    print(f"Testing {device.name}. Watch the TV: it may show Apple's test video, then MirrorBridge's test "
+          f"pattern. This takes about two minutes.")
+    report = await probe.run(manager, device, settings, seconds=args.seconds, public_url=args.url,
+                             progress=progress)
+    print()
+    for line in report.lines():
+        print(_cli_words(line, device))
+    print()
+    print(_cli_words(report.conclusion(), device))
+    print(report.where())
+    return 0 if report.worked else 1
+
+
 async def cmd_doctor(args) -> int:
     settings = Settings.load()
     print(f"{APP_NAME} {__version__}  (data folder: {app_data_dir()})")
@@ -345,6 +371,14 @@ def build_parser() -> argparse.ArgumentParser:
     cast.add_argument("--extend-mode", choices=list(vdisplay.EXTEND_MODES),
                       help="size of that screen (default: the app's choice, 1080p at first)")
 
+    test = common(sub.add_parser("probe", help="test which ways of sending video a receiver takes, for a bug report"))
+    test.add_argument("name", nargs="?", metavar="device", help="name, IP or id")
+    test.add_argument("-d", "--device", help="name, IP or id")
+    test.add_argument("--seconds", type=float, default=probe.DEFAULT_SECONDS,
+                      help="how long each test watches the TV once it took the video "
+                           f"(default {probe.DEFAULT_SECONDS})")
+    test.add_argument("--url", default=probe.PUBLIC_STREAM, help="the public HLS video of the first two tests")
+
     vdd = sub.add_parser("vdd", help="the virtual display driver that --extend uses")
     vdd_sub = vdd.add_subparsers(dest="vdd_command", required=True, metavar="{status,install}")
     vdd_sub.add_parser("status", help="show whether the driver is installed and working")
@@ -375,7 +409,7 @@ def main(argv: list[str] | None = None) -> int:
         logging.getLogger("pyatv").setLevel(logging.WARNING)
 
     handler = {"scan": cmd_scan, "pair": cmd_pair, "forget": cmd_forget, "cast": cmd_cast, "doctor": cmd_doctor,
-               "vdd": cmd_vdd}[args.command]
+               "probe": cmd_probe, "vdd": cmd_vdd}[args.command]
     try:
         return asyncio.run(handler(args))
     except KeyboardInterrupt:
