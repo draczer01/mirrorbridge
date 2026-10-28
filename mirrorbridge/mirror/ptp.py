@@ -386,8 +386,9 @@ def bind_failure(ex: OSError) -> str:
 def _udp_socket(ip: str, port: int) -> socket.socket:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        # Without it, another program's bind to 0.0.0.0:319 may not stop ours to the address
-        # (Windows), and the conflict would go unseen. Never SO_REUSEADDR.
+        # Windows: no other program may bind over ours later, SO_REUSEADDR or not. Never
+        # SO_REUSEADDR ourselves. (It does not stop our bind going past another program's
+        # 0.0.0.0:319, though: _bind() looks for that.)
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)  # pylint: disable=no-member
         sock.bind((ip, port))
@@ -398,11 +399,33 @@ def _udp_socket(ip: str, port: int) -> socket.socket:
     return sock
 
 
-def _bind(ip: str, port: int) -> socket.socket:
+def _all_addresses_refused(port: int) -> Optional[OSError]:
+    """Why UDP `port` cannot be had on 0.0.0.0 just now (None if it can; the socket closes again)."""
     try:
-        return _udp_socket(ip, port)
+        _udp_socket("0.0.0.0", port).close()
+    except OSError as ex:
+        return ex
+    return None
+
+
+def _bind(ip: str, port: int) -> socket.socket:
+    """Our socket on `ip`:`port`, or PtpUnavailable.
+
+    Windows lets a bind to one address through while another program has the port on 0.0.0.0
+    (SO_EXCLUSIVEADDRUSE or not; Linux and Wine refuse it), and the more specific socket then
+    takes that program's packets to the address, a PTP tool's or Dante's. So there, a fixed port
+    is bound on 0.0.0.0 first: if that fails and the address does not, the port is another
+    program's, on all addresses (or on another one)."""
+    refused = _all_addresses_refused(port) if port and hasattr(socket, "SO_EXCLUSIVEADDRUSE") else None
+    try:
+        sock = _udp_socket(ip, port)
     except OSError as ex:
         raise PtpUnavailable(port, bind_failure(ex), f"{type(ex).__name__}: {ex}") from ex
+    if refused is not None:
+        sock.close()
+        raise PtpUnavailable(port, IN_USE, f"on all addresses or another one: {type(refused).__name__} for "
+                                           f"0.0.0.0:{port}: {refused}") from refused
+    return sock
 
 
 @dataclass

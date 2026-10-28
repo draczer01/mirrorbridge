@@ -53,8 +53,20 @@ def clean(tmp_path, monkeypatch):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(ptp, "PORTS", (0, 0))
     yield
-    assert PtpNode._instance is None  # pylint: disable=protected-access
-    assert not [t for t in threading.enumerate() if t.name.startswith("ptp-")]
+    # A node left behind fails this test only: it is stopped (threads, sockets) and forgotten
+    # first, or every test after this one would find it running on the wrong ports.
+    leaked = PtpNode._instance  # pylint: disable=protected-access
+    if leaked is not None:
+        leaked.refs = 1
+        try:
+            leaked.release()
+        finally:
+            PtpNode._instance = None  # pylint: disable=protected-access
+    threads = [t for t in threading.enumerate() if t.name.startswith("ptp-")]
+    for thread in threads:
+        thread.join(2.0)
+    assert leaked is None, "the test left MirrorBridge's PTP node running"
+    assert not threads, f"the test left PTP threads running: {[t.name for t in threads]}"
 
 
 @pytest.fixture
@@ -304,6 +316,49 @@ async def test_a_port_another_program_has_on_all_addresses_is_in_use_too():
         with pytest.raises(ptp.PtpUnavailable) as caught:
             PtpNode.acquire("127.0.0.1", (port, 0))
     assert caught.value.kind == ptp.IN_USE and caught.value.port == port
+
+
+def test_on_windows_a_fixed_port_is_bound_on_all_addresses_first(monkeypatch):
+    # Windows: a bind to 127.0.0.1:319 goes through while another program has 0.0.0.0:319;
+    # a bind to 0.0.0.0:319 does not.
+    binds, closed = [], []
+
+    class Sock:
+        def __init__(self, address) -> None:
+            self.address = address
+
+        def close(self) -> None:
+            closed.append(self.address)
+
+    def windows(ip, port):
+        binds.append((ip, port))
+        if (ip, port) == ("0.0.0.0", 319):
+            ex = OSError(errno.EADDRINUSE, "Only one usage of each socket address is normally permitted")
+            ex.winerror = 10048
+            raise ex
+        return Sock((ip, port))
+
+    monkeypatch.setattr(ptp, "_udp_socket", windows)
+    monkeypatch.setattr(ptp, "socket", types.SimpleNamespace(SO_EXCLUSIVEADDRUSE=-5))
+    with pytest.raises(ptp.PtpUnavailable) as caught:
+        ptp._bind("127.0.0.1", 319)  # pylint: disable=protected-access
+    assert caught.value.kind == ptp.IN_USE and caught.value.port == 319
+    why = caught.value.explain()
+    assert why.startswith("UDP 319 is in use by another program (on all addresses or another one: OSError for "
+                          "0.0.0.0:319: ")
+    assert why.endswith("Only one usage of each socket address is normally permitted)")
+    assert binds == [("0.0.0.0", 319), ("127.0.0.1", 319)] and closed == [("127.0.0.1", 319)]  # ours closes again
+    binds.clear()
+    closed.clear()
+    assert ptp._bind("127.0.0.1", 320).address == ("127.0.0.1", 320)  # pylint: disable=protected-access
+    assert binds == [("0.0.0.0", 320), ("127.0.0.1", 320)] and closed == [("0.0.0.0", 320)]
+    binds.clear()
+    ptp._bind("127.0.0.1", 0)  # pylint: disable=protected-access
+    assert binds == [("127.0.0.1", 0)]  # an ephemeral port is nobody else's
+    monkeypatch.setattr(ptp, "socket", types.SimpleNamespace())  # not Windows: the bind to the address tells
+    binds.clear()
+    ptp._bind("127.0.0.1", 320)  # pylint: disable=protected-access
+    assert binds == [("127.0.0.1", 320)]
 
 
 def test_exclusive_use_is_asked_for_before_binding_and_never_reuse(monkeypatch):
