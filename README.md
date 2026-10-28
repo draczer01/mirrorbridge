@@ -159,6 +159,7 @@ MirrorBridge.exe cast --extend --extend-mode 4k   # ... at 4K (1080p, 720p or 4k
 MirrorBridge.exe vdd status                    # is the virtual display driver installed and working?
 MirrorBridge.exe vdd install                   # download and install it (asks first; one UAC prompt)
 MirrorBridge.exe forget -d "Living Room"       # remove the saved pairing
+MirrorBridge.exe -v probe "Living Room"        # test which ways of sending video the TV takes, for a bug report
 ```
 
 `cast` starts from the app's settings, so without `--monitor`, `--window` or `--extend` it
@@ -177,6 +178,7 @@ WASAPI loopback (system audio) ──TCP─────────┤ FFmpeg: G
                                              └──► local HTTP server on port 7878
                                                         │
 pyatv: mDNS discovery → PIN pair-setup → pair-verify → AirPlay /play (URL of the stream) → Apple TV
+                                                      └► or the play queue (/command) → LG, Samsung, TCL...
 ```
 
 | Module | Role |
@@ -186,7 +188,9 @@ pyatv: mDNS discovery → PIN pair-setup → pair-verify → AirPlay /play (URL 
 | `mirrorbridge/audio.py` | Captures system audio with WASAPI loopback and sends it to FFmpeg |
 | `mirrorbridge/hls_server.py` | Serves only the playlist and segments, with no caching |
 | `mirrorbridge/session.py` | Runs a cast from start to stop, watches every part, and cleans up |
-| `mirrorbridge/airplay_patch.py` | Keeps pyatv's playback session open for an endless live stream, and plays on TVs that skip Apple's optional requests |
+| `mirrorbridge/airplay_patch.py` | Keeps pyatv's playback session open for an endless live stream, plays on TVs that skip Apple's optional requests, and picks /play or the play queue for each receiver |
+| `mirrorbridge/airplay_queue.py` | AirPlay video through the play queue, for TVs that have no POST /play: one request at a time, each answer matched to its request, and the TV's event channel |
+| `mirrorbridge/probe.py` | *Test this TV*: tries each way of sending the TV video and writes a report for a bug report |
 | `mirrorbridge/winmonitors.py` | Displays at their real resolution and GPU, window rectangles, and a job object that ends FFmpeg with MirrorBridge |
 | `mirrorbridge/vdisplay.py` | Extend screen: adds and removes the virtual monitor through the Parsec driver, keeps it alive, installs the driver |
 | `mirrorbridge/gui/tray.py` | The tray icon and its menu, with every feature |
@@ -220,9 +224,13 @@ the Parsec app, keeps the driver awake). The downloaded driver installer stays i
   a phone does not keep a cast going.
 * **Third-party AirPlay TVs** (LG, Samsung, Sony, Roku, Hisense, TCL...): many support
   AirPlay 2 video, but some only accept audio or photos from non-Apple senders.
-  MirrorBridge marks those as "audio only" or "restricted" in the device list. A TV that
-  pairs but refuses video sent from a URL gets an error listing what it answered to each
-  request.
+  MirrorBridge marks those as "audio only" or "restricted" in the device list. Many of
+  these TVs (TCL and LG among them) have no `POST /play`, the first AirPlay video request,
+  and answer it with 404: MirrorBridge hands them the stream through the *play queue*
+  instead (AirPlay video v2), the way an iPhone does. It picks that from what the TV
+  advertises, also tries it once on any TV that answers `/play` with 404, and remembers
+  which way worked until it quits. A TV that pairs but refuses video sent from a URL gets
+  an error listing what it answered to each request.
 * **"The TV downloaded the playlist but none of the video"**: the TV does not accept
   the video format. On an Apple TV choose *Quality > Delay > Smooth*; on other TVs try a
   lower resolution (with Extend screen, *What to cast > Extended screen size > 720p*) or
@@ -233,11 +241,18 @@ the Parsec app, keeps the driver awake). The downloaded driver installer stays i
   MirrorBridge's credentials"**: most often the TV has dropped MirrorBridge's pairing (a
   firmware update, or MirrorBridge removed from the TV's list of AirPlay devices). Use
   *Device > Forget pairing*, then cast again and type the new PIN.
-* **Reporting a TV that does not work**: run `MirrorBridge.exe -v scan` and
-  `MirrorBridge.exe -v cast -d "TV name"`, and send their output with `mirrorbridge.log`.
-  They show what the TV advertises, what it answered to each AirPlay request, when (and
-  with which video player) it fetched the stream, and anything it asked for that
-  MirrorBridge does not serve.
+* **Reporting a TV that does not work**: choose the TV under *Device*, then *More
+  options* > *Test this TV…* (or run `MirrorBridge.exe -v probe "TV name"`). It takes about
+  two minutes: watch the TV. MirrorBridge tries three ways of sending it video, one after
+  the other: `POST /play` with Apple's public test video, the play queue with the same
+  video, and the play queue with a short cast of MirrorBridge's own test pattern from this
+  PC (nothing from your screen). Then it says what each one did, and where its report is:
+  `%APPDATA%\MirrorBridge\probe-<date>-<time>.log` (*Open log folder* in the result).
+  Send that file with `mirrorbridge.log`. It shows what the TV advertises, what it
+  answered to each AirPlay request, what it said while it played, whether (and with which
+  video player) it fetched the stream from this PC, and anything it asked for that
+  MirrorBridge does not serve. `MirrorBridge.exe -v scan` adds what every receiver on the
+  network advertises.
 * **Choppy video**: choose Smooth latency, lower the bitrate or resolution, or use 5 GHz
   Wi-Fi or Ethernet.
 * **No audio**: `mirrorbridge doctor` shows whether system audio capture works. Audio is
@@ -270,8 +285,17 @@ asked for in vain), the stream for TVs of other brands (master playlist with COD
 FRAME-RATE and AVERAGE-BANDWIDTH, PROGRAM-DATE-TIME), the live-stream keepalive and its
 shutdown however a cast ends, AirPlay 2 playback against mock receivers (PUT refused on
 every protocol, error replies without CSeq, /play answering 500, SETUP refused, hung up
-or never answered, everything refused, and a byte-for-byte check that Apple TVs still
-get exactly pyatv's requests), when a cast gives up on a TV that never plays (and that
+or never answered, everything refused, and a byte-for-byte check that Apple TVs, and
+receivers that do not say what they have, still get exactly pyatv's requests), the play
+queue against a fake TV that has no /play, on real sockets with HAP pair-verify and
+encryption (the route each receiver's feature bits pick, the exact requests and headers,
+the 404 fallback on a new connection and the route remembered, refusals and silence
+explained, the keep-alive never overlapping a command, a late answer never taken for the
+next one, every message on the event channel answered, the TV's player errors, BACK, the
+end of the video and a closed channel ending a cast, and the video stopped and the session
+torn down however it ends), *Test this TV* against the same fake TV with a real cast of the
+test pattern (each test's verdict, the report file, the command line's output, and the
+dialogs in Spanish), CORS for players in a web page, when a cast gives up on a TV that never plays (and that
 it waits for one that is only slow, counting only the TV's own requests), legacy and
 HomeKit-style (AirPlay 2) PIN pairing, wrong-PIN rejection, a full pair-and-cast run
 against the fake Apple TV, falling back from Desktop Duplication to GDI capture, and

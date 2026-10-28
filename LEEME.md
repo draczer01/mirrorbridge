@@ -45,8 +45,8 @@ español, elige una vez **Language / Idioma** > **Español** en su menú.
    * **Calidad**: resolución, cuadros por segundo, retardo, calidad del video y codificador.
    * **Incluir el sonido del equipo**.
    * **Reproducir un archivo de video** en la TV.
-   * **Más opciones**: iniciar con Windows, crear acceso directo en el escritorio y abrir
-     la carpeta de registros.
+   * **Más opciones**: iniciar con Windows, crear acceso directo en el escritorio, abrir
+     la carpeta de registros y **Probar esta TV…** (ver *Avisar de una TV que no funciona*).
    * **Language / Idioma**: English o Español. La ventana completa también lo tiene, abajo.
 7. **Abrir MirrorBridge** muestra la ventana completa. Al cerrarla, MirrorBridge sigue en
    la bandeja. **Salir** detiene la transmisión y cierra MirrorBridge.
@@ -91,8 +91,13 @@ Al suspender el equipo también desaparece: vuelve a transmitir al despertarlo.
 * **TVs que no son Apple** (LG, Samsung, Sony, Hisense, TCL...): muchas aceptan video por
   AirPlay 2, pero algunas solo aceptan audio o fotos de equipos que no son Apple. A estas
   TVs MirrorBridge les manda segmentos de 2 segundos, como pide Apple para TVs con
-  AirPlay 2, sin importar el ajuste de retardo. Si la TV rechaza el video, el mensaje dice
-  qué contestó a cada pedido de MirrorBridge.
+  AirPlay 2, sin importar el ajuste de retardo. Muchas (TCL y LG, entre otras) no tienen
+  `POST /play`, el primer pedido de video de AirPlay, y le contestan 404: a esas
+  MirrorBridge les entrega el video por la *cola de reproducción* (video AirPlay v2), como
+  lo hace un iPhone. Lo elige según lo que anuncia la TV, también lo intenta una vez con
+  cualquier TV que conteste 404 a `/play`, y recuerda qué forma funcionó hasta que se
+  cierra. Si la TV rechaza el video, el mensaje dice qué contestó a cada pedido de
+  MirrorBridge.
 * **TVs con contraseña de AirPlay**: MirrorBridge no puede enviar la contraseña junto con
   el video. Desactiva la contraseña en los ajustes de AirPlay de la TV.
 * **"La TV no terminó de preparar la sesión de AirPlay"** o **"La TV rechazó las
@@ -119,12 +124,23 @@ Idioma**.
 
 ### Avisar de una TV que no funciona
 
+Elige la TV en **Dispositivo** y luego **Más opciones** > **Probar esta TV…**. Tarda unos
+dos minutos: mira la TV. MirrorBridge prueba tres formas de enviarle un video, una tras
+otra: `POST /play` con el video de prueba público de Apple, la cola de reproducción con el
+mismo video, y la cola de reproducción con una transmisión corta de la imagen de prueba de
+MirrorBridge desde este equipo (nada de tu pantalla). Al final dice qué hizo la TV con cada
+una y dónde está el informe: `%APPDATA%\MirrorBridge\probe-<fecha>-<hora>.log` (el botón
+**Abrir carpeta de registros** del resultado lleva ahí).
+
+Manda ese archivo junto con `mirrorbridge.log`. Ahí se ve qué anuncia la TV, qué contestó
+a cada pedido de AirPlay, qué dijo mientras reproducía, si descargó el video de este equipo
+(y con qué reproductor), y si pidió algo que MirrorBridge no tiene.
+
+Lo mismo desde una consola, en la carpeta del exe:
+
 ```
+.\MirrorBridge.exe -v probe "Nombre de la TV"
 .\MirrorBridge.exe -v scan
-.\MirrorBridge.exe -v cast -d "Nombre de la TV"
 ```
 
-Manda lo que muestran estas dos consolas junto con `mirrorbridge.log` (menú *Más
-opciones* > *Abrir carpeta de registros*). Ahí se ve qué anuncia la TV, qué contestó a
-cada pedido de AirPlay, cuándo (y con qué reproductor) descargó el video, y si pidió algo
-que MirrorBridge no tiene.
+`scan` agrega lo que anuncia cada receptor de la red.

@@ -4,6 +4,30 @@ All notable changes to MirrorBridge, which was called AirCast up to version 0.2.
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- TVs that have no `POST /play`, the first AirPlay video request (TCL, LG and others built on
+  Apple's AirPlay SDK for TVs, which answer it with 404), get the stream through the play queue
+  (AirPlay video v2), as an iPhone sends it: chosen from the feature bits the TV advertises
+  (no bit 0, with bit 33 or 49), and tried once, on a new connection, with any receiver that
+  answers `/play` with 404. The way that worked is remembered for each TV until MirrorBridge
+  quits. Apple TVs, and every receiver that advertises `/play`, get exactly the requests they
+  got before. The log says which way was used and why, and what the TV said while it played.
+- *More options* > *Test this TV…* and `MirrorBridge.exe -v probe "TV name"`: tries `POST /play`
+  and the play queue with Apple's public test video, then the play queue with a short cast of
+  MirrorBridge's test pattern, says what the TV did with each (and whether it fetched the stream
+  from the PC, with which player), and writes `probe-<date>-<time>.log` in the log folder, to
+  send with a bug report.
+
+### Changed
+
+- The stream's server answers the CORS preflight (OPTIONS) of video players that run in a web
+  page, and lets them read its errors.
+- `cast --file` and *Play a video file* pick `/play` or the play queue as a cast does.
+- pyatv 0.18 is required: MirrorBridge takes over parts of it.
+
 ## [0.3.0] - 2026-10-28
 
 A pre-release: not yet tried on a real TV.
