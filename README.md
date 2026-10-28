@@ -216,7 +216,8 @@ out until it stops. The full window has the same *Mirror screen* button, under *
 * `%APPDATA%\MirrorBridge\mirroring.json`, which holds what worked for the TV.
 
 Next to *Latency meter*, **More options > Debug** has three switches for tests. They start
-from the defaults, and change the next Mirror screen (and `mirror`), not *Test this TV*:
+from the defaults, and change the next Mirror screen (and `mirror`), not *Test this TV* or
+`mirror --probe`:
 *TV wait (test)* asks the TV to wait 60 to 300 ms after a frame was captured before it shows
 it, instead of what is saved for the TV (*Automatic*; a test value is never saved);
 *Keyframe every* sends a complete picture every 1, 2 (the default) or 5 seconds; *Show frames
@@ -265,11 +266,12 @@ included.
   names any it had no time for). If screen mirroring fails, please send that output with
   `mirrorbridge.log`. Before a probe, a TV that drops the video at once gets one more try with
   the other H.264 header ending.
-* When the network holds the video up for a moment, as Wi-Fi does now and then, the frames
-  that waited still go, a little late, and the TV catches up. Only when the network or the TV
-  cannot keep up for more than about a second are frames dropped up to the next keyframe
-  instead of piling up, so the picture skips but stays current. A TV that takes no video for
-  5 seconds ends the session with an error; ending mirroring on the TV just stops it.
+* When the network holds the video up for a moment, as Wi-Fi does now and then, the frames that
+  waited still go, a little late, and the TV catches up. Only when frames have been late for
+  more than about a second (the network or the TV cannot keep up) are they dropped, up to a
+  keyframe that is on time, instead of piling up, so the picture skips but stays current. A TV
+  that takes no video for 5 seconds ends the session with an error; ending mirroring on the TV
+  just stops it.
 * Every 5 seconds the log says where the frames' time went, from FFmpeg's pipe to the network,
   as median and 95th percentile per stage, with the frame rate FFmpeg delivers (and a warning
   when it falls short), what was waiting to go to the TV, how many frames were dropped or sent

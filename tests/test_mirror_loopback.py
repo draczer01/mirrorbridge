@@ -87,6 +87,20 @@ def _decode(ff: str, stream: bytes, tmp_path) -> tuple[int, str]:
     return sum(1 for line in lines if line and not line.startswith("#")), size
 
 
+def _noisy_pattern(monkeypatch) -> None:
+    """The test pattern with noise on it: frames as big as a busy screen's, so that the buffers
+    on the way hide less of a TV that reads slowly or stops for a while."""
+    real_build_command = mirror_session.build_command
+
+    def noisy(ff, settings, **kw):
+        cmd = real_build_command(ff, settings, **kw)
+        at = next(n for n, arg in enumerate(cmd) if arg.startswith("testsrc="))
+        cmd[at] += ",noise=alls=100:allf=t"
+        return cmd
+
+    monkeypatch.setattr(mirror_session, "build_command", noisy)
+
+
 # -- pairing and the control connection -----------------------------------------------------------------
 
 
@@ -505,7 +519,11 @@ async def test_a_tv_that_drops_the_video_fails_the_session(tv):
     assert len(tv.videos) == 2 and tv.teardowns == 2 and profiles.load("fake-tv") is None
 
 
-async def test_ending_mirroring_on_the_tv_stops_the_session(tv):
+@pytest.mark.parametrize("keyframe_seconds", [2, 5])
+async def test_ending_mirroring_on_the_tv_stops_the_session(tv, keyframe_seconds):
+    """2.5 s in, past AT_ONCE_SECONDS: with a keyframe every 5 s (More options > Debug) too,
+    though only one has gone, it is the TV ending mirroring, not one that did not take the video
+    and is set up again with the other avcC ending."""
     _ffmpeg()
     states = []
     casting = asyncio.Event()
@@ -515,19 +533,22 @@ async def test_ending_mirroring_on_the_tv_stops_the_session(tv):
         if state == State.CASTING:
             casting.set()
 
-    session = MirrorSession(tv.target(), SETTINGS, status, source=TEST_PATTERN, remember=False)
+    settings = dataclasses.replace(SETTINGS, mirror_keyframe_seconds=keyframe_seconds)
+    session = MirrorSession(tv.target(), settings, status, source=TEST_PATTERN, remember=False)
     task = asyncio.ensure_future(session.run())
     await asyncio.wait_for(casting.wait(), 30)
-    await asyncio.sleep(2.5)  # past the second keyframe
+    await asyncio.sleep(2.5)
     tv.end_mirroring()
     await asyncio.wait_for(task, 30)
     assert session.state == State.STOPPED and session.error is None
     assert states[-1] == (State.STOPPED, "The TV ended screen mirroring")
+    assert len(tv.videos) == 1 and not session.report.retried
 
 
 async def test_frames_the_tv_cannot_take_in_time_are_dropped_up_to_a_keyframe(tv, monkeypatch, tmp_path):
     ff = _ffmpeg()
-    monkeypatch.setattr(mirror_session, "CATCH_UP_MS", -10_000)  # as if every frame were far past its lead
+    # As if the network never took the video in time: every P-frame finds too much still waiting.
+    monkeypatch.setattr(mirror_session, "catch_up_bytes", lambda kbps, fps: -1)
     session = MirrorSession(tv.target(), SETTINGS, source=TEST_PATTERN, seconds=2.5, remember=False)
     await asyncio.wait_for(session.run(), 60)
     (video,) = tv.videos
@@ -543,15 +564,7 @@ async def test_a_network_that_holds_the_video_up_for_a_moment_is_ridden_out(tv, 
     them, P-frames, instead of every frame up to the next keyframe being dropped (2 s of a
     frozen picture)."""
     ff = _ffmpeg()
-    real_build_command = mirror_session.build_command
-
-    def noisy(ff, settings, **kw):  # frames as big as a busy screen's: the buffers on the way hide less
-        cmd = real_build_command(ff, settings, **kw)
-        at = next(n for n, arg in enumerate(cmd) if arg.startswith("testsrc="))
-        cmd[at] += ",noise=alls=100:allf=t"
-        return cmd
-
-    monkeypatch.setattr(mirror_session, "build_command", noisy)
+    _noisy_pattern(monkeypatch)
     tv.reconfigure(pause_after=15, pause_seconds=0.6, video_buffer=4096)
     settings = dataclasses.replace(SETTINGS, video_bitrate_kbps=4000)
     session = MirrorSession(tv.target(), settings, source=TEST_PATTERN, seconds=3, remember=False)
@@ -573,10 +586,59 @@ async def test_a_network_that_holds_the_video_up_for_a_moment_is_ridden_out(tv, 
 
 
 @SMALL_BUFFERS
+async def test_a_network_that_holds_the_video_up_for_longer_than_the_tv_is_given_gets_a_fresh_start(
+        tv, tmp_path, caplog, monkeypatch):
+    """The TV reads none of the video for 1.8 s, more than CATCH_UP_MS past the lead: frames are
+    dropped up to a keyframe, and not to the one that waited through the pause (already late,
+    with frames behind it), so that the TV is back to real time, not left behind."""
+    ff = _ffmpeg()
+    _noisy_pattern(monkeypatch)
+    tv.reconfigure(pause_after=15, pause_seconds=1.8, video_buffer=4096)
+    settings = dataclasses.replace(SETTINGS, video_bitrate_kbps=4000)
+    session = MirrorSession(tv.target(), settings, source=TEST_PATTERN, seconds=5, remember=False)
+    with caplog.at_level(logging.INFO, logger=mirror_session.__name__):
+        await asyncio.wait_for(session.run(), 60)
+    (video,) = tv.videos
+    assert video.errors == [] and video.paused_at == 15 and session.report.latency["dropped"] > 0
+    assert "the TV is given to catch up" in caplog.text
+    # Where frames were dropped, the TV's times jump: the frame after the jump is a keyframe,
+    # and it came on time.
+    shown = [from_ntp(stamp) for stamp, _, _ in video.frames]
+    gap = max(range(1, len(shown)), key=lambda n: shown[n] - shown[n - 1])
+    assert shown[gap] - shown[gap - 1] > NS and video.frames[gap][1]
+    assert video.arrived[gap] <= shown[gap]
+    assert _decode(ff, bytes(video.annexb), tmp_path)[0] == len(video.frames)
+
+
+@SMALL_BUFFERS
+async def test_a_network_slower_than_the_video_does_not_leave_the_tv_behind(tv, tmp_path, caplog, monkeypatch):
+    """The TV reads about three quarters of the bitrate (about 2.4 Mbit/s of noise at 4 Mbit/s):
+    the frames fall behind a little more every second. Once they have been past their lead for
+    CATCH_UP_MS, frames are dropped up to a keyframe that is on time; none waits until it alone
+    is a whole CATCH_UP_MS late, so none comes to the TV that late."""
+    ff = _ffmpeg()
+    _noisy_pattern(monkeypatch)
+    tv.reconfigure(read_kbps=1800, video_buffer=4096)
+    settings = dataclasses.replace(SETTINGS, video_bitrate_kbps=4000)
+    session = MirrorSession(tv.target(), settings, source=TEST_PATTERN, seconds=7, remember=False)
+    with caplog.at_level(logging.INFO, logger=mirror_session.__name__):
+        await asyncio.wait_for(session.run(), 60)
+    (video,) = tv.videos
+    assert video.errors == [] and session.report.latency["dropped"] > 0
+    assert "frames have been past their lead for" in caplog.text
+    shown = [from_ntp(stamp) for stamp, _, _ in video.frames]
+    past = [arrived - at for at, arrived in zip(shown, video.arrived)]
+    assert max(past) < mirror_session.CATCH_UP_MS * NS // 1000
+    gaps = [n for n in range(1, len(shown)) if shown[n] - shown[n - 1] > 200 * NS // 1000]
+    assert gaps and all(video.frames[n][1] for n in gaps) and past[gaps[0]] <= 0
+    assert _decode(ff, bytes(video.annexb), tmp_path)[0] == len(video.frames)
+
+
+@SMALL_BUFFERS
 async def test_a_slow_tv_gets_fewer_frames_not_later_ones(tv):
     """The video connection's buffers are kept to about two frames (session.send_buffer), so
-    that a TV that reads slowly pushes back at once; once frames are more than CATCH_UP_MS past
-    their lead, they are dropped rather than queued."""
+    that a TV that reads slowly pushes back at once; once frames have been past their lead for
+    more than CATCH_UP_MS, they are dropped rather than queued."""
     _ffmpeg()
     tv.reconfigure(read_kbps=60, video_buffer=8192)
     session = MirrorSession(tv.target(), SETTINGS, source=TEST_PATTERN, seconds=8, remember=False)

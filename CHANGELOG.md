@@ -35,10 +35,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   connection of its own, timed by MirrorBridge's own clock that the TV asks over UDP (allow
   inbound UDP 7880-7889 in Windows Firewall). Apple TVs and Macs need FairPlay and are not
   supported. No sound yet. When the network or the TV cannot keep up for more than about a
-  second, frames are dropped up to the next keyframe instead of piling up; a TV that takes no
-  video for 5 seconds ends the session with an error, and ending mirroring on the TV stops it.
-  If FFmpeg cannot capture or encode at the start (the driver refuses ddagrab, the GPU encoder
-  is busy), it goes on with GDI capture, then with x264, as a cast does.
+  second, frames are dropped up to a keyframe that is on time instead of piling up; a TV that
+  takes no video for 5 seconds ends the session with an error, and ending mirroring on the TV
+  stops it. If FFmpeg cannot capture or encode at the start (the driver refuses ddagrab, the
+  GPU encoder is busy), it goes on with GDI capture, then with x264, as a cast does.
 - *Mirror screen (low latency, experimental)* in the tray menu, next to *Start casting*, and in
   the window: mirrors what *What to cast* names (a display, a window or the virtual screen) with
   the *Quality* settings (and what *Test this TV* or `mirror --probe` found for the TV), showing
@@ -79,19 +79,21 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   place of the lead saved for the TV (*Automatic*), and never saved in its place; *Keyframe
   every* 1, 2 (the default) or 5 seconds; *Show frames on arrival (test)*:
   codec packets without RespectTimestamps, so that a TV shows each frame as it comes. The log
-  says, as each session starts, what it used. *Test this TV* leaves them out.
+  says, as each session starts, what it used. *Test this TV* and `mirror --probe` leave them
+  out.
 
 ### Changed
 
-- *Mirror screen* rides out short network stalls instead of freezing. With the PC on Ethernet
-  and a TCL TV on Wi-Fi, the network now and then took 100 to 480 ms to take a frame, and each
-  time every frame up to the next keyframe was dropped: up to 2 seconds of a frozen picture
-  (1.4 s at the start of a session, for a stall of 108 ms). The frames that waited now go late,
-  with the times they were taken for, as long as they are at most a second past the TV's lead;
-  only a network that cannot keep up for longer gets frames dropped up to the next keyframe.
-  The log's "Mirroring:" lines count the frames sent late, and a line says how long the network
-  held up and how many frames went late instead of being dropped.
-
+- *Mirror screen* rides out short network stalls: the picture freezes only while the network
+  holds the video up, no longer until the next keyframe. With the PC on Ethernet and a TCL TV
+  on Wi-Fi, the network now and then took 100 to 480 ms to take a frame, and each time every
+  frame up to the next keyframe was dropped: up to 2 seconds of a frozen picture (1.4 s at the
+  start of a session, for a stall of 108 ms). The frames that waited now go late, with the
+  times they were taken for, as long as frames have been past the TV's lead for no more than a
+  second; only a network that cannot keep up for longer gets frames dropped, up to a keyframe
+  that is on time, so that the TV is not left behind. The log's "Mirroring:" lines count the
+  frames sent late, and a line says how long the network held up and how many frames went late
+  instead of being dropped.
 - The stream's server answers the CORS preflight (OPTIONS) of video players that run in a web
   page, and lets them read its errors.
 - `cast --file` and *Play a video file* pick `/play` or the play queue as a cast does.

@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QFileDialog, QMenu, QSystemTrayIcon
 
 from .. import APP_NAME, ffmpeg, vdisplay
 from ..config import app_data_dir
+from ..mirror.session import lead_override, on_arrival
 from . import winintegration
 from .controller import Controller
 from .extend import EXTEND_SIZES, error_text, size_label, size_name
@@ -248,16 +249,17 @@ class TrayMenu(QObject):
 
     def _mirror_switches(self, debug: QMenu) -> None:
         """Mirror screen's test switches, for the sessions after they are set (the mirror command
-        too; Test this TV leaves them out): how long the TV waits to show a frame, how often a
-        keyframe comes, and frames shown as they come instead of at their time."""
+        too; Test this TV and mirror --probe leave them out): how long the TV waits to show a
+        frame, how often a keyframe comes, and frames shown as they come instead of at their time.
+        Each shows what a session would use, whatever a hand-edited settings.json holds."""
         s = self.c.settings
         debug.addSeparator()
         self._radio(debug, tr("debug_lead"), [(f"{ms} ms" if ms else tr("debug_lead_auto"), ms) for ms in DEBUG_LEADS],
-                    s.mirror_lead_ms, "mirror_lead_ms")
+                    lead_override(s), "mirror_lead_ms")
         self._radio(debug, tr("debug_keyframes"), [(f"{n} s", n) for n in ffmpeg.MIRROR_KEYFRAME_CHOICES],
                     ffmpeg.mirror_keyframe_seconds(s.mirror_keyframe_seconds), "mirror_keyframe_seconds")
         self._action(debug, tr("debug_on_arrival"), lambda on: self.c.update_settings(mirror_on_arrival=on),
-                     checkable=True, checked=s.mirror_on_arrival)
+                     checkable=True, checked=on_arrival(s))
 
     # -- actions -----------------------------------------------------------
 

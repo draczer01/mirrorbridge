@@ -164,11 +164,11 @@ def test_the_menu_is_in_spanish_too(controller):
     tray._rebuild()  # pylint: disable=protected-access
     assert _latency_action(tray).text() == "Medidor de latencia"
     items = _debug(tray)
-    assert list(items) == ["Medidor de latencia", "Espera de la TV (prueba)", "Cuadro completo cada",
-                           "Mostrar al llegar (prueba)"]
+    assert list(items) == ["Medidor de latencia", "Espera de la TV (prueba)", "Cuadro clave cada",
+                           "Mostrar cuadros al llegar (prueba)"]
     assert list(_choices(items["Espera de la TV (prueba)"])) == [
         "Automática (la guardada para la TV)", "60 ms", "100 ms", "150 ms", "200 ms", "300 ms"]
-    assert _checked(items["Cuadro completo cada"]) == ["2 s"]
+    assert _checked(items["Cuadro clave cada"]) == ["2 s"]
 
 
 def test_mirror_screens_test_switches_are_next_to_the_latency_meter(controller):
@@ -201,6 +201,11 @@ def test_mirror_screens_test_switches_are_next_to_the_latency_meter(controller):
     items["Show frames on arrival (test)"].trigger()
     assert (s.mirror_lead_ms, s.mirror_on_arrival) == (0, False)
 
-    s.mirror_keyframe_seconds = 3  # a settings.json edited by hand: 2 s is what is used, and shown
+    # A settings.json edited by hand: each shows what a session uses (2 s, the TV's own lead, at
+    # their time), and the menu is still made.
+    s.mirror_keyframe_seconds, s.mirror_lead_ms, s.mirror_on_arrival = 3, -5, "false"
     tray._rebuild()  # pylint: disable=protected-access
-    assert _checked(_debug(tray)["Keyframe every"]) == ["2 s"]
+    items = _debug(tray)
+    assert _checked(items["Keyframe every"]) == ["2 s"]
+    assert _checked(items["TV wait (test)"]) == ["Automatic (saved for the TV)"]
+    assert not items["Show frames on arrival (test)"].isChecked()

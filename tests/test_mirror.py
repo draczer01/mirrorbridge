@@ -20,8 +20,9 @@ from mirrorbridge.mirror.control import ReceiverInfo, Target, parse_features, se
 from mirrorbridge.mirror.datachannel import DataChannel
 from mirrorbridge.mirror.errors import no_timing, refused
 from mirrorbridge.mirror.negotiation import CONTROL_FIRST, MEDIA_FIRST, PTP, Plan
-from mirrorbridge.mirror.session import (catch_up_bytes, canvas_limit, choose_canvas, choose_fps, lead_override,
-                                         send_buffer)
+from mirrorbridge.mirror import session as mirror_session
+from mirrorbridge.mirror.session import (MirrorSession, catch_up_bytes, canvas_limit, choose_canvas, choose_fps,
+                                         lead_override, on_arrival, send_buffer)
 from mirrorbridge.mirror.source import DESKTOP, TEST_PATTERN, FrameQueue, Unit, build_command
 
 # What x264 wrote for a 640x360 test pattern (High, level 3.0), and the record the TV got for it.
@@ -362,11 +363,87 @@ def test_a_second_of_the_bitrate_may_wait_for_the_network_before_frames_are_drop
     assert catch_up_bytes(100, 30) == send_buffer(100, 30)  # never less than the send buffers
 
 
+MS = 1_000_000
+CATCH_UP = mirror_session.CATCH_UP_MS * MS
+
+
+class _Connection:
+    buffered = 0  # what asyncio still holds of the video connection
+
+
+def _sender(*waiting: bool, buffered: int = 0) -> MirrorSession:
+    """A session about to send a frame, with frames waiting behind it (True: a keyframe)."""
+    session = MirrorSession(Target("TV", "1.2.3.4"), Settings(), profile=profiles.MirrorProfile())
+    # pylint: disable=protected-access
+    session._frames = FrameQueue(limit=60)
+    for n, keyframe in enumerate(waiting):
+        session._frames.put(_unit(keyframe=keyframe, n=n))
+    session._data = _Connection()
+    session._data.buffered = buffered
+    session._catch_up = catch_up_bytes(8000, 30)
+    return session
+
+
+def test_frames_the_network_held_up_go_late_for_as_long_as_the_tv_is_given_to_catch_up():
+    """_drop_reason(idr, waiting, late_ns, behind_ns, fresh) for P-frames while sending."""
+    # pylint: disable=protected-access
+    reason = _sender(False, False)._drop_reason
+    assert reason(False, False, -50 * MS, -50 * MS, False) == ""  # on time
+    assert reason(False, False, CATCH_UP - MS, CATCH_UP - MS, False) == ""  # late, within CATCH_UP_MS
+    # This frame alone, or the frames since the first that went late, past their lead for longer.
+    assert reason(False, False, CATCH_UP + MS, CATCH_UP + MS, False) == (
+        "frames have been past their lead for 1001 ms, more than the 1000 ms the TV is given to catch up")
+    assert "for 1100 ms" in reason(False, False, 200 * MS, CATCH_UP + 100 * MS, False)
+    assert reason(False, False, -MS, CATCH_UP + 100 * MS, False) == ""  # on time again: the TV caught up
+    # More than about CATCH_UP_MS of the bitrate still in asyncio's buffer.
+    most = catch_up_bytes(8000, 30)
+    assert _sender(buffered=most)._drop_reason(False, False, 0, 0, False) == ""
+    assert _sender(buffered=most + 1)._drop_reason(False, False, 0, 0, False) == (
+        "976 KB are still waiting for the network")
+
+
+def test_a_drop_ends_on_a_keyframe_that_brings_the_tv_back_to_real_time():
+    """Keyframes, and frames waiting for one (waiting=True)."""
+    # pylint: disable=protected-access
+    # While sending, a keyframe goes, unless a newer one waits or the TV has been behind too long.
+    assert _sender(False)._drop_reason(True, False, 500 * MS, 500 * MS, False) == ""
+    assert _sender(False, True)._drop_reason(True, False, 0, 0, False) == "a newer keyframe is waiting"
+    assert "catch up" in _sender(False)._drop_reason(True, False, CATCH_UP + MS, CATCH_UP + MS, False)
+    # Dropping, P-frames wait for a keyframe, and one on time, or the last frame that waited, ends it.
+    assert _sender()._drop_reason(False, True, -50 * MS, 0, True) == "waiting for a keyframe"
+    assert _sender(False, False)._drop_reason(True, True, -MS, 0, False) == ""
+    assert _sender()._drop_reason(True, True, 500 * MS, 500 * MS, False) == ""
+    # Not one that waited and is past its lead with frames behind it: the TV would stay behind ...
+    assert _sender(False, False)._drop_reason(True, True, 500 * MS, 500 * MS, False) == (
+        "the keyframe is 500 ms past its lead, with frames behind it")
+    assert _sender(False, True)._drop_reason(True, True, -MS, 0, False) == "a newer keyframe is waiting"
+    # ... unless FFmpeg gave it once the drop began: no drop waits longer than for that one.
+    assert _sender(False, False)._drop_reason(True, True, 500 * MS, 500 * MS, True) == ""
+
+
+def test_the_tv_dropping_the_video_at_once_is_a_matter_of_time_not_of_keyframes():
+    """Within AT_ONCE_SECONDS of the first frame, whatever the Debug menu's keyframe interval."""
+    # pylint: disable=protected-access
+    session = MirrorSession(Target("TV", "1.2.3.4"), Settings(mirror_keyframe_seconds=5),
+                            profile=profiles.MirrorProfile())
+    assert session._at_once(10 * clock.NS)  # no frame went yet
+    session._first_sent_ns = 10 * clock.NS
+    assert session._at_once(10 * clock.NS + 1_900 * MS)
+    assert not session._at_once(10 * clock.NS + 2_100 * MS)
+
+
 def test_the_debug_menus_tv_wait_stays_within_what_a_profile_takes():
     assert lead_override(Settings()) == 0  # automatic: the TV's own
     assert lead_override(Settings(mirror_lead_ms=60)) == 60 and lead_override(Settings(mirror_lead_ms=300)) == 300
     assert lead_override(Settings(mirror_lead_ms=5)) == 20 and lead_override(Settings(mirror_lead_ms=5000)) == 1000
     assert lead_override(Settings(mirror_lead_ms="fast")) == 0 and lead_override(Settings(mirror_lead_ms=-1)) == 0
+    assert lead_override(Settings(mirror_lead_ms=True)) == 0
+
+
+def test_frames_are_shown_on_arrival_only_when_settings_json_says_true():
+    assert on_arrival(Settings(mirror_on_arrival=True)) and not on_arrival(Settings())
+    for edited in ("false", "true", 1, None):  # by hand: the default
+        assert not on_arrival(Settings(mirror_on_arrival=edited))
 
 
 # -- what is asked, and of whom ------------------------------------------------------------------------

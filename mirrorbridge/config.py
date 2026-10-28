@@ -65,7 +65,7 @@ class Settings:
     bind_address: str = ""  # empty -> auto-detect the interface reaching the device
 
     # Mirror screen's test switches (More options > Debug), for the sessions after they are set;
-    # Test this TV leaves them out
+    # Test this TV and mirror --probe leave them out
     mirror_lead_ms: int = 0  # how long the TV waits to show a frame; 0 = what is saved for the TV
     mirror_keyframe_seconds: int = 2  # 1, 2 or 5 (ffmpeg.MIRROR_KEYFRAME_CHOICES)
     mirror_on_arrival: bool = False  # ask the TV to show each frame as it comes, not at its time

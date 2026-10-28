@@ -110,8 +110,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "debug_lead": {"en": "TV wait (test)", "es": "Espera de la TV (prueba)"},
     "debug_lead_auto": {"en": "Automatic (saved for the TV)", "es": "Automática (la guardada para la TV)"},
-    "debug_keyframes": {"en": "Keyframe every", "es": "Cuadro completo cada"},
-    "debug_on_arrival": {"en": "Show frames on arrival (test)", "es": "Mostrar al llegar (prueba)"},
+    "debug_keyframes": {"en": "Keyframe every", "es": "Cuadro clave cada"},
+    "debug_on_arrival": {"en": "Show frames on arrival (test)", "es": "Mostrar cuadros al llegar (prueba)"},
     "language_menu": {"en": "Language", "es": "Idioma"},
     "quit": {"en": "Quit", "es": "Salir"},
     # Notifications
