@@ -24,6 +24,16 @@ PC = "192.168.1.32"  # a player on the PC itself (VLC, a browser)
 
 
 @pytest.fixture
+def spanish():
+    """The GUI in Spanish, for the test's length."""
+    from mirrorbridge.gui import i18n
+
+    i18n.set_language("es")
+    yield i18n
+    i18n.set_language("en")
+
+
+@pytest.fixture
 def clock(monkeypatch):
     """session.time.monotonic() moves on STEP s per call from T0 (asyncio's own clock is untouched)."""
     now = [T0]
@@ -181,6 +191,46 @@ async def test_tv_that_asks_for_a_missing_segment_says_so(clock):
     fetches = fetching(TV, 3, until=60) + [(4, TV, "404 /seg_00001.ts")]
     with pytest.raises(StreamRejected, match=r"also asked for /seg_00001\.ts, which MirrorBridge does not have"):
         await _session(clock, fetches, accepted=1)._supervise()
+
+
+@pytest.mark.parametrize("for_apple, encoder, no_codecs, settings, hint, option", [
+    (True, "libx264", False, {"latency_mode": "low"}, "Prueba Calidad > Retraso > Fluido.", "--latency smooth"),
+    (False, "h264_mf", True, {}, "FFmpeg no pudo decirle a la TV qué códecs produce Windows Media Foundation: elige "
+     "Calidad > Codificador > x264 (CPU).", "--encoder libx264"),
+    (False, "libx264", False, {"extend_screen": True}, "Prueba Qué transmitir > Tamaño de la pantalla extendida > "
+     "720p o 30 cuadros por segundo.", "--extend-mode 720p"),
+    (False, "libx264", False, {}, "Prueba una resolución más baja o 30 cuadros por segundo.", None),
+])
+async def test_the_gui_gives_the_hints_in_spanish(clock, spanish, for_apple, encoder, no_codecs, settings, hint,
+                                                  option):
+    """The window names the menu items as its menu does; the command line names its options."""
+    from mirrorbridge import cli
+
+    fetches = fetching(TV, 3, until=60) + [(4, TV, "404 /seg_00001.ts")]
+    session = _session(clock, fetches, accepted=1, for_apple=for_apple, **settings)
+    session.encoder, session.no_codecs = encoder, no_codecs
+    if settings.get("extend_screen"):
+        session.virtual_device = r"\\.\DISPLAY9"
+    with pytest.raises(StreamRejected) as err:
+        await session._supervise()
+    assert spanish.say(err.value.args[0]) == (
+        "La TV descargó la lista de reproducción, pero nada del video (también pidió /seg_00001.ts, que "
+        f"MirrorBridge no tiene), así que probablemente no acepta este formato de video. {hint}"
+    )
+    if option:
+        assert option in cli._cli_words(str(err.value), session.device)
+
+
+async def test_the_gui_says_who_else_fetched_the_stream_in_spanish(clock, spanish):
+    session = _session(clock, fetching(PC, 2, until=80, segments_from=2), accepted=1, agents={PC: "VLC/3.0.20"})
+    with pytest.raises(StreamNotFetched) as err:
+        await session._supervise()
+    assert spanish.say(err.value.args[0]) == (
+        f"La TV aceptó el video, pero nunca lo descargó de http://{PC}:7878/master.m3u8. Permite MirrorBridge "
+        "(o el puerto TCP de entrada 7878) en el Firewall de Windows para redes privadas, y revisa que el equipo "
+        f"y la TV estén en la misma red. ({PC} (VLC/3.0.20) sí lo descargó, pero esa no es la dirección de la TV, "
+        f"{TV}.)"
+    )
 
 
 class FakeFFmpeg:

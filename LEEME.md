@@ -88,8 +88,8 @@ Al suspender el equipo también desaparece: vuelve a transmitir al despertarlo.
   qué contestó a cada pedido de MirrorBridge.
 * **TVs con contraseña de AirPlay**: MirrorBridge no puede enviar la contraseña junto con
   el video. Desactiva la contraseña en los ajustes de AirPlay de la TV.
-* **"The TV did not finish setting up the AirPlay session"** o **"The TV rejected
-  MirrorBridge's credentials"**: casi siempre la TV olvidó el emparejamiento con
+* **"La TV no terminó de preparar la sesión de AirPlay"** o **"La TV rechazó las
+  credenciales de MirrorBridge"**: casi siempre la TV olvidó el emparejamiento con
   MirrorBridge. Usa *Dispositivo > Olvidar emparejamiento* y vuelve a transmitir; escribe el
   PIN nuevo.
 * Si algo falla, el registro está en `%APPDATA%\MirrorBridge\mirrorbridge.log` (menú *Más
@@ -107,6 +107,7 @@ Se abre una consola que muestra FFmpeg, los codificadores de tu tarjeta de video
 puede capturar el sonido, las pantallas, si el controlador de pantalla virtual está listo
 y las TVs encontradas. Una captura de esa ventana sirve mucho para encontrar problemas.
 `.\MirrorBridge.exe vdd status` muestra solo el estado del controlador de pantalla virtual.
+La consola escribe en inglés; el menú y la ventana, en el idioma de Windows.
 
 ### Avisar de una TV que no funciona
 

@@ -393,28 +393,44 @@ def test_menu_items_in_errors_are_named_as_the_gui_and_the_command_line_name_the
     from mirrorbridge import cli
     from mirrorbridge.gui import i18n
 
-    message = " ".join(str(e) for e in (
-        airplay_patch.refusal(403, {"play": 403}),
-        airplay_patch.setup_failed({"setup": "not paired"}),
-    )) + (" Try Quality > Delay > Smooth. Choose Quality > Encoder > x264 (CPU)."  # session.py's hints
-          " Try What to cast > Extended screen size > 720p, or 30 frames per second.")
-    assert i18n.menu_paths(message) == message  # English
+    errors = (airplay_patch.refusal(403, {"play": 403}), airplay_patch.setup_failed({"setup": "not paired"}))
+    message = " ".join(str(e) for e in errors)
+    assert " ".join(i18n.say(e.args[0]) for e in errors) == message  # English
     i18n.set_language("es")
     try:
-        spanish = i18n.menu_paths(message)
+        spanish = " ".join(i18n.say(e.args[0]) for e in errors)
     finally:
         i18n.set_language("en")
-    for words in ("Dispositivo > Olvidar emparejamiento", "Dispositivo > Emparejar con PIN",
-                  "Calidad > Retraso > Fluido", "Calidad > Codificador > x264 (CPU)",
-                  "Qué transmitir > Tamaño de la pantalla extendida > 720p"):
-        assert words in spanish
+    assert spanish == (
+        "La TV ya no acepta el emparejamiento de MirrorBridge (HTTP 403). Usa Dispositivo > Olvidar "
+        "emparejamiento, vuelve a transmitir y escribe el PIN nuevo que muestra la TV. La TV no terminó de "
+        "preparar la sesión de AirPlay (setup=not paired). La TV pide que MirrorBridge se empareje primero: "
+        "usa Dispositivo > Emparejar con PIN y vuelve a transmitir."
+    )
     options = cli._cli_words(message, SimpleNamespace(name="Sala familiar"))
-    for words in ('forget -d "Sala familiar"', 'pair -d "Sala familiar"', "--latency smooth", "--encoder libx264",
-                  "--extend-mode 720p"):
+    for words in ('forget -d "Sala familiar"', 'pair -d "Sala familiar"'):
         assert words in options
-    assert not any(english in spanish for english in ("Device", "Forget", "Pair with", "Quality", "Delay", "Encoder",
-                                                      "What to cast", "Extended screen"))
     assert " > " not in options
+
+
+@pytest.mark.parametrize("error", [
+    airplay_patch.refusal(401, {}), airplay_patch.refusal(453, {}), airplay_patch.refusal(470, {}),
+    airplay_patch.refusal(None, {"play": "no answer"}), airplay_patch.refusal(500, {"play": 500}, apple=True),
+    airplay_patch.refusal(501, {"play": 501}, apple=False),
+    airplay_patch.credentials_refused({"pair-verify": "not authenticated"}, password=True),
+    airplay_patch.setup_failed({"setup": "no answer"}),
+])
+def test_every_refusal_is_in_spanish_for_the_gui(error):
+    from mirrorbridge.gui import i18n
+
+    assert i18n.say(error.args[0]) == str(error)
+    i18n.set_language("es")
+    try:
+        spanish = i18n.say(error.args[0])
+    finally:
+        i18n.set_language("en")
+    assert spanish.startswith(("La TV", "El Apple TV", "El acceso", "Esta TV")), spanish
+    assert not any(words in spanish for words in ("The TV", " the ", "Device >", "Forget")), spanish
 
 
 async def test_setup_refused_is_explained():

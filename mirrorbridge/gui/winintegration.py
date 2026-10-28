@@ -7,6 +7,8 @@ import os
 import subprocess
 import sys
 
+from ..text import Text
+
 _LOGGER = logging.getLogger(__name__)
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -128,7 +130,7 @@ def create_desktop_shortcut(description: str = "MirrorBridge") -> str:
     out = result.stdout.decode("utf-8", "replace").strip()
     if result.returncode != 0:
         err = result.stderr.decode("utf-8", "replace").strip()
-        raise RuntimeError(err or "PowerShell failed")
+        raise RuntimeError(err or Text("powershell_failed", "PowerShell failed"))
     return out
 
 

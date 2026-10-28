@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Settings
+from .text import Text
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -134,10 +135,10 @@ def find_ffmpeg(configured: str = "") -> str:
         return imageio_ffmpeg.get_ffmpeg_exe()
     except Exception:  # pylint: disable=broad-except
         pass
-    raise FFmpegNotFound(
-        "FFmpeg was not found. Use the MirrorBridge.exe build (FFmpeg included), run "
+    raise FFmpegNotFound(Text(
+        "ffmpeg_not_found", "FFmpeg was not found. Use the MirrorBridge.exe build (FFmpeg included), run "
         "'pip install imageio-ffmpeg', or put ffmpeg.exe next to MirrorBridge."
-    )
+    ))
 
 
 def _run(args: list[str], timeout: float = 15) -> subprocess.CompletedProcess:
@@ -210,7 +211,7 @@ def pick_encoder(ffmpeg: str, wanted: str) -> str:
     for enc in ENCODER_PREFERENCE:
         if encoder_works(ffmpeg, enc):
             return enc
-    raise RuntimeError("No working H.264 encoder found in this FFmpeg build")
+    raise RuntimeError(Text("no_encoder", "No working H.264 encoder found in this FFmpeg build"))
 
 
 def pick_capture_backend(
@@ -316,7 +317,8 @@ def window_region(title: str, monitors: list[Monitor]) -> tuple[Monitor, Region]
 
     rect = winmonitors.window_rect(title) if sys.platform == "win32" else None
     if rect is None:
-        raise RuntimeError(f'The window "{title}" is not on screen. Restore it if it is minimized, or pick another one.')
+        raise RuntimeError(Text("window_hidden", 'The window "{title}" is not on screen. Restore it if it is '
+                                "minimized, or pick another one.", title=title))
     left, top, width, height = rect
     right, bottom = left + width, top + height
 
@@ -327,12 +329,12 @@ def window_region(title: str, monitors: list[Monitor]) -> tuple[Monitor, Region]
 
     best = max(monitors, key=overlap, default=None)
     if best is None or overlap(best) == 0:
-        raise RuntimeError(f'The window "{title}" is off screen.')
+        raise RuntimeError(Text("window_off_screen", 'The window "{title}" is off screen.', title=title))
     x0, y0 = max(left, best.left), max(top, best.top)
     x1, y1 = min(right, best.left + best.width), min(bottom, best.top + best.height)
     w, h = (x1 - x0) // 2 * 2, (y1 - y0) // 2 * 2
     if w < 64 or h < 64:
-        raise RuntimeError(f'The window "{title}" is too small to cast.')
+        raise RuntimeError(Text("window_too_small", 'The window "{title}" is too small to cast.', title=title))
     return best, Region(x0, y0, w, h)
 
 

@@ -14,7 +14,7 @@ from .. import APP_NAME, ffmpeg, vdisplay
 from ..config import app_data_dir
 from . import winintegration
 from .controller import Controller
-from .extend import EXTEND_SIZES, size_label, size_name
+from .extend import EXTEND_SIZES, error_text, size_label, size_name
 from .i18n import tr
 from .theme import app_icon
 
@@ -245,5 +245,5 @@ class TrayMenu(QObject):
             _LOGGER.info("Shortcut: %s", path)
             self.message(tr("shortcut_done"))
         except Exception as ex:  # pylint: disable=broad-except
-            self.message(tr("desktop_shortcut"), str(ex), True)
+            self.message(tr("desktop_shortcut"), error_text(ex), True)
 

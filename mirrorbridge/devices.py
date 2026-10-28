@@ -23,6 +23,7 @@ from pyatv.protocols.airplay.utils import parse_features as pyatv_parse_features
 from pyatv.storage.file_storage import FileStorage
 
 from .config import credentials_file
+from .text import Text
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -236,6 +237,10 @@ class Device:
         }[self.status_key]
 
 
+class ConnectFailed(RuntimeError):
+    """pyatv could not connect to the receiver; the message names it and says why."""
+
+
 class DeviceManager:
     """Owns the pyatv credential storage and wraps scan / pair / connect."""
 
@@ -279,7 +284,7 @@ class DeviceManager:
             if handler.device_provides_pin:
                 pin = await pin_callback(True, None)
                 if not pin:
-                    raise exceptions.PairingError("Pairing cancelled")
+                    raise exceptions.PairingError(Text("pair_cancelled", "Pairing cancelled"))
                 handler.pin(int(pin.strip()))
             else:
                 our_pin = f"{random.randint(0, 9999):04d}"
@@ -287,7 +292,7 @@ class DeviceManager:
                 await pin_callback(False, our_pin)
             await handler.finish()
             if not handler.has_paired:
-                raise exceptions.PairingError("The device did not accept the PIN")
+                raise exceptions.PairingError(Text("pin_refused", "The device did not accept the PIN"))
         finally:
             await handler.close()
         if isinstance(self.storage, FileStorage):
@@ -329,3 +334,6 @@ class DeviceManager:
 
             task.add_done_callback(close_when_done)
             raise
+        except Exception as ex:  # pylint: disable=broad-except
+            raise ConnectFailed(Text("connect_failed", "Could not connect to {device}: {error}",
+                                     device=device.name, error=str(ex) or type(ex).__name__)) from ex

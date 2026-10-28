@@ -24,7 +24,7 @@ from ..config import Settings, app_data_dir
 from ..devices import Device, DeviceManager
 from ..session import CastSession, State
 from .extend import ExtendScreenSetup, error_text
-from .i18n import menu_paths, state_text, tr
+from .i18n import say, state_text, tr
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -244,7 +244,7 @@ class Controller(QObject):
             _LOGGER.error("%s", exc)
             if not self._ffmpeg_warned:  # once; the menu re-probes later on its own
                 self._ffmpeg_warned = True
-                self.notify.emit(tr("ffmpeg_missing"), str(exc), True)
+                self.notify.emit(tr("ffmpeg_missing"), error_text(exc), True)
 
         self.runner.submit(probe_async(), done, failed)
 
@@ -416,7 +416,7 @@ class Controller(QObject):
             self.pairing = False
             _LOGGER.error("%s: %s", tr("pair_failed"), exc)
             self.devices_changed.emit()
-            self.show_error(tr("pair_failed"), tr("pair_failed_hint", error=exc))
+            self.show_error(tr("pair_failed"), tr("pair_failed_hint", error=error_text(exc)))
 
         self.runner.submit(run(), done, failed)
 
@@ -471,13 +471,13 @@ class Controller(QObject):
             if isinstance(exc, vdisplay.VddError) and exc.status is not None:
                 self.extend.handle_status(exc.status)  # driver missing or broken: offer the fix
             else:
-                self.notify.emit(tr("cast_failed"), menu_paths(error_text(exc)), True)
+                self.notify.emit(tr("cast_failed"), error_text(exc), True)
 
         self.session_future = self.runner.submit(self.session.run(), finished, failed)
         self.activity_changed.emit()
 
     def _on_cast_state(self, state: State, message: str, device: Device) -> None:
-        message = menu_paths(message)  # errors name menu items in English
+        message = say(message)  # what the session said, in the user's language
         self.cast_state = state
         self.cast_message = message
         self.cast_state_changed.emit(state, message)
@@ -523,7 +523,7 @@ class Controller(QObject):
             self.casting_to = ""
             self.activity_changed.emit()
             if not isinstance(exc, concurrent.futures.CancelledError):
-                self.notify.emit(tr("playback_failed"), menu_paths(str(exc)), True)
+                self.notify.emit(tr("playback_failed"), error_text(exc), True)
 
         _LOGGER.info(tr("playing_file", file=os.path.basename(path), device=device.name))
         self.casting_to = device.name

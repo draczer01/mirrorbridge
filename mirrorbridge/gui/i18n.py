@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..text import Text
+
 _STRINGS: dict[str, dict[str, str]] = {
     # Tray menu
     "open": {"en": "Open MirrorBridge", "es": "Abrir MirrorBridge"},
@@ -257,6 +259,176 @@ _STRINGS: dict[str, dict[str, str]] = {
     "state_stopping": {"en": "Stopping", "es": "Deteniendo"},
     "state_stopped": {"en": "Stopped", "es": "Detenido"},
     "state_failed": {"en": "Failed", "es": "Falló"},
+    # What the core modules say (mirrorbridge.text.Text), with the same {values}. The English is
+    # the core module's own; {menu_...} is a menu path, as the menu names it (_menu_paths).
+    "checking_ffmpeg": {"en": "Checking FFmpeg and encoders", "es": "Comprobando FFmpeg y los codificadores"},
+    "encoder_via": {"en": "{encoder} via {backend}", "es": "{encoder} con {backend}"},
+    "ffmpeg_not_found": {
+        "en": "FFmpeg was not found. Use the MirrorBridge.exe build (FFmpeg included), run "
+              "'pip install imageio-ffmpeg', or put ffmpeg.exe next to MirrorBridge.",
+        "es": "No se encontró FFmpeg. Usa la versión MirrorBridge.exe (trae FFmpeg), ejecuta "
+              "'pip install imageio-ffmpeg' o pon ffmpeg.exe junto a MirrorBridge.",
+    },
+    "no_encoder": {
+        "en": "No working H.264 encoder found in this FFmpeg build",
+        "es": "Esta versión de FFmpeg no tiene ningún codificador H.264 que funcione",
+    },
+    "ffmpeg_exited": {
+        "en": "FFmpeg exited (code {code}):\n{errors}",
+        "es": "FFmpeg se cerró (código {code}):\n{errors}",
+    },
+    "ffmpeg_no_video": {
+        "en": "FFmpeg produced no video within {seconds}s:\n{errors}",
+        "es": "FFmpeg no produjo video en {seconds} s:\n{errors}",
+    },
+    "encoder_stopped": {
+        "en": "Encoder stopped unexpectedly:\n{errors}",
+        "es": "El codificador se detuvo de forma inesperada:\n{errors}",
+    },
+    "window_hidden": {
+        "en": "The window \"{title}\" is not on screen. Restore it if it is minimized, or pick another one.",
+        "es": "La ventana \"{title}\" no está en la pantalla. Restáurala si está minimizada, o elige otra.",
+    },
+    "window_off_screen": {
+        "en": "The window \"{title}\" is off screen.",
+        "es": "La ventana \"{title}\" está fuera de la pantalla.",
+    },
+    "window_too_small": {
+        "en": "The window \"{title}\" is too small to cast.",
+        "es": "La ventana \"{title}\" es demasiado pequeña para transmitirla.",
+    },
+    "connect_failed": {
+        "en": "Could not connect to {device}: {error}",
+        "es": "No se pudo conectar con {device}: {error}",
+    },
+    "pair_cancelled": {"en": "Pairing cancelled", "es": "Emparejamiento cancelado"},
+    "pin_refused": {"en": "The device did not accept the PIN", "es": "El dispositivo no aceptó el PIN"},
+    "powershell_failed": {"en": "PowerShell failed", "es": "PowerShell falló"},
+    # The TV did not play the video
+    "tv_password": {
+        "en": "The TV asks for an AirPlay password (HTTP 401), which MirrorBridge cannot send with video it "
+              "plays from a URL. Turn off the AirPlay password in the TV's AirPlay settings, then try again.",
+        "es": "La TV pide una contraseña de AirPlay (HTTP 401), y MirrorBridge no puede enviarla con un video "
+              "que reproduce desde una URL. Desactiva la contraseña en los ajustes de AirPlay de la TV y "
+              "vuelve a intentarlo.",
+    },
+    "tv_pairing_refused": {
+        "en": "The TV no longer accepts MirrorBridge's pairing (HTTP 403). Use {menu_forget}, then cast again "
+              "and type the new PIN the TV shows.",
+        "es": "La TV ya no acepta el emparejamiento de MirrorBridge (HTTP 403). Usa {menu_forget}, vuelve a "
+              "transmitir y escribe el PIN nuevo que muestra la TV.",
+    },
+    "tv_busy": {
+        "en": "The TV is busy with another AirPlay sender (HTTP 453). Stop AirPlay on the other phone, tablet "
+              "or computer, then try again.",
+        "es": "La TV está ocupada con otro equipo que le envía AirPlay (HTTP 453). Detén AirPlay en el otro "
+              "teléfono, tableta o computadora y vuelve a intentarlo.",
+    },
+    "tv_restricted": {
+        "en": "AirPlay access is restricted on the TV (HTTP 470). In the TV's AirPlay settings, allow everyone "
+              "on the same network, then pair again.",
+        "es": "El acceso a AirPlay está restringido en la TV (HTTP 470). En los ajustes de AirPlay de la TV, "
+              "permite el acceso a todos en la misma red y vuelve a emparejar.",
+    },
+    "tv_no_answer": {
+        "en": "The TV did not answer the request to play the video ({steps}). Check that the PC and the TV "
+              "are on the same network, then try again.",
+        "es": "La TV no contestó al pedido de reproducir el video ({steps}). Revisa que el equipo y la TV "
+              "estén en la misma red y vuelve a intentarlo.",
+    },
+    "apple_tv_failed": {
+        "en": "The Apple TV could not start the video ({steps}). Try again, or restart the Apple TV.",
+        "es": "El Apple TV no pudo iniciar el video ({steps}). Vuelve a intentarlo o reinicia el Apple TV.",
+    },
+    "tv_no_url_video": {
+        "en": "This TV accepts AirPlay pairing but refused video sent from a URL ({steps}). It may only take "
+              "screen mirroring and audio from Apple devices.",
+        "es": "Esta TV acepta el emparejamiento de AirPlay, pero rechazó el video enviado desde una URL "
+              "({steps}). Puede que solo acepte la duplicación de pantalla y el audio de equipos Apple.",
+    },
+    "tv_credentials": {
+        "en": "The TV rejected MirrorBridge's credentials ({steps}). Use {menu_forget}, then cast again and "
+              "type the new PIN the TV shows.{password}",
+        "es": "La TV rechazó las credenciales de MirrorBridge ({steps}). Usa {menu_forget}, vuelve a "
+              "transmitir y escribe el PIN nuevo que muestra la TV.{password}",
+    },
+    "tv_also_password": {
+        "en": " The TV also asks for an AirPlay password, which MirrorBridge cannot send with video it plays "
+              "from a URL: turn it off in the TV's AirPlay settings.",
+        "es": " La TV además pide una contraseña de AirPlay, que MirrorBridge no puede enviar con un video "
+              "que reproduce desde una URL: desactívala en los ajustes de AirPlay de la TV.",
+    },
+    "tv_setup_failed": {
+        "en": "The TV did not finish setting up the AirPlay session ({steps}). {advice}",
+        "es": "La TV no terminó de preparar la sesión de AirPlay ({steps}). {advice}",
+    },
+    "tv_pair_first": {
+        "en": "The TV wants MirrorBridge to pair first: use {menu_pair}, then cast again.",
+        "es": "La TV pide que MirrorBridge se empareje primero: usa {menu_pair} y vuelve a transmitir.",
+    },
+    "tv_pairing_dropped": {
+        "en": "Most often the TV has dropped MirrorBridge's pairing: use {menu_forget}, then cast again and "
+              "type the new PIN the TV shows.",
+        "es": "Casi siempre es que la TV olvidó el emparejamiento con MirrorBridge: usa {menu_forget}, "
+              "vuelve a transmitir y escribe el PIN nuevo que muestra la TV.",
+    },
+    "tv_error": {"en": "Receiver error {code} ({domain})", "es": "Error del receptor {code} ({domain})"},
+    "tv_never_played": {
+        "en": "The receiver never started playing. Check that Windows Firewall allows MirrorBridge and that "
+              "both devices are on the same network.",
+        "es": "El receptor nunca empezó a reproducir. Revisa que el Firewall de Windows permita MirrorBridge "
+              "y que los dos equipos estén en la misma red.",
+    },
+    "tv_wrong_path": {
+        "en": "The TV reached MirrorBridge but asked for {path}, which MirrorBridge does not serve, instead of "
+              "the stream at {url}. Please report this TV, with mirrorbridge.log.",
+        "es": "La TV llegó a MirrorBridge, pero pidió {path}, que MirrorBridge no ofrece, en lugar del video "
+              "en {url}. Avisa de esta TV y manda mirrorbridge.log.",
+    },
+    "tv_not_fetched": {
+        "en": "The TV accepted the video but never downloaded it from {url}. Allow MirrorBridge (or inbound "
+              "TCP port {port}) in Windows Firewall on private networks, and check that the PC and the TV "
+              "are on the same network.{others}",
+        "es": "La TV aceptó el video, pero nunca lo descargó de {url}. Permite MirrorBridge (o el puerto TCP "
+              "de entrada {port}) en el Firewall de Windows para redes privadas, y revisa que el equipo y la "
+              "TV estén en la misma red.{others}",
+    },
+    "tv_no_request": {
+        "en": "The TV did not start the video within {seconds} s and never asked for it at {url}. Allow "
+              "MirrorBridge in Windows Firewall on private networks, and check that the PC and the TV are "
+              "on the same network.{others}",
+        "es": "La TV no inició el video en {seconds} s y nunca lo pidió en {url}. Permite MirrorBridge en el "
+              "Firewall de Windows para redes privadas, y revisa que el equipo y la TV estén en la misma "
+              "red.{others}",
+    },
+    "tv_other_clients": {
+        "en": " ({clients} did download it, but that is not the TV's address, {address}.)",
+        "es": " ({clients} sí lo descargó, pero esa no es la dirección de la TV, {address}.)",
+    },
+    "tv_rejected": {
+        "en": "The TV downloaded the playlist but none of the video{asked}, so it probably does not accept "
+              "this video format. {hint}",
+        "es": "La TV descargó la lista de reproducción, pero nada del video{asked}, así que probablemente no "
+              "acepta este formato de video. {hint}",
+    },
+    "tv_also_asked": {
+        "en": " (it also asked for {path}, which MirrorBridge does not have)",
+        "es": " (también pidió {path}, que MirrorBridge no tiene)",
+    },
+    "hint_x264": {
+        "en": "FFmpeg could not tell the TV which codecs {encoder} produces: choose {menu_x264}.",
+        "es": "FFmpeg no pudo decirle a la TV qué códecs produce {encoder}: elige {menu_x264}.",
+    },
+    "hint_smooth": {"en": "Try {menu_smooth}.", "es": "Prueba {menu_smooth}."},
+    "hint_30fps": {"en": "Try 30 frames per second.", "es": "Prueba con 30 cuadros por segundo."},
+    "hint_720p": {
+        "en": "Try {menu_720p}, or 30 frames per second.",
+        "es": "Prueba {menu_720p} o 30 cuadros por segundo.",
+    },
+    "hint_lower": {
+        "en": "Try a lower resolution or 30 frames per second.",
+        "es": "Prueba una resolución más baja o 30 cuadros por segundo.",
+    },
 }
 
 _lang = "en"
@@ -287,15 +459,21 @@ def _item(key: str) -> str:
     return tr(key).split(" (")[0].rstrip("…")
 
 
-def menu_paths(text: str) -> str:
-    """Name the menu items that a cast's (English) error mentions as the menu does."""
+def _menu_paths() -> dict[str, str]:
+    """The menu items that texts name ({menu_forget}...), as the menu names them."""
     paths = {
-        "Device > Forget pairing": (_item("device_menu"), _item("forget")),
-        "Device > Pair with PIN": (_item("device_menu"), _item("pair")),
-        "Quality > Delay > Smooth": (_item("quality_menu"), _item("latency"), _item("lat_smooth")),
-        "Quality > Encoder > x264 (CPU)": (_item("quality_menu"), _item("encoder"), "x264 (CPU)"),
-        "What to cast > Extended screen size > 720p": (_item("source_menu"), _item("extend_size"), "720p"),
+        "menu_forget": (_item("device_menu"), _item("forget")),
+        "menu_pair": (_item("device_menu"), _item("pair")),
+        "menu_smooth": (_item("quality_menu"), _item("latency"), _item("lat_smooth")),
+        "menu_x264": (_item("quality_menu"), _item("encoder"), "x264 (CPU)"),
+        "menu_720p": (_item("source_menu"), _item("extend_size"), "720p"),
     }
-    for english, words in paths.items():
-        text = text.replace(english, " > ".join(words))
-    return text
+    return {name: " > ".join(words) for name, words in paths.items()}
+
+
+def say(text: str) -> str:
+    """A core module's Text in the user's language, its values too; any other str as it is."""
+    if not isinstance(text, Text) or text.key not in _STRINGS:
+        return text
+    values = {name: say(value) if isinstance(value, str) else value for name, value in text.values.items()}
+    return tr(text.key, **{**_menu_paths(), **values})

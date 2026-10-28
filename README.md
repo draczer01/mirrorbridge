@@ -182,6 +182,8 @@ pyatv: mDNS discovery → PIN pair-setup → pair-verify → AirPlay /play (URL 
 | `mirrorbridge/gui/controller.py` | State shared by the menu and the window; runs pyatv on a background asyncio loop |
 | `mirrorbridge/gui/extend.py` | The Extend screen choice: driver check, consent and install dialogs |
 | `mirrorbridge/gui/app.py` | Single instance, startup and quit |
+| `mirrorbridge/gui/i18n.py` | Every word the menu and the window show, in English and Spanish |
+| `mirrorbridge/text.py` | Messages that say which of those words they are, so a failed cast is explained in Spanish too; the command line stays in English |
 | `mirrorbridge/migration.py` | Moves settings, pairings and Start with Windows over from the app's old name (see above) |
 | `mirrorbridge/cli.py` | Command line |
 
@@ -273,7 +275,9 @@ too: settings and pairings copied byte for byte with the old folder left exactly
 a file MirrorBridge already has never replaced, a missing or unreadable old folder, the TV
 still paired afterwards, and the Start with Windows entry (on, off in Task Manager, another
 program's, or none) against a fake registry. One more test fails if the old name shows up
-anywhere it is not needed.
+anywhere it is not needed. Every message a cast, pairing or FFmpeg can end with is checked
+to be in `gui/i18n.py` in English and Spanish, with the same English as the command line
+and the same values, and the hints name the Spanish menu items.
 
 ## Building MirrorBridge.exe
 

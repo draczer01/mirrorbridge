@@ -15,9 +15,10 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QMessageBox, QProgressDialog
 
 from .. import vdisplay
+from ..text import Text
 from ..vdisplay import DriverStatus, VddError
 from . import winintegration
-from .i18n import tr
+from .i18n import say, tr
 
 if TYPE_CHECKING:
     from .controller import Controller
@@ -49,12 +50,15 @@ def size_label(mode: str) -> str:
 
 
 def error_text(exc: BaseException) -> str:
-    """Why a cast failed, in the user's language when it is a virtual screen problem."""
+    """Why something failed, in the user's language: a virtual screen problem by its code, any
+    other error whose message is a Text by its key. Other errors (Windows', pyatv's) as they are."""
     if isinstance(exc, VddError):
         if exc.status in STATUS_KEYS:
             return tr(STATUS_KEYS[exc.status])
         if exc.code in _ERROR_KEYS:
             return tr(_ERROR_KEYS[exc.code])
+    if exc.args and isinstance(exc.args[0], Text):
+        return say(exc.args[0])
     return str(exc)
 
 

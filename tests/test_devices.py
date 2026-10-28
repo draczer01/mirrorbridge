@@ -123,6 +123,21 @@ async def test_connect_logs_what_the_receiver_advertises(monkeypatch, caplog):
     assert connected == ["0x007F8AD0,0x00020000"]  # pyatv is handed the corrected value
 
 
+async def test_a_failed_connect_names_the_tv(monkeypatch):
+    """pyatv's own errors can be empty (a TimeoutError); the message still says what failed."""
+    async def fake_connect(config, loop, storage=None):
+        raise TimeoutError()
+
+    monkeypatch.setattr(devices.pyatv, "connect", fake_connect)
+    from pyatv.storage.memory_storage import MemoryStorage
+
+    manager = devices.DeviceManager(asyncio.get_running_loop(), storage=MemoryStorage())
+    with pytest.raises(devices.ConnectFailed, match="^Could not connect to Sala familiar: TimeoutError$") as err:
+        await manager.connect(_device({"features": "0x7F8AD0,0x20000"}))
+    assert isinstance(err.value.__cause__, TimeoutError)
+    assert err.value.args[0].key == "connect_failed"
+
+
 def test_scan_verbose_prints_what_each_receiver_advertises(capsys):
     from mirrorbridge import cli
 

@@ -25,8 +25,9 @@ Three pyatv 0.18 behaviours get in the way of casting a screen:
   is wrapped so that it cleans up after itself, and refusals and failed set-ups become
   ReceiverRefusedVideo with a message a person can act on.
 
-Messages name MirrorBridge's menu items in English ("Device > Forget pairing"); the GUI
-and the command line put them in their own words (gui.i18n.menu_paths, cli.py).
+Messages are Texts (text.py) that name MirrorBridge's menu items in English ("Device > Forget
+pairing"); the GUI shows them in the user's language and the command line names its own
+options instead (gui.i18n.say, cli.py).
 """
 
 from __future__ import annotations
@@ -47,6 +48,8 @@ from pyatv.protocols.raop.protocols import TimingServer
 from pyatv.protocols.raop.protocols import airplayv2 as _airplayv2
 from pyatv.support.http import HttpResponse, decode_bplist_from_body
 from pyatv.support.rtsp import BPLIST_CONTENT_TYPE, USER_AGENT, RtspSession, get_digest_payload
+
+from .text import Text
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -106,15 +109,15 @@ class ReceiverRefusedVideo(exceptions.PlaybackError):
 
 _REFUSALS = {
     # pyatv sends no password with a video it plays from a URL, whatever MirrorBridge stores.
-    401: "The TV asks for an AirPlay password (HTTP 401), which MirrorBridge cannot send with "
-    "video it plays from a URL. Turn off the AirPlay password in the TV's AirPlay "
-    "settings, then try again.",
-    403: "The TV no longer accepts MirrorBridge's pairing (HTTP 403). Use Device > Forget pairing, "
-    "then cast again and type the new PIN the TV shows.",
-    453: "The TV is busy with another AirPlay sender (HTTP 453). Stop AirPlay on the other "
-    "phone, tablet or computer, then try again.",
-    470: "AirPlay access is restricted on the TV (HTTP 470). In the TV's AirPlay settings, "
-    "allow everyone on the same network, then pair again.",
+    401: Text("tv_password", "The TV asks for an AirPlay password (HTTP 401), which MirrorBridge cannot "
+              "send with video it plays from a URL. Turn off the AirPlay password in the TV's AirPlay "
+              "settings, then try again."),
+    403: Text("tv_pairing_refused", "The TV no longer accepts MirrorBridge's pairing (HTTP 403). Use "
+              "Device > Forget pairing, then cast again and type the new PIN the TV shows."),
+    453: Text("tv_busy", "The TV is busy with another AirPlay sender (HTTP 453). Stop AirPlay on the "
+              "other phone, tablet or computer, then try again."),
+    470: Text("tv_restricted", "AirPlay access is restricted on the TV (HTTP 470). In the TV's AirPlay "
+              "settings, allow everyone on the same network, then pair again."),
 }
 
 
@@ -127,25 +130,26 @@ def refusal(code: Optional[int], steps: dict, apple: Optional[bool] = None) -> R
     if code in _REFUSALS:
         return ReceiverRefusedVideo(_REFUSALS[code], code, steps)
     if code is None:
-        text = (f"The TV did not answer the request to play the video ({format_steps(steps)}). "
-                "Check that the PC and the TV are on the same network, then try again.")
+        text = Text("tv_no_answer", "The TV did not answer the request to play the video ({steps}). "
+                    "Check that the PC and the TV are on the same network, then try again.",
+                    steps=format_steps(steps))
     elif apple:
-        text = (f"The Apple TV could not start the video ({format_steps(steps)}). Try again, "
-                "or restart the Apple TV.")
+        text = Text("apple_tv_failed", "The Apple TV could not start the video ({steps}). Try again, "
+                    "or restart the Apple TV.", steps=format_steps(steps))
     else:
-        text = (f"This TV accepts AirPlay pairing but refused video sent from a URL "
-                f"({format_steps(steps)}). It may only take screen mirroring and audio from "
-                "Apple devices.")
+        text = Text("tv_no_url_video", "This TV accepts AirPlay pairing but refused video sent from a "
+                    "URL ({steps}). It may only take screen mirroring and audio from Apple devices.",
+                    steps=format_steps(steps))
     return ReceiverRefusedVideo(text, code, steps)
 
 
 def credentials_refused(steps: dict, password: bool = False) -> ReceiverRefusedVideo:
     """pyatv says "not authenticated" for a 401 and a 403 alike, and for a failed pair-verify."""
-    text = (f"The TV rejected MirrorBridge's credentials ({format_steps(steps)}). Use Device > "
-            "Forget pairing, then cast again and type the new PIN the TV shows.")
-    if password:
-        text += (" The TV also asks for an AirPlay password, which MirrorBridge cannot send with "
-                 "video it plays from a URL: turn it off in the TV's AirPlay settings.")
+    also = Text("tv_also_password", " The TV also asks for an AirPlay password, which MirrorBridge "
+                "cannot send with video it plays from a URL: turn it off in the TV's AirPlay settings.")
+    text = Text("tv_credentials", "The TV rejected MirrorBridge's credentials ({steps}). Use Device > "
+                "Forget pairing, then cast again and type the new PIN the TV shows.{password}",
+                steps=format_steps(steps), password=also if password else "")
     return ReceiverRefusedVideo(text, None, steps)
 
 
@@ -156,12 +160,14 @@ def setup_failed(steps: dict) -> ReceiverRefusedVideo:
     pairing still gets an encrypted SETUP, which it cannot read: it never answers.
     """
     if "not paired" in steps.values():
-        advice = "The TV wants MirrorBridge to pair first: use Device > Pair with PIN, then cast again."
+        advice = Text("tv_pair_first", "The TV wants MirrorBridge to pair first: use Device > Pair "
+                      "with PIN, then cast again.")
     else:
-        advice = ("Most often the TV has dropped MirrorBridge's pairing: use Device > Forget pairing, "
-                  "then cast again and type the new PIN the TV shows.")
+        advice = Text("tv_pairing_dropped", "Most often the TV has dropped MirrorBridge's pairing: use "
+                      "Device > Forget pairing, then cast again and type the new PIN the TV shows.")
     return ReceiverRefusedVideo(
-        f"The TV did not finish setting up the AirPlay session ({format_steps(steps)}). {advice}",
+        Text("tv_setup_failed", "The TV did not finish setting up the AirPlay session ({steps}). {advice}",
+             steps=format_steps(steps), advice=advice),
         None, steps,
     )
 
@@ -445,9 +451,10 @@ async def _wait_for_live_stream(self) -> None:  # replaces AirPlayPlayer._wait_f
 
         if "error" in parsed:
             err = parsed["error"]
-            raise exceptions.PlaybackError(
-                f"Receiver error {err.get('code', '?')} ({err.get('domain', '?')})"
-            )
+            raise exceptions.PlaybackError(Text(
+                "tv_error", "Receiver error {code} ({domain})", code=err.get("code", "?"),
+                domain=err.get("domain", "?"),
+            ))
 
         playing = "duration" in parsed or parsed.get("readyToPlay") or parsed.get("rate", 0) > 0
         if playing:
@@ -463,10 +470,10 @@ async def _wait_for_live_stream(self) -> None:  # replaces AirPlayPlayer._wait_f
         else:
             waited += 1
             if waited > STARTUP_GRACE_SECONDS:
-                raise exceptions.PlaybackError(
-                    "The receiver never started playing. Check that Windows Firewall "
-                    "allows MirrorBridge and that both devices are on the same network."
-                )
+                raise exceptions.PlaybackError(Text(
+                    "tv_never_played", "The receiver never started playing. Check that Windows "
+                    "Firewall allows MirrorBridge and that both devices are on the same network."
+                ))
         await asyncio.sleep(1)
 
 

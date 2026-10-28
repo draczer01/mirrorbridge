@@ -21,6 +21,7 @@ from . import airplay_patch, audio, ffmpeg, vdisplay
 from .config import Settings
 from .devices import Device, DeviceManager
 from .hls_server import Activity, HlsServer
+from .text import Text
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -137,13 +138,15 @@ class CastSession:
         deadline = loop.time() + timeout
         while loop.time() < deadline:
             if self._proc and self._proc.poll() is not None:
-                raise RuntimeError(f"FFmpeg exited (code {self._proc.returncode}):\n{self.ffmpeg_errors()}")
+                raise RuntimeError(Text("ffmpeg_exited", "FFmpeg exited (code {code}):\n{errors}",
+                                        code=self._proc.returncode, errors=self.ffmpeg_errors()))
             if playlist.exists() and (master is None or master.exists()):
                 text = playlist.read_text(encoding="utf-8", errors="replace")
                 if text.count("#EXTINF") >= count:
                     return
             await asyncio.sleep(0.2)
-        raise RuntimeError(f"FFmpeg produced no video within {timeout:.0f}s:\n{self.ffmpeg_errors()}")
+        raise RuntimeError(Text("ffmpeg_no_video", "FFmpeg produced no video within {seconds}s:\n{errors}",
+                                seconds=round(timeout), errors=self.ffmpeg_errors()))
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -185,7 +188,7 @@ class CastSession:
     async def _start(self) -> None:
         loop = asyncio.get_running_loop()
         s = self.settings
-        self._set(State.STARTING, "Checking FFmpeg and encoders")
+        self._set(State.STARTING, Text("checking_ffmpeg", "Checking FFmpeg and encoders"))
 
         ff = ffmpeg.find_ffmpeg(s.ffmpeg_path)
         _LOGGER.info("FFmpeg: %s", ff)
@@ -327,7 +330,8 @@ class CastSession:
             ff, s, self._work_dir, encoder=self.encoder, backend=self.backend,
             monitor=monitor, region=region, audio_port=audio_port, for_apple=self.for_apple,
         )
-        self._set(State.STARTING, f"{ffmpeg.ENCODER_LABELS.get(self.encoder, self.encoder)} via {self.backend}")
+        label = ffmpeg.ENCODER_LABELS.get(self.encoder, self.encoder)
+        self._set(State.STARTING, Text("encoder_via", "{encoder} via {backend}", encoder=label, backend=self.backend))
         self._stderr_tail.clear()
         self._proc = ffmpeg.popen(cmd)
         threading.Thread(
@@ -388,8 +392,8 @@ class CastSession:
                   for ip, c in clients.items() if ip != self.device.address and c.requests]
         if not others:
             return ""
-        return (f" ({', '.join(others)} did download it, but that is not the TV's address, "
-                f"{self.device.address}.)")
+        return Text("tv_other_clients", " ({clients} did download it, but that is not the TV's address, "
+                    "{address}.)", clients=", ".join(others), address=self.device.address)
 
     def _check_startup(self, tv: Activity, now: float, started_at: float) -> None:
         """Fail with the likely cause when the TV took the video but does not play it."""
@@ -397,44 +401,47 @@ class CastSession:
         if tv.first_playlist_at is None:
             if accepted is not None and now - accepted > PLAYLIST_TIMEOUT:
                 if tv.missing:
-                    raise StreamNotFetched(
-                        f"The TV reached MirrorBridge but asked for {tv.missing_path}, which MirrorBridge does "
-                        f"not serve, instead of the stream at {self.stream_url}. Please report this "
-                        "TV, with mirrorbridge.log."
-                    )
+                    raise StreamNotFetched(Text(
+                        "tv_wrong_path", "The TV reached MirrorBridge but asked for {path}, which MirrorBridge "
+                        "does not serve, instead of the stream at {url}. Please report this TV, with "
+                        "mirrorbridge.log.", path=tv.missing_path, url=self.stream_url,
+                    ))
                 port = self._server.port if self._server else self.settings.http_port
-                raise StreamNotFetched(
-                    f"The TV accepted the video but never downloaded it from {self.stream_url}. "
-                    f"Allow MirrorBridge (or inbound TCP port {port}) in Windows Firewall on private "
-                    "networks, and check that the PC and the TV are on the same network."
-                    + self._other_clients()
-                )
+                raise StreamNotFetched(Text(
+                    "tv_not_fetched", "The TV accepted the video but never downloaded it from {url}. Allow "
+                    "MirrorBridge (or inbound TCP port {port}) in Windows Firewall on private networks, and "
+                    "check that the PC and the TV are on the same network.{others}",
+                    url=self.stream_url, port=port, others=self._other_clients(),
+                ))
             if accepted is None and now - started_at > NO_REQUEST_TIMEOUT:
-                raise RuntimeError(
-                    f"The TV did not start the video within {NO_REQUEST_TIMEOUT} s and never asked for "
-                    f"it at {self.stream_url}. Allow MirrorBridge in Windows Firewall on private networks, "
-                    "and check that the PC and the TV are on the same network." + self._other_clients()
-                )
+                raise RuntimeError(Text(
+                    "tv_no_request", "The TV did not start the video within {seconds} s and never asked for "
+                    "it at {url}. Allow MirrorBridge in Windows Firewall on private networks, and check that "
+                    "the PC and the TV are on the same network.{others}",
+                    seconds=NO_REQUEST_TIMEOUT, url=self.stream_url, others=self._other_clients(),
+                ))
         elif tv.first_segment_at is None and now - tv.first_playlist_at > SEGMENT_TIMEOUT:
             smooth = ffmpeg.LATENCY_SEGMENT_SECONDS["smooth"]
             if self.no_codecs and self.encoder != "libx264":
                 label = ffmpeg.ENCODER_LABELS.get(self.encoder, self.encoder)
-                hint = (f"FFmpeg could not tell the TV which codecs {label} produces: choose "
-                        "Quality > Encoder > x264 (CPU).")
+                hint = Text("hint_x264", "FFmpeg could not tell the TV which codecs {encoder} produces: "
+                            "choose Quality > Encoder > x264 (CPU).", encoder=label)
             elif ffmpeg.segment_seconds(self.settings, self.for_apple) < smooth:
-                hint = "Try Quality > Delay > Smooth."
+                hint = Text("hint_smooth", "Try Quality > Delay > Smooth.")
             elif self.virtual_device:
                 # The TV gets the virtual screen's own size: Quality > Resolution does not apply.
-                hint = ("Try 30 frames per second." if self.settings.extend_mode == "720p" else
-                        "Try What to cast > Extended screen size > 720p, or 30 frames per second.")
+                if self.settings.extend_mode == "720p":
+                    hint = Text("hint_30fps", "Try 30 frames per second.")
+                else:
+                    hint = Text("hint_720p", "Try What to cast > Extended screen size > 720p, or 30 frames per second.")
             else:
-                hint = "Try a lower resolution or 30 frames per second."
-            asked = (f" (it also asked for {tv.missing_path}, which MirrorBridge does not have)"
-                     if tv.missing else "")
-            raise StreamRejected(
-                f"The TV downloaded the playlist but none of the video{asked}, so it probably "
-                f"does not accept this video format. {hint}"
-            )
+                hint = Text("hint_lower", "Try a lower resolution or 30 frames per second.")
+            asked = (Text("tv_also_asked", " (it also asked for {path}, which MirrorBridge does not have)",
+                          path=tv.missing_path) if tv.missing else "")
+            raise StreamRejected(Text(
+                "tv_rejected", "The TV downloaded the playlist but none of the video{asked}, so it probably "
+                "does not accept this video format. {hint}", asked=asked, hint=hint,
+            ))
 
     async def _supervise(self) -> None:
         stop_wait = asyncio.ensure_future(self._stop_requested.wait())
@@ -456,7 +463,8 @@ class CastSession:
                 if self._proc and self._proc.poll() is not None:
                     if self._xscreen and await self._screen_lost():
                         raise vdisplay.VddError("lost")
-                    raise RuntimeError(f"Encoder stopped unexpectedly:\n{self.ffmpeg_errors()}")
+                    raise RuntimeError(Text("encoder_stopped", "Encoder stopped unexpectedly:\n{errors}",
+                                            errors=self.ffmpeg_errors()))
                 # The TV's own video requests are the one signal every receiver gives,
                 # including those that do not report playback status over AirPlay.
                 tv = self._tv_activity()
