@@ -622,3 +622,18 @@ def test_an_experiment_sets_up_mirroring_without_the_audio_stream(monkeypatch):
     assert negotiation.audio_from_env(True) is True
     monkeypatch.setenv("MIRRORBRIDGE_NO_AUDIO", "1")
     assert negotiation.audio_from_env(True) is False
+
+
+def test_an_experiment_adds_noise_to_the_test_pattern(monkeypatch):
+    """MIRRORBRIDGE_PATTERN_NOISE=N: noise before the pixel format, so the encoder fills the bitrate."""
+    from mirrorbridge.config import Settings
+
+    def vf():
+        cmd = source.build_command("ffmpeg", Settings(), source=source.TEST_PATTERN, encoder="h264_nvenc",
+                                   width=1920, height=1080, fps=60)
+        return cmd[cmd.index("-vf") + 1]
+
+    monkeypatch.delenv("MIRRORBRIDGE_PATTERN_NOISE", raising=False)
+    assert vf() == "format=nv12"
+    monkeypatch.setenv("MIRRORBRIDGE_PATTERN_NOISE", "12")
+    assert vf() == "noise=alls=12:allf=t,format=nv12"

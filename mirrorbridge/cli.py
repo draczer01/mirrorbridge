@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import getpass
 import logging
+import os
 import sys
 
 from . import APP_NAME, CLI_NAME, __version__, airplay_patch, audio, ffmpeg, mirror, probe, vdisplay, winmonitors
@@ -238,8 +239,9 @@ async def cmd_mirror(args) -> int:
     """Screen mirroring (experimental), or with --probe, how the TV takes it."""
     settings = Settings.load()
     _what_to_send(settings, args)
-    if args.framerate:
-        settings.framerate = args.framerate  # this run only: settings.json is not written
+    fps = args.framerate or int(os.environ.get("MIRRORBRIDGE_FPS", "0") or 0)  # MIRRORBRIDGE_FPS: experiment
+    if fps:
+        settings.framerate = fps  # this run only: settings.json is not written
     manager = DeviceManager(asyncio.get_running_loop())
     device = await _choose(manager, args)
     if device.airplay is None:

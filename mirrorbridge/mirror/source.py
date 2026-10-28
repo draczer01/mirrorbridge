@@ -93,6 +93,9 @@ def build_command(
     if source == TEST_PATTERN:
         video_in = ["-re", "-f", "lavfi", "-i", f"testsrc=size={width}x{height}:rate={fps}"]
         filters: list[str] = []
+        noise = os.environ.get("MIRRORBRIDGE_PATTERN_NOISE", "")
+        if noise.isdigit() and int(noise) > 0:  # experiment: a pattern that fills the bitrate
+            filters.append(f"noise=alls={int(noise)}:allf=t")
     else:
         capture = dataclasses.replace(settings, framerate=fps)
         video_in, filters = ffmpeg._video_input(backend, capture, monitor, region)  # pylint: disable=protected-access
