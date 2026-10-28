@@ -22,7 +22,7 @@ shutil.copyfile(ffmpeg_src, os.path.join(stage, "ffmpeg.exe"))  # the app looks 
 hidden = collect_submodules("pyatv") + collect_submodules("zeroconf") + ["soundcard", "soundcard.mediafoundation"]
 # Extend screen (normal imports reach these too; listed so the bundle can never miss them).
 hidden += ["mirrorbridge.vdisplay", "mirrorbridge.gui.extend"]
-# Screen mirroring (experimental), which the mirror command uses.
+# Screen mirroring (experimental): Mirror screen, Test this TV and the mirror command.
 hidden += collect_submodules("mirrorbridge.mirror")
 datas = collect_data_files("pyatv") + collect_data_files("soundcard")
 

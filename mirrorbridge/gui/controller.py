@@ -627,7 +627,7 @@ class Controller(QObject):
     # -- testing a TV --------------------------------------------------------
 
     def test_tv(self, *_args) -> None:
-        """More options > Test this TV: the probe's three tests, then a dialog with what they found."""
+        """More options > Test this TV: the probe's four tests, then a dialog with what they found."""
         device = self.selected_device
         if self.is_active or device is None or not device.can_cast_video:
             return
@@ -644,7 +644,9 @@ class Controller(QObject):
             return
 
         def progress(number: int, total: int, _name: str) -> None:  # on the asyncio loop
-            self.bridge.call(lambda: self._on_probe_step(tr("probe_step", number=number, total=total)))
+            watch = probe.watch_hint(probe.TESTS[number - 1])
+            step = tr("probe_step_watch" if watch else "probe_step", number=number, total=total)
+            self.bridge.call(lambda: self._on_probe_step(step, watch))
 
         def finished(report: probe.ProbeReport) -> None:
             ended()
@@ -683,10 +685,12 @@ class Controller(QObject):
         self.probe_future = self.runner.submit(run(), finished, failed)
         self.activity_changed.emit()
 
-    def _on_probe_step(self, step: str) -> None:
+    def _on_probe_step(self, step: str, watch: Optional[Text] = None) -> None:
         if self.probe_future is not None:
             self.probe_step = step
             self.activity_changed.emit()
+            if watch is not None:  # what to look for on the TV, said where the person sees it
+                self.notify.emit(tr("probe_title", device=self.casting_to), say(watch), False)
 
     def probe_report_box(self, report: probe.ProbeReport) -> QMessageBox:
         """What Test this TV found out: the verdict, each test's result, and the report's file."""

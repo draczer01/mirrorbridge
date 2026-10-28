@@ -14,7 +14,8 @@ limit of its own and each SETUP on a fresh pair-verified connection:
    still ask for the time.
 
 What worked is saved for the device (profiles.py), so the next session asks for it at once.
-Whatever happens, every session the probe set up is torn down.
+Whatever happens, every session the probe set up is torn down, also when the probe is given a
+time limit in all (Test this TV gives it one) and runs out of it.
 """
 
 from __future__ import annotations
@@ -143,6 +144,12 @@ class ProbeResult:
     @property
     def worked(self) -> bool:
         return self.profile is not None
+
+    @property
+    def session_accepted(self) -> bool:
+        """The TV accepted a mirroring session (some SETUP shape, or a stream check's)."""
+        return any(attempt.worked for attempt in self.setups) or any(
+            check.report is not None and check.report.established is not None for check in self.streams)
 
     @property
     def data_channel_accepted(self) -> bool:
@@ -478,6 +485,11 @@ class _Probe:
         return False
 
 
+def time_up(seconds: float) -> Text:
+    return Text("mirror_probe_time_up", "The screen mirroring test was stopped after {seconds} s, before it found a "
+                "way that works.", seconds=f"{seconds:g}")
+
+
 async def probe_mirroring(
     target: Target,
     settings: Optional[Settings] = None,
@@ -487,20 +499,36 @@ async def probe_mirroring(
     variants: Iterable[str] = ALL_VARIANTS,
     save: bool = True,
     progress: Optional[Callable[[str], None]] = None,
+    limit: Optional[float] = None,
 ) -> ProbeResult:
     """Find out how `target` takes screen mirroring; see the module's docstring.
 
     `variants` picks what is tried besides the saved (or default) way (ALL_VARIANTS: ORDERING,
     AUDIO, TIMING, TRAILER). Without `send_test_pattern` no video is sent: the video connection
     is only opened and held for a moment. `progress` gets a line per step as it goes. What
-    worked is saved for the device when `save` (and the target has an identifier).
+    worked is saved for the device when `save` (and the target has an identifier). With a
+    `limit`, the probe takes at most that many seconds in all: then the step under way is
+    stopped and torn down, and the result says what was found until then.
     """
     started = time.monotonic()
     probe = _Probe(target, settings or Settings.load(), seconds=seconds, send_test_pattern=send_test_pattern,
                    variants=variants, save=save, progress=progress or (lambda line: None))
+    task = asyncio.ensure_future(probe.run())
     try:
-        result = await probe.run()
+        await asyncio.wait({task}, timeout=limit)
+        if task.done():
+            result = task.result()
+        else:
+            _LOGGER.info("Probe: stopped after %g s", limit)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)  # what was under way is torn down
+            result = probe.result
+            if result.profile is None:
+                result.error = time_up(limit or 0)
     finally:
+        if not task.done():  # the probe itself was cancelled
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         probe.result.seconds = time.monotonic() - started
     _LOGGER.info("Probe: %s", result.conclusion())
     _LOGGER.debug("Probe report:\n%s", "\n".join(result.lines()))

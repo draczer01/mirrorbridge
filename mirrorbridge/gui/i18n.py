@@ -145,20 +145,27 @@ _STRINGS: dict[str, dict[str, str]] = {
     # More options > Test this TV
     "probe_title": {"en": "Test {device}", "es": "Probar {device}"},
     "probe_intro": {
-        "en": "MirrorBridge will try three ways of sending {device} a video, one after the other, for about "
-              "two minutes in all. Watch the TV: it may show Apple's test video, then MirrorBridge's test "
-              "pattern. If the TV asks whether to allow MirrorBridge, choose Allow. Nothing from this PC's "
+        "en": "MirrorBridge will try four ways of sending {device} a video, one after the other, for about "
+              "three minutes in all. Watch the TV: it may show Apple's test video, then MirrorBridge's test "
+              "pattern. During the last test, screen mirroring, it should show a moving test pattern for about "
+              "10 seconds. If the TV asks whether to allow MirrorBridge, choose Allow. Nothing from this PC's "
               "screen is sent.\n\nAt the end MirrorBridge says what worked, and where the report is: please "
-              "send that report with your bug report.",
-        "es": "MirrorBridge probará tres formas de enviar un video a {device}, una tras otra, durante unos dos "
+              "send that report with your bug report, and say whether the moving test pattern appeared.",
+        "es": "MirrorBridge probará cuatro formas de enviar un video a {device}, una tras otra, durante unos tres "
               "minutos en total. Mira la TV: puede mostrar el video de prueba de Apple y luego la imagen de "
-              "prueba de MirrorBridge. Si la TV pregunta si permite MirrorBridge, elige Permitir. No se envía "
-              "nada de la pantalla de este equipo.\n\nAl final, MirrorBridge dice qué funcionó y dónde está "
-              "el informe: mándalo con tu reporte del problema.",
+              "prueba de MirrorBridge. Durante la última prueba, la duplicación de pantalla, debería mostrar una "
+              "imagen de prueba en movimiento durante unos 10 segundos. Si la TV pregunta si permite "
+              "MirrorBridge, elige Permitir. No se envía nada de la pantalla de este equipo.\n\nAl final, "
+              "MirrorBridge dice qué funcionó y dónde está el informe: mándalo con tu reporte del problema y di "
+              "si apareció la imagen de prueba en movimiento.",
     },
     "probe_start": {"en": "Start the test", "es": "Empezar la prueba"},
     "status_probing": {"en": "Testing {device}: {step}…", "es": "Probando {device}: {step}…"},
     "probe_step": {"en": "test {number} of {total}", "es": "prueba {number} de {total}"},
+    "probe_step_watch": {
+        "en": "test {number} of {total}, watch the TV",
+        "es": "prueba {number} de {total}, mira la TV",
+    },
     "probe_done": {"en": "Test of {device} finished", "es": "Terminó la prueba de {device}"},
     "probe_failed_title": {"en": "The test failed", "es": "La prueba falló"},
     # Extend screen: virtual display driver
@@ -472,6 +479,11 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Screen mirroring did not work with {device}. Please report this TV, with mirrorbridge.log.",
         "es": "La duplicación de pantalla no funcionó con {device}. Avisa de esta TV y manda mirrorbridge.log.",
     },
+    "mirror_probe_time_up": {
+        "en": "The screen mirroring test was stopped after {seconds} s, before it found a way that works.",
+        "es": "La prueba de duplicación de pantalla se detuvo a los {seconds} s, antes de encontrar una forma que "
+              "funcione.",
+    },
     # The TV did not play the video
     "tv_password": {
         "en": "The TV asks for an AirPlay password (HTTP 401), which MirrorBridge cannot send with video it "
@@ -685,6 +697,41 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "The play queue with MirrorBridge's test pattern, from this PC",
         "es": "La cola de reproducción con la imagen de prueba de MirrorBridge, desde este equipo",
     },
+    "probe_test_mirror": {
+        "en": "Screen mirroring with a moving test pattern, from this PC",
+        "es": "La duplicación de pantalla con una imagen de prueba en movimiento, desde este equipo",
+    },
+    "probe_watch_mirror": {
+        "en": "Watch the TV now: for about {seconds} s it should show a moving test pattern, mirrored from this PC.",
+        "es": "Mira la TV ahora: durante unos {seconds} s debería mostrar una imagen de prueba en movimiento, "
+              "duplicada desde este equipo.",
+    },
+    "probe_skipped": {"en": "skipped: {why}", "es": "omitida: {why}"},
+    "probe_mirror_fairplay": {
+        "en": "the TV needs FairPlay for screen mirroring, as Apple TVs and Macs do, which MirrorBridge does not "
+              "have yet",
+        "es": "la TV necesita FairPlay para duplicar la pantalla, como los Apple TV y los Mac, y MirrorBridge "
+              "todavía no lo tiene",
+    },
+    "probe_mirror_unpaired": {
+        "en": "MirrorBridge is not paired with this TV, and screen mirroring needs it: use {menu_pair} first",
+        "es": "MirrorBridge no está emparejado con esta TV, y la duplicación de pantalla lo necesita: usa primero "
+              "{menu_pair}",
+    },
+    "probe_mirrored": {
+        "en": "the TV accepted the screen mirroring session and kept the video open: {frames} frames of the test "
+              "pattern went to it, and it asked for the time {times} times. What worked: {how}",
+        "es": "la TV aceptó la sesión de duplicación de pantalla y mantuvo abierto el video: recibió {frames} "
+              "fotogramas de la imagen de prueba y pidió la hora {times} veces. Lo que funcionó: {how}",
+    },
+    "probe_mirror_no_video": {
+        "en": "the TV accepted the screen mirroring session, but did not keep the video open: {error}",
+        "es": "la TV aceptó la sesión de duplicación de pantalla, pero no mantuvo abierto el video: {error}",
+    },
+    "probe_mirror_refused": {
+        "en": "the TV did not accept a screen mirroring session: {error}",
+        "es": "la TV no aceptó una sesión de duplicación de pantalla: {error}",
+    },
     "probe_line": {"en": "{number}. {test}: {result}", "es": "{number}. {test}: {result}"},
     "probe_no_answer": {"en": "no answer ({steps})", "es": "sin respuesta ({steps})"},
     "probe_refused": {"en": "refused ({steps})", "es": "rechazado ({steps})"},
@@ -766,6 +813,18 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "None of the tests got {device} to take the video.",
         "es": "Ninguna de las pruebas logró que {device} aceptara el video.",
     },
+    "probe_mirror_works": {
+        "en": "{conclusion} {menu_mirror} should work on this TV: it accepted screen mirroring and kept the video "
+              "open.",
+        "es": "{conclusion} {menu_mirror} debería funcionar en esta TV: aceptó la duplicación de pantalla y mantuvo "
+              "abierto el video.",
+    },
+    "probe_mirror_only": {
+        "en": "{device} did not take the video it was sent to cast, but {menu_mirror} should work on this TV: it "
+              "accepted screen mirroring and kept the video open.",
+        "es": "{device} no aceptó el video que se le envió para transmitir, pero {menu_mirror} debería funcionar en "
+              "esta TV: aceptó la duplicación de pantalla y mantuvo abierto el video.",
+    },
     "probe_report_file": {
         "en": "The full report is in {file}: please send it with your bug report.",
         "es": "El informe completo está en {file}: mándalo con tu reporte del problema.",
@@ -823,6 +882,7 @@ def _menu_paths() -> dict[str, str]:
         "menu_x264": (_item("quality_menu"), _item("encoder"), "x264 (CPU)"),
         "menu_720p": (_item("source_menu"), _item("extend_size"), "720p"),
         "menu_probe": (_item("more"), _item("probe")),
+        "menu_mirror": (_item("mirror_screen"),),
     }
     return {name: " > ".join(words) for name, words in paths.items()}
 

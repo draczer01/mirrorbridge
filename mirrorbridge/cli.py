@@ -205,9 +205,13 @@ async def cmd_probe(args) -> int:
 
     def progress(number: int, total: int, name: str) -> None:
         print(f"Test {number} of {total}: {name}...")
+        watch = probe.watch_hint(probe.TESTS[number - 1], args.seconds)
+        if watch:
+            print(watch)
 
     print(f"Testing {device.name}. Watch the TV: it may show Apple's test video, then MirrorBridge's test "
-          f"pattern. If the TV asks whether to allow MirrorBridge, choose Allow. This takes about two minutes.")
+          f"pattern, and during the last test a moving test pattern, mirrored from this PC. If the TV asks "
+          f"whether to allow MirrorBridge, choose Allow. This takes about three minutes.")
     report = await probe.run(manager, device, settings, seconds=args.seconds, public_url=args.url,
                              progress=progress)
     print()
@@ -409,8 +413,8 @@ def build_parser() -> argparse.ArgumentParser:
     test.add_argument("name", nargs="?", metavar="device", help="name, IP or id")
     test.add_argument("-d", "--device", help="name, IP or id")
     test.add_argument("--seconds", type=float, default=probe.DEFAULT_SECONDS,
-                      help="how long each test watches the TV once it took the video "
-                           f"(default {probe.DEFAULT_SECONDS})")
+                      help="how long each test watches the TV once it took the video (default "
+                           f"{probe.DEFAULT_SECONDS}; the screen mirroring test, {probe.MIRROR_SECONDS} at most)")
     test.add_argument("--url", default=probe.PUBLIC_STREAM, help="the public HLS video of the first two tests")
 
     mirroring = common(sub.add_parser("mirror", help="mirror the screen with a fraction of a second of delay "
