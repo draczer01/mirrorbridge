@@ -127,6 +127,7 @@ async def test_a_player_in_a_web_page_may_fetch_the_stream(tmp_path, caplog):
         await server.close()
     tv = server.activity("127.0.0.1")
     assert tv.missing == 1 and tv.requests == 2  # the preflights are neither fetches nor refusals
+    assert tv.preflights == 2 and server.activity().preflights == 2  # but they show that the TV reached the PC
     assert [r.getMessage() for r in caplog.records] == [  # once per client
         "127.0.0.1 asked whether it may fetch /stream.m3u8 from a web page (OPTIONS, User-Agent: WebKit)",
     ]

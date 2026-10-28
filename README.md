@@ -159,7 +159,7 @@ MirrorBridge.exe cast --extend --extend-mode 4k   # ... at 4K (1080p, 720p or 4k
 MirrorBridge.exe vdd status                    # is the virtual display driver installed and working?
 MirrorBridge.exe vdd install                   # download and install it (asks first; one UAC prompt)
 MirrorBridge.exe forget -d "Living Room"       # remove the saved pairing
-MirrorBridge.exe -v probe "Living Room"        # test which ways of sending video the TV takes, for a bug report
+MirrorBridge.exe probe "Living Room"           # test which ways of sending video the TV takes, for a bug report
 ```
 
 `cast` starts from the app's settings, so without `--monitor`, `--window` or `--extend` it
@@ -242,11 +242,12 @@ the Parsec app, keeps the driver awake). The downloaded driver installer stays i
   firmware update, or MirrorBridge removed from the TV's list of AirPlay devices). Use
   *Device > Forget pairing*, then cast again and type the new PIN.
 * **Reporting a TV that does not work**: choose the TV under *Device*, then *More
-  options* > *Test this TV…* (or run `MirrorBridge.exe -v probe "TV name"`). It takes about
-  two minutes: watch the TV. MirrorBridge tries three ways of sending it video, one after
-  the other: `POST /play` with Apple's public test video, the play queue with the same
-  video, and the play queue with a short cast of MirrorBridge's own test pattern from this
-  PC (nothing from your screen). Then it says what each one did, and where its report is:
+  options* > *Test this TV…* (or run `MirrorBridge.exe probe "TV name"`). It takes about
+  two minutes: watch the TV, and if it asks whether to allow MirrorBridge, choose *Allow*.
+  MirrorBridge tries three ways of sending it video, one after the other: `POST /play` with
+  Apple's public test video, the play queue with the same video, and the play queue with a
+  short cast of MirrorBridge's own test pattern from this PC (nothing from your screen).
+  Then it says what each one did, and where its report is:
   `%APPDATA%\MirrorBridge\probe-<date>-<time>.log` (*Open log folder* in the result).
   Send that file with `mirrorbridge.log`. It shows what the TV advertises, what it
   answered to each AirPlay request, what it said while it played, whether (and with which
@@ -290,16 +291,20 @@ receivers that do not say what they have, still get exactly pyatv's requests), t
 queue against a fake TV that has no /play, on real sockets with HAP pair-verify and
 encryption (the route each receiver's feature bits pick, the exact requests and headers,
 the 404 fallback on a new connection and the route remembered, refusals and silence
-explained, the keep-alive never overlapping a command, a late answer never taken for the
-next one, every message on the event channel answered, the TV's player errors, BACK, the
-end of the video and a closed channel ending a cast, and the video stopped and the session
-torn down however it ends), *Test this TV* against the same fake TV with a real cast of the
-test pattern (each test's verdict, the report file, the command line's output, and the
-dialogs in Spanish), CORS for players in a web page, when a cast gives up on a TV that never plays (and that
-it waits for one that is only slow, counting only the TV's own requests), legacy and
-HomeKit-style (AirPlay 2) PIN pairing, wrong-PIN rejection, a full pair-and-cast run
-against the fake Apple TV, falling back from Desktop Duplication to GDI capture, and
-stopping while a cast is still starting. For Extend screen they cover the driver's IOCTL
+explained, the keep-alive never overlapping a command, a late answer waited for before the
+next request and never taken for its answer, a TV that goes quiet or ends a video file before
+playing it, every message on the event channel answered, the TV's player errors, BACK, the
+end of the video (and of a live stream, which has none) and a closed channel ending a cast,
+and the video stopped and the session torn down however it ends), *Test this TV* against the
+same fake TV with a real cast of the test pattern (each test's verdict, a conclusion that
+only names the firewall or HTTPS when the TV played Apple's video but never reached the PC,
+the report file, the command line's output, Stop and Quit waiting for the test to tear down,
+and the dialogs in Spanish), CORS for players in a web page (a preflight counting as the TV
+reaching the PC), when a cast gives up on a TV that never plays (and that it waits for one
+that is only slow, or asking whether to allow MirrorBridge, counting only the TV's own
+requests), legacy and HomeKit-style (AirPlay 2) PIN pairing, wrong-PIN rejection, a full
+pair-and-cast run against the fake Apple TV, falling back from Desktop Duplication to GDI
+capture, and stopping while a cast is still starting. For Extend screen they cover the driver's IOCTL
 codes and payloads, IOCTL time-outs and cancels, reading the driver's state, finding its
 monitor and switching Duplicate or Second screen only to Extend, pings that never wait for
 the presence check, the mode fallback, the installer check (a cached file included), asking

@@ -31,7 +31,7 @@ Three pyatv 0.18 behaviours get in the way of casting a screen:
   the play queue instead (airplay_queue.py), and so, once, on a new connection, is any
   receiver that answers /play with 404. Receivers with bit 0, Apple TVs among them, get
   exactly what pyatv sends. Which way worked for each receiver is remembered while
-  MirrorBridge runs.
+  MirrorBridge runs; a way that was asked for (Test this TV tries each) is not.
 
 Messages are Texts (text.py) that name MirrorBridge's menu items in English ("Device > Forget
 pairing"); the GUI shows them in the user's language and the command line names its own
@@ -88,12 +88,23 @@ class CastContext:
     live: bool = False  # an endless live stream rather than a file
     password: bool = False  # the receiver advertises an AirPlay password
     accepted_at: Optional[float] = None  # time.monotonic() when the TV accepted the video
+    played: bool = False  # the TV said it was playing (/playback-info; the play queue says it in `queue`)
     steps: dict = field(default_factory=dict)  # each request's answer, for logs and errors
     device: str = ""  # the receiver's id: the way that worked for it is remembered under it
     features: Optional[int] = None  # the AirPlay feature bits it advertises; None = none
     route: Optional[str] = None  # PLAY or QUEUE; None = PLAY until play_url chooses (choose_route)
+    remember: bool = True  # remember the way that worked; play_url turns it off for a route asked for
     fallback: bool = True  # after a 404 to /play, try the play queue once
     queue: Optional[QueueSession] = None  # the play queue session, on that route
+
+    def waited_since(self, started: float) -> Optional[float]:
+        """When the TV's silence counts from, in a cast that asked it to play at `started`:
+        then, or on the play queue, once the TV answered its first SETUP. None until it has:
+        a TV may hold that SETUP while it asks whether to allow MirrorBridge, and the play
+        queue gives it airplay_queue.SETUP_TIMEOUT for that."""
+        if self.queue is None:
+            return started
+        return None if self.queue.set_up_at is None else max(started, self.queue.set_up_at)
 
 
 _CAST: contextvars.ContextVar[Optional[CastContext]] = contextvars.ContextVar("mirrorbridge_cast", default=None)
@@ -120,7 +131,7 @@ def choose_route(cast: CastContext) -> tuple[str, str]:
 
 
 def _remember(cast: CastContext, route: str) -> None:
-    if cast.device and _ROUTES.get(cast.device) != route:
+    if cast.remember and cast.device and _ROUTES.get(cast.device) != route:
         _LOGGER.info("This receiver takes video by %s; MirrorBridge uses that from now on", ROUTE_NAMES[route])
         _ROUTES[cast.device] = route
 
@@ -133,6 +144,8 @@ async def play_url(atv, url: str, cast: CastContext) -> None:
     starts for this playback and nothing else.
     """
     _CAST.set(cast)
+    if cast.route:  # asked for (Test this TV): whether it works says nothing about the receiver's own way
+        cast.remember = False
     cast.route, why = choose_route(cast)
     _LOGGER.info("Sending the video by %s: %s", ROUTE_NAMES[cast.route], why)
     await atv.stream.play_url(url)
@@ -446,7 +459,7 @@ async def _play_queue(self, rtsp: RtspSession, timing_server_port: int, url: str
     cast.route = QUEUE
     # A live stream gets no Start-Position: 0 would start the TV at the oldest segment it can
     # still fetch, seconds further behind than its player's own choice.
-    options = QueueOptions(apple=bool(cast.apple), start=None if cast.live else position)
+    options = QueueOptions(apple=bool(cast.apple), start=None if cast.live else position, live=cast.live)
     queue = cast.queue = QueueSession(rtsp, self.context.credentials, cast.steps, options)
     try:
         await queue.open(timing_server_port)
@@ -585,7 +598,7 @@ async def _wait_for_live_stream(self) -> None:  # replaces AirPlayPlayer._wait_f
         if playing:
             if not started:
                 _LOGGER.info("The TV started playing the stream")
-            started = True
+            started = cast.played = True
             idle_polls = 0
         elif started:
             idle_polls += 1

@@ -969,6 +969,18 @@ def test_a_route_that_worked_or_was_asked_for_comes_first():
         airplay_patch.QUEUE, "asked for")
 
 
+async def test_a_route_that_was_asked_for_is_not_remembered():
+    """Test this TV tries the play queue on an Apple TV too: later casts still get pyatv's /play."""
+    asked = CastContext(apple=False, live=False, device="AppleTV", features=APPLE_TV_FEATURES,
+                        route=airplay_patch.QUEUE, fallback=False)
+    async with QueueTV() as tv:
+        await _cast_to(QueueAtv(tv), asked)
+    assert asked.route == airplay_patch.QUEUE and asked.accepted_at is not None
+    assert not airplay_patch._ROUTES
+    assert airplay_patch.choose_route(CastContext(device="AppleTV", features=APPLE_TV_FEATURES))[0] == \
+        airplay_patch.PLAY
+
+
 @pytest.mark.parametrize("features", [APPLE_TV_FEATURES, None])
 async def test_receivers_with_airplay_video_v1_get_exactly_the_requests_pyatv_sends(features, caplog):
     """Apple TVs, and receivers that do not say, see no change: the same bytes as pyatv's own."""
@@ -988,6 +1000,17 @@ async def test_receivers_with_airplay_video_v1_get_exactly_the_requests_pyatv_se
     assert airplay_patch._ROUTES == {"AppleTV": airplay_patch.PLAY}
     assert "Sending the video by POST /play (AirPlay video v1)" in caplog.text
 
+    # After Test this TV sent this receiver a video through the play queue, the same again
+    probe_like = CastContext(apple=True, live=False, device="AppleTV", features=features, route=airplay_patch.QUEUE,
+                             fallback=False)
+    async with QueueTV() as tv:
+        await _cast_to(QueueAtv(tv), probe_like)
+    again = CastContext(apple=True, live=True, device="AppleTV", features=features)
+    async with MockReceiver(apple_tv) as tv:
+        await _cast_to(MockAtv(tv), again)
+        assert tv.raw == theirs
+    assert again.route == airplay_patch.PLAY
+
 
 @pytest.mark.parametrize("live", [True, False])
 async def test_a_tv_with_only_the_play_queue_gets_the_url_through_it(live, caplog):
@@ -1001,6 +1024,8 @@ async def test_a_tv_with_only_the_play_queue_gets_the_url_through_it(live, caplo
         "actionAtItemEnd", "rate", "stop", "teardown",
     ]
     assert all(r[6] for r in tv.requests if r[0] != "pair-verify")  # HAP-encrypted, every one
+    # A TV that asks whether to allow a new sender names it from this header, SETUP's included
+    assert {r[4].get("X-Apple-Client-Name") for r in tv.requests if r[0] != "pair-verify"} == {"MirrorBridge"}
     assert tv.overlaps == []
     assert cast.route == airplay_patch.QUEUE and cast.accepted_at is not None
     assert airplay_patch._ROUTES == {"TCL": airplay_patch.QUEUE}
@@ -1135,24 +1160,101 @@ async def test_a_late_answer_is_not_taken_for_the_next_one(monkeypatch, cseq):
     async with QueueTV(refuse={"isInterestedInDateRange": 501}, late={"isInterestedInDateRange": 0.6},
                        cseq=cseq) as tv:
         await _cast_to(QueueAtv(tv), cast)
+        assert tv.overlaps == []  # the next request waited for that late answer
     assert cast.steps["isInterestedInDateRange"] == "no answer"
     assert cast.steps["actionAtItemEnd"] == cast.steps["rate"] == 200  # their own answers, not the late 501
 
 
-@pytest.mark.parametrize("said, why", [
-    (PLAYING + BACK, "BACK was pressed on the TV's remote"),
-    (PLAYING + ({"type": "playbackState", "name": "stopped"},), "the TV stopped playing"),
-    (PLAYING + ({"type": "notification", "name": "itemPlayedToEnd"},), "the video ended on the TV"),
-    (PLAYING + (HANG_UP,), "the TV closed the event channel"),
-])
-async def test_the_cast_ends_when_the_tv_says_so_and_is_stopped_on_it(said, why, caplog):
+async def test_a_late_keep_alive_is_not_overlapped_and_the_cast_goes_on(monkeypatch):
+    """An LG left a /feedback unanswered for over 5 s and played on: the next request waits for it."""
+    monkeypatch.setattr(airplay_queue, "FEEDBACK_INTERVAL", 0.05)
+    monkeypatch.setattr(airplay_queue, "FEEDBACK_TIMEOUT", 0.3)
+    monkeypatch.setattr(airplay_queue, "INFO_INTERVAL", 0.02)
     cast = CastContext(apple=False, live=True, device="TCL", features=TCL_FEATURES)
+    async with QueueTV(said=PLAYING, late={"feedback": 0.6}) as tv:  # later than FEEDBACK_TIMEOUT
+        task = asyncio.ensure_future(_cast_to(QueueAtv(tv), cast, timeout=30))
+        deadline = time.monotonic() + 10
+        while tv.names(feedback=True).count("feedback") < 4 or tv.names().count("playbackInfo") < 2:
+            assert not task.done() and time.monotonic() < deadline, tv.names(feedback=True)
+            await asyncio.sleep(0.02)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert tv.overlaps == []
+        assert tv.names()[-2:] == ["stop", "teardown"]
+    assert not cast.queue.ended.is_set()  # the TV was still there
+
+ITEM_PLAYED_TO_END = {"type": "notification", "name": "itemPlayedToEnd"}
+
+
+@pytest.mark.parametrize("said, why, live", [
+    (PLAYING + BACK, "BACK was pressed on the TV's remote", True),
+    (PLAYING + ({"type": "playbackState", "name": "stopped"},), "the TV stopped playing", True),
+    (PLAYING + (ITEM_PLAYED_TO_END,), "the video ended on the TV", False),  # a video file
+    (PLAYING + (HANG_UP,), "the TV closed the event channel", True),
+])
+async def test_the_cast_ends_when_the_tv_says_so_and_is_stopped_on_it(said, why, live, caplog):
+    cast = CastContext(apple=False, live=live, device="TCL", features=TCL_FEATURES)
     async with QueueTV(said=said) as tv:
         with caplog.at_level(logging.INFO, logger="mirrorbridge.airplay_queue"):
             await _cast_to(QueueAtv(tv), cast)
         assert tv.names()[-2:] == ["stop", "teardown"]
     assert cast.queue.end_reason == why and f"The cast ended: {why}" in caplog.text
 
+
+async def test_a_tv_that_ends_the_live_stream_as_a_file_is_explained(caplog):
+    """A live stream has no end: a player that reaches one read the playlist once, as a file's."""
+    cast = CastContext(apple=False, live=True, device="TCL", features=TCL_FEATURES)
+    async with QueueTV(said=PLAYING + (ITEM_PLAYED_TO_END,)) as tv:
+        with pytest.raises(exceptions.PlaybackError, match=r"The TV ended the live stream after \d+ s, as if it "
+                                                           r"were a video file that had reached its end\. Use More "
+                                                           r"options > Test this TV"):
+            await _cast_to(QueueAtv(tv), cast)
+        assert tv.names()[-2:] == ["stop", "teardown"]
+    assert "The TV ended the live stream after" in caplog.text
+
+
+@pytest.mark.parametrize("said, words", [
+    ((HANG_UP,), "the TV closed the event channel"),
+    ((), None),  # it takes the item and never says anything about it
+])
+async def test_a_video_file_the_tv_never_plays_is_explained(monkeypatch, said, words):
+    """Video files have no cast session watching what the TV fetches."""
+    monkeypatch.setattr(airplay_queue, "START_TIMEOUT", 0.2)
+    monkeypatch.setattr(airplay_queue, "INFO_INTERVAL", 0.05)
+    cast = CastContext(apple=False, live=False, device="TCL", features=TCL_FEATURES)
+    async with QueueTV(said=said) as tv:
+        with pytest.raises(exceptions.PlaybackError) as err:
+            await _cast_to(QueueAtv(tv), cast)
+        assert tv.names()[-2:] == ["stop", "teardown"]
+    if words:
+        assert str(err.value) == (f"The TV ended the AirPlay session before it played the video: {words}. Use More "
+                                  "options > Test this TV, and send the test's report with your bug report.")
+        from mirrorbridge.gui import i18n
+
+        i18n.set_language("es")
+        try:
+            spanish = i18n.say(err.value.args[0])
+        finally:
+            i18n.set_language("en")
+        assert spanish == ("La TV terminó la sesión de AirPlay antes de reproducir el video: la TV cerró el canal "
+                           "de eventos. Usa Más opciones > Probar esta TV y manda el informe de la prueba con tu "
+                           "reporte del problema.")
+    else:
+        assert str(err.value).startswith("The TV took the video but did not say within 0.2 s that it was playing")
+
+
+async def test_the_clock_for_an_answer_starts_once_the_tv_answered_the_first_setup(monkeypatch):
+    """The TV may hold that SETUP while it asks whether to allow MirrorBridge."""
+    cast = CastContext(apple=False, live=True, device="TCL", features=TCL_FEATURES)
+    assert cast.waited_since(5.0) == 5.0  # /play: from the request
+    async with QueueTV(late={"setup": 0.3}) as tv:
+        task = asyncio.ensure_future(_cast_to(QueueAtv(tv), cast))
+        while cast.queue is None or "setup" not in tv.names():
+            await asyncio.sleep(0.01)
+        assert cast.waited_since(5.0) is None  # still asking
+        await task
+    assert cast.waited_since(5.0) == cast.queue.set_up_at > 5.0
 
 async def test_a_stop_before_the_tv_plays_still_ends_its_session():
     cast = CastContext(apple=False, live=True, device="TCL", features=TCL_FEATURES)
@@ -1195,13 +1297,35 @@ async def test_the_tvs_player_failing_is_explained(caplog):
                        "Su reproductor no acepta este formato de video. Avisa de esta TV y manda mirrorbridge.log.")
 
 
-async def test_a_tv_that_stops_answering_ends_the_cast(monkeypatch):
+async def test_a_tv_that_stops_answering_ends_the_cast(monkeypatch, caplog):
     monkeypatch.setattr(airplay_queue, "FEEDBACK_INTERVAL", 0.01)
     monkeypatch.setattr(airplay_queue, "FEEDBACK_TIMEOUT", 0.05)
     monkeypatch.setattr(airplay_queue, "CLOSE_TIMEOUT", 0.05)
     cast = CastContext(apple=False, live=True, device="TCL", features=TCL_FEATURES)
     async with QueueTV(said=PLAYING, late={"feedback": 30}) as tv:
-        await _cast_to(QueueAtv(tv), cast)
+        with caplog.at_level(logging.INFO, logger="mirrorbridge.airplay_queue"):
+            await _cast_to(QueueAtv(tv), cast)
+        # Nothing more was sent while the TV owed that answer, the stop and TEARDOWN neither
+        assert tv.names(feedback=True)[-1] == "feedback" and tv.names(feedback=True).count("feedback") == 1
+        assert tv.overlaps == []
+    assert cast.queue.end_reason == "the TV stopped answering (2 keep-alives in a row)"
+    assert "Ended the AirPlay video session: stop=no answer teardown=not sent" in caplog.text
+
+
+async def test_a_tv_that_still_talks_is_not_given_up_for_its_keep_alives(monkeypatch):
+    monkeypatch.setattr(airplay_queue, "FEEDBACK_INTERVAL", 0.01)
+    monkeypatch.setattr(airplay_queue, "FEEDBACK_TIMEOUT", 0.05)
+    monkeypatch.setattr(airplay_queue, "CLOSE_TIMEOUT", 0.05)
+    cast = CastContext(apple=False, live=True, device="TCL", features=TCL_FEATURES)
+    async with QueueTV(said=PLAYING, late={"feedback": 30}) as tv:
+        task = asyncio.ensure_future(_cast_to(QueueAtv(tv), cast))
+        while "feedback" not in tv.names(feedback=True):
+            await asyncio.sleep(0.01)
+        for _ in range(20):  # 0.6 s of keep-alives unanswered, while the TV goes on saying how it plays
+            await tv.say({"type": "notification", "name": "rateChanged", "rate": 1.0})
+            await asyncio.sleep(0.03)
+        assert not task.done()
+        await asyncio.wait_for(task, 5)  # once it falls silent too
     assert cast.queue.end_reason == "the TV stopped answering (2 keep-alives in a row)"
 
 

@@ -14,9 +14,10 @@ handed the URL on the same encrypted RTSP connection, in this order:
 
 A TV drops the connection when two requests overlap on it (pyatv's keep-alive next to a
 /command, for one), so here every request, the keep-alive included, waits for the answer to
-the one before. Answers are matched to their requests by CSeq: pyatv's HttpConnection gives
-each answer to the oldest request still waiting, so one answer that came after its request
-gave up would be taken for the answer to every request after it.
+the one before, also when that request gave up waiting for it: the next one is only sent
+once that late answer has come. Answers are matched to their requests by CSeq: pyatv's
+HttpConnection gives each answer to the oldest request still waiting, so one answer that
+came after its request gave up would be taken for the answer to every request after it.
 
 The TV's messages on the event channel (playbackState, notification, sendMediaRemoteCommand,
 errors, and answers to playbackInfo) come framed like requests and are each answered 200 OK.
@@ -31,9 +32,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import plistlib
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from pyatv import exceptions
@@ -58,13 +61,16 @@ COMMAND_USER_AGENT = "AirPlay/870.14.1"  # what Apple's senders send /command wi
 SENDER_ID = "AA:BB:CC:DD:EE:FF"  # the deviceID pyatv sends in every SETUP, which these TVs take
 
 REQUEST_TIMEOUT = 10  # what pyatv's HttpConnection waits by default
-SETUP_TIMEOUT = 60  # some receivers hold the first SETUP while they ask whether to allow a new sender
+# Some receivers hold the first SETUP while they ask whether to allow a new sender. A cast's
+# own "the TV never answered" clock only starts once this SETUP is answered (CastContext).
+SETUP_TIMEOUT = 60
 FEEDBACK_INTERVAL = 2.0  # pyatv's keep-alive: POST /feedback every 2 s
 FEEDBACK_TIMEOUT = 5
 FEEDBACK_MISSES = 2  # unanswered keep-alives in a row, with the TV silent meanwhile, that end a cast
 CLOSE_TIMEOUT = 3  # each request of a stop: a TV that does not answer must not hold it up
 INFO_INTERVAL = 10  # asks the TV what it is playing, for the log
 INFO_TIMEOUT = 3
+START_TIMEOUT = 30  # a video file the TV took must be said to play within this (a live stream: the cast session)
 EVENT_CHANNEL_TRIES = 5  # pyatv's: some receivers open the event port a moment after SETUP
 LOGGED_DETAIL = 400  # characters of a message from the TV that the log shows at INFO
 
@@ -90,6 +96,14 @@ _MEDIA_HINTS = {
     -12911: Text("tv_media_decoder", "Its player could not decode the video. Try a lower resolution or 30 "
                  "frames per second."),
 }
+
+# Why a cast ended on the TV's side, for the log and for errors.
+END_STOPPED = Text("queue_end_stopped", "the TV stopped playing")
+END_PLAYED = Text("queue_end_played", "the video ended on the TV")
+END_FAILED = Text("queue_end_failed", "the TV's player failed")
+END_BACK = Text("queue_end_back", "BACK was pressed on the TV's remote")
+END_EVENTS_CLOSED = Text("queue_end_events_closed", "the TV closed the event channel")
+END_HUNG_UP = Text("queue_end_hung_up", "the TV closed the connection")
 
 
 def pyatv_fits() -> bool:
@@ -132,13 +146,22 @@ def cm_time(seconds: float) -> dict:
     return {"value": int(round(seconds * 1000)), "timescale": 1000, "flags": 1, "epoch": 0}
 
 
-def media_error(error: Any) -> Text:
-    """What a TV's {type: error} message says, in words a person can act on."""
+def media_error(error: Any, host: str = "") -> Text:
+    """What a TV's {type: error} message says, in words a person can act on. `host`: where
+    the video came from, when that is not this PC (the firewall then has nothing to do with it)."""
     error = error if isinstance(error, dict) else {}
     code = error.get("code", "?")
     hint = _MEDIA_HINTS.get(code) or Text("tv_media_report", "Please report this TV, with mirrorbridge.log.")
+    if code == -17221 and host:
+        hint = Text("tv_media_unreachable", "Its player could not download the video from {host}.", host=host)
     return Text("tv_media_error", "The TV's player could not play the video (error {code}, {domain}). {hint}",
                 code=code, domain=error.get("domain", "?"), hint=hint)
+
+
+def with_probe_advice(problem: Text) -> Text:
+    """`problem`, and what to do about it: Test this TV, whose report shows `problem` alone."""
+    return Text("tv_probe_advice", "{problem} Use More options > Test this TV, and send the test's report with your "
+                "bug report.", problem=problem)
 
 
 def _answered(answer: Optional[HttpResponse]) -> bool:
@@ -172,15 +195,19 @@ class SerialSession:
     """An RtspSession's requests, sent one at a time, each answer matched to its request.
 
     It takes over the answers of the session's (pair-verified) HttpConnection. A request that
-    gave up waiting stays owed: its answer, should it come later, is dropped.
+    gave up waiting stays owed: the next request is only sent once its answer has come, and
+    that answer is dropped (airkast's ControlConnection does the same). While it has not come,
+    no request is sent at all.
     """
 
     def __init__(self, rtsp: RtspSession) -> None:
         self.rtsp = rtsp
         self.connection = rtsp.connection
         self.closed = asyncio.Event()  # the connection is gone
+        self.answers = 0  # every answer the TV sent, late ones included: it is still there
         self._lock = asyncio.Lock()
-        self._waiting: "OrderedDict[int, Optional[asyncio.Future]]" = OrderedDict()  # by CSeq; None = owed
+        self._waiting: "OrderedDict[int, asyncio.Future]" = OrderedDict()  # by CSeq, oldest first
+        self._owed: set[int] = set()  # those of them whose request gave up waiting
         self._buffer = b""
         lost = self.connection.connection_lost
 
@@ -206,11 +233,18 @@ class SerialSession:
     ) -> Optional[HttpResponse]:
         """Send a request with the headers pyatv's RtspSession adds, and return its answer.
 
-        None if the TV did not answer within `timeout` (REQUEST_TIMEOUT) or the connection
-        closed. Never raises for either. A body that is not bytes goes as a binary plist.
+        None if the TV did not answer within `timeout` (REQUEST_TIMEOUT), still had not
+        answered an earlier request within `timeout` (this one is then not sent), or the
+        connection closed. Never raises for any of these. A body that is not bytes goes as a
+        binary plist.
         """
         timeout = REQUEST_TIMEOUT if timeout is None else timeout
         async with self._lock:
+            if not await self._settle(timeout):
+                if not self.closed.is_set():
+                    _LOGGER.debug("Not sending %s %s: the TV has still not answered CSeq %s", method, uri,
+                                  ", ".join(map(str, sorted(self._owed))))
+                return None
             transport = self.connection.transport
             if transport is None or self.closed.is_set():
                 return None
@@ -222,6 +256,8 @@ class SerialSession:
                 "DACP-ID": rtsp.dacp_id,
                 "Active-Remote": rtsp.active_remote,
                 "Client-Instance": rtsp.dacp_id,
+                # A receiver that asks whether to allow a new sender names it from this, not from SETUP's name.
+                "X-Apple-Client-Name": APP_NAME,
                 **(headers or {}),
             }
             data = b""
@@ -239,7 +275,21 @@ class SerialSession:
                 return None
             finally:
                 if not answer.done() and cseq in self._waiting:
-                    self._waiting[cseq] = None  # owed: its answer is dropped if it comes
+                    self._owed.add(cseq)  # the next request waits for its answer, which is then dropped
+
+    @property
+    def owes(self) -> bool:
+        """The TV has still not answered a request that gave up waiting."""
+        return bool(self._owed)
+
+    async def _settle(self, timeout: float) -> bool:
+        """Wait up to `timeout` for the answers the TV still owes. False if one is still owed
+        then, or the connection closed meanwhile: the next request must not be sent."""
+        owed = [self._waiting[cseq] for cseq in self._owed if cseq in self._waiting]
+        if owed:
+            _LOGGER.debug("Waiting for the late answer to CSeq %s", ", ".join(map(str, sorted(self._owed))))
+            await asyncio.wait(owed, timeout=timeout)
+        return not self._owed and not self.closed.is_set()
 
     def _data_received(self, data: bytes) -> None:
         self._buffer += self.connection.receive_processor(data)
@@ -255,6 +305,7 @@ class SerialSession:
             self._deliver(answer)
 
     def _deliver(self, answer: HttpResponse) -> None:
+        self.answers += 1
         cseq = str(answer.headers.get("CSeq", "")).strip()
         if cseq.isdigit() and int(cseq) in self._waiting:
             key = int(cseq)
@@ -264,17 +315,23 @@ class SerialSession:
             _LOGGER.debug("Answer to no request: %s %s", answer.code, answer.message)
             return
         future = self._waiting.pop(key)
-        if future is None:
+        if key in self._owed:
+            self._owed.discard(key)
             _LOGGER.debug("Dropped the late answer to CSeq %s: %s %s", key, answer.code, answer.message)
-        elif not future.done():
+        if not future.done():
             future.set_result(answer)
 
     def _lost(self) -> None:
         self.closed.set()
-        for future in self._waiting.values():
-            if future is not None and not future.done():
+        for cseq, future in self._waiting.items():
+            if future.done():
+                continue
+            if cseq in self._owed:
+                future.cancel()  # nobody waits for its answer but _settle
+            else:
                 future.set_exception(ConnectionError("connection lost"))
         self._waiting.clear()
+        self._owed.clear()
 
 
 class QueueEventChannel(EventChannel):
@@ -332,6 +389,7 @@ class QueueOptions:
     apple: bool = False  # an Apple TV (tvOS 26): PTP timing, its /info psi, and _TVOS_ITEM_KEYS
     media_type: str = "file"  # "file" or "streaming": an LG CX plays HLS sent as either
     start: Optional[float] = 0.0  # seconds into the video; None sends no Start-Position (live: the TV's own start)
+    live: bool = False  # MirrorBridge's live stream: it has no end, and the cast session watches it start
 
 
 class QueueSession:
@@ -340,7 +398,8 @@ class QueueSession:
     `steps` gets each request's answer by name (setup, record, setup130, insert...), for the
     log and for errors. open() and load() raise QueueRefused when the TV turns a step down,
     and what pyatv raises when pair-verify or the event channel fail: `step` then names the
-    step under way. wait() returns when the video ends on the TV, and close() stops it.
+    step under way. wait() returns when the video ends on the TV (or raises PlaybackError
+    when it failed), and close() stops it.
     """
 
     def __init__(
@@ -363,10 +422,15 @@ class QueueSession:
         self.state: Optional[str] = None  # the TV's last playbackState
         self.events: dict[str, int] = {}  # what the TV said ("playbackState/playing"), in order, with counts
         self.error: Optional[dict] = None  # the TV's {type: error} message
-        self.end_reason = ""
+        self.end_reason = ""  # why the TV ended the cast (a Text), if it did
+        self.failure: Optional[Text] = None  # what wait() raises: the cast ended because something failed
         self.taken = asyncio.Event()  # the TV named the item: it took it
         self.played = asyncio.Event()  # the TV said it is playing
         self.ended = asyncio.Event()  # it said the video ended, failed, or hung up the event channel
+        self.set_up_at: Optional[float] = None  # time.monotonic() when the TV answered the first SETUP
+        self.loaded_at: Optional[float] = None  # ... and took the item
+        self.heard = 0  # messages from the TV on the event channel, answers to playbackInfo included
+        self._host = ""  # where the video comes from, when not from this PC
         self._replies: dict[int, asyncio.Future] = {}  # requests the TV answers on the event channel
         self._next_message = 1
         self._feedback_task: Optional[asyncio.Task] = None
@@ -398,7 +462,6 @@ class QueueSession:
                 "X-Apple-ProtocolVersion": "1",
                 "X-Apple-Session-ID": self.session_id,
                 "X-Apple-StreamID": str(self.stream_id),
-                "X-Apple-Client-Name": APP_NAME,
             },
         )
         if name:
@@ -474,6 +537,7 @@ class QueueSession:
 
         self.step = "setup"
         answer = await self._step("setup", "SETUP", self.rtsp.uri, self._session_body(timing_port), SETUP_TIMEOUT)
+        self.set_up_at = time.monotonic()
         event_port = _plist(answer).get("eventPort")
         if not event_port:
             self.steps["setup"] = f"{answer.code} without an event port"
@@ -528,6 +592,8 @@ class QueueSession:
     async def load(self, url: str) -> None:
         """Hand the TV the URL and start playback. Only the URL itself has to be taken."""
         self.step = "insert"
+        host = urlsplit(url).hostname or ""
+        self._host = "" if host == self.rtsp.connection.local_ip else host
         self.item = str(uuid4()).upper()
         item: dict = {"uuid": self.item, "mediaType": self.options.media_type, "Content-Location": url}
         if self.options.start is not None:
@@ -539,6 +605,7 @@ class QueueSession:
             if answer is not None:
                 self.item = None  # turned down: there is nothing to stop
             raise QueueRefused("insert", answer.code if answer is not None else None)
+        self.loaded_at = time.monotonic()
         # The rest only shapes playback; the TV may well start without them.
         await self.command("isInterestedInDateRange", {
             "type": "setProperty", "property": "isInterestedInDateRange", "value": True, "item": {"uuid": self.item},
@@ -549,21 +616,27 @@ class QueueSession:
         # Only now: the keep-alive must not be under way while the commands above are.
         self._feedback_task = asyncio.ensure_future(self._keep_alive())
 
+    def _signs_of_life(self) -> int:
+        """Everything the TV said so far: on the event channel, and answers, late ones included."""
+        return self.heard + self.link.answers
+
     async def _keep_alive(self) -> None:
         """POST /feedback every 2 s, as pyatv's feedback task does, but in turn with the rest.
 
         A TV may leave one unanswered and play on (an LG did, for over 5 s). One that answers
-        none of FEEDBACK_MISSES in a row, and says nothing meanwhile, is gone: the cast ends.
+        none of FEEDBACK_MISSES in a row, and gives no other sign of life meanwhile, is gone:
+        the cast ends.
         """
         failed, misses = False, 0
         while not self.link.closed.is_set():
-            heard = sum(self.events.values())
+            heard = self._signs_of_life()
             await asyncio.sleep(FEEDBACK_INTERVAL)
             answer = await self.link.request("POST", "/feedback", timeout=FEEDBACK_TIMEOUT)
-            if answer is None:
-                misses = 0 if sum(self.events.values()) != heard else misses + 1
+            if answer is None and self._signs_of_life() == heard:
+                misses += 1
                 if misses >= FEEDBACK_MISSES:
-                    self._end(f"the TV stopped answering ({FEEDBACK_MISSES} keep-alives in a row)")
+                    self._end(Text("queue_end_silent", "the TV stopped answering ({misses} keep-alives in a row)",
+                                   misses=FEEDBACK_MISSES))
                     return
             else:
                 misses = 0
@@ -574,6 +647,7 @@ class QueueSession:
     # -- what the TV says --------------------------------------------------
 
     def _on_message(self, message: dict) -> None:
+        self.heard += 1
         kind = message.get("kind")
         if kind == "response":
             reply = self._replies.get(message.get("messageID"))
@@ -601,37 +675,63 @@ class QueueSession:
             if name == "playing":
                 self.played.set()
             elif name == "stopped" and self.played.is_set():
-                self._end("the TV stopped playing")
+                self._end(END_STOPPED)
         elif what == "notification" and name == "itemPlayedToEnd":
-            self._end("the video ended on the TV")
+            if self.options.live:
+                # A live stream has no end: the TV's player read its playlist once, as a file's.
+                seconds = round(time.monotonic() - (self.loaded_at or time.monotonic()))
+                _LOGGER.warning("The TV ended the live stream after %d s, as if it were a video file", seconds)
+                self._end(END_PLAYED, with_probe_advice(Text(
+                    "tv_live_played_to_end", "The TV ended the live stream after {seconds} s, as if it were a "
+                    "video file that had reached its end.", seconds=seconds)))
+            else:
+                self._end(END_PLAYED)
         elif what == "error":
             self.error = message.get("error") if isinstance(message.get("error"), dict) else {}
-            self._end("the TV's player failed")
+            self._end(END_FAILED, media_error(self.error, self._host))
         elif what == "sendMediaRemoteCommand" and name == "pbal":
-            self._end("BACK was pressed on the TV's remote")  # an LG sends pbpr, then pbal
+            self._end(END_BACK)  # an LG sends pbpr, then pbal
 
     def _on_events_closed(self) -> None:
-        self._end("the TV closed the event channel")
+        if not self._closed:  # not when close() closes it
+            self._end(END_EVENTS_CLOSED)
 
-    def _end(self, reason: str) -> None:
+    def _end(self, reason: Text, failure: Optional[Text] = None) -> None:
         if not self.ended.is_set():
             self.end_reason = reason
+            self.failure = failure
             self.ended.set()
+
+    def ended_early(self) -> Text:
+        """The error for a cast that the TV ended before it played the video."""
+        return with_probe_advice(Text("tv_queue_ended", "The TV ended the AirPlay session before it played the "
+                                      "video: {reason}.", reason=self.end_reason or END_HUNG_UP))
 
     async def wait(self) -> None:
         """Until the video ends on the TV: it stops after playing, reaches its end, BACK is
-        pressed, or the TV hangs up. The TV's player failing raises PlaybackError.
+        pressed, or the TV hangs up. Raises PlaybackError when the TV's player fails, when it
+        ends the live stream as a file, and, for a video file, when the TV says nothing about
+        it within START_TIMEOUT or hangs up before it played it.
 
-        Whether the TV fetches the video is for the cast session to watch (it sees the
+        Whether the TV fetches the live stream is for the cast session to watch (it sees the
         requests); here the TV is only asked, now and then, what it is playing, for the log.
         """
         waiters = [asyncio.ensure_future(event.wait()) for event in (self.ended, self.link.closed)]
         asked, answers = True, 0
+        started = time.monotonic()
+
+        def said_anything() -> bool:
+            return self.taken.is_set() or self.played.is_set()
+
         try:
             while True:
                 done, _ = await asyncio.wait(waiters, timeout=INFO_INTERVAL, return_when=asyncio.FIRST_COMPLETED)
                 if done:
                     break
+                if not self.options.live and not said_anything() and time.monotonic() - started > START_TIMEOUT:
+                    raise exceptions.PlaybackError(with_probe_advice(Text(
+                        "tv_queue_silent", "The TV took the video but did not say within {seconds} s that it was "
+                        "playing it.", seconds=START_TIMEOUT)))
                 if asked:
                     info = await self.request({"type": "playbackInfo"})
                     if info is None:
@@ -644,9 +744,12 @@ class QueueSession:
         finally:
             for waiter in waiters:
                 waiter.cancel()
-        if self.error is not None:
-            raise exceptions.PlaybackError(media_error(self.error))
-        _LOGGER.info("The cast ended: %s", self.end_reason or "the TV closed the connection")
+        self.end_reason = self.end_reason or END_HUNG_UP
+        _LOGGER.info("The cast ended: %s", self.end_reason)
+        if self.failure is not None:
+            raise exceptions.PlaybackError(self.failure)
+        if not self.options.live and not said_anything() and self.end_reason != END_BACK:
+            raise exceptions.PlaybackError(self.ended_early())
 
     async def close(self) -> None:
         """Stop the video on the TV and end the session: once, never raising, in a few seconds."""
@@ -661,7 +764,11 @@ class QueueSession:
             said = {}
             if self.item is not None and self.stream_id is not None:
                 said["stop"] = self._said(await self.command("", {"type": "stop"}, timeout=CLOSE_TIMEOUT))
-            said["teardown"] = self._said(await self.link.request("TEARDOWN", self.rtsp.uri, timeout=CLOSE_TIMEOUT))
+            if self.link.owes:  # still no answer to an earlier request: closing the connection ends the session too
+                said["teardown"] = "not sent"
+            else:
+                said["teardown"] = self._said(await self.link.request("TEARDOWN", self.rtsp.uri,
+                                                                      timeout=CLOSE_TIMEOUT))
             _LOGGER.info("Ended the AirPlay video session: %s", " ".join(f"{k}={v}" for k, v in said.items()))
         for reply in self._replies.values():
             reply.cancel()

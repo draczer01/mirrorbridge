@@ -417,6 +417,12 @@ class CastSession:
                         "does not serve, instead of the stream at {url}. Please report this TV, with "
                         "mirrorbridge.log.", path=tv.missing_path, url=self.stream_url,
                     ))
+                if tv.preflights:  # it reached the PC: the firewall is not what stops it
+                    raise StreamNotFetched(Text(
+                        "tv_preflight_only", "The TV reached MirrorBridge and asked whether its player may fetch "
+                        "the stream from a web page, but then never fetched it from {url}. Please report this TV, "
+                        "with mirrorbridge.log.", url=self.stream_url,
+                    ))
                 port = self._server.port if self._server else self.settings.http_port
                 raise StreamNotFetched(Text(
                     "tv_not_fetched", "The TV accepted the video but never downloaded it from {url}. Allow "
@@ -424,7 +430,9 @@ class CastSession:
                     "check that the PC and the TV are on the same network.{others}",
                     url=self.stream_url, port=port, others=self._other_clients(),
                 ))
-            if accepted is None and now - started_at > NO_REQUEST_TIMEOUT:
+            # On the play queue, only from the TV's answer to its first SETUP (see CastContext.waited_since).
+            since = self._cast.waited_since(started_at) if self._cast else started_at
+            if accepted is None and since is not None and now - since > NO_REQUEST_TIMEOUT:
                 raise RuntimeError(Text(
                     "tv_no_request", "The TV did not start the video within {seconds} s and never asked for "
                     "it at {url}. Allow MirrorBridge in Windows Firewall on private networks, and check that "
@@ -470,6 +478,10 @@ class CastSession:
                     exc = self._play_task.exception()
                     if exc:
                         raise exc
+                    queue = self._cast.queue if self._cast else None
+                    if queue is not None and self.tv_activity().first_segment_at is None:
+                        # The play queue's session ended before the TV fetched any of the video.
+                        raise RuntimeError(queue.ended_early())
                     return  # stopped from the TV
                 if self._proc and self._proc.poll() is not None:
                     if self._xscreen and await self._screen_lost():

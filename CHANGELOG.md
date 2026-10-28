@@ -13,9 +13,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   (AirPlay video v2), as an iPhone sends it: chosen from the feature bits the TV advertises
   (no bit 0, with bit 33 or 49), and tried once, on a new connection, with any receiver that
   answers `/play` with 404. The way that worked is remembered for each TV until MirrorBridge
-  quits. Apple TVs, and every receiver that advertises `/play`, get exactly the requests they
-  got before. The log says which way was used and why, and what the TV said while it played.
-- *More options* > *Test this TV…* and `MirrorBridge.exe -v probe "TV name"`: tries `POST /play`
+  quits (what *Test this TV* tries is not). Apple TVs, and every receiver that advertises
+  `/play`, get exactly the requests they got before. The log says which way was used and why,
+  and what the TV said while it played.
+- *More options* > *Test this TV…* and `MirrorBridge.exe probe "TV name"`: tries `POST /play`
   and the play queue with Apple's public test video, then the play queue with a short cast of
   MirrorBridge's test pattern, says what the TV did with each (and whether it fetched the stream
   from the PC, with which player), and writes `probe-<date>-<time>.log` in the log folder, to

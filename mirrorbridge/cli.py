@@ -207,7 +207,7 @@ async def cmd_probe(args) -> int:
         print(f"Test {number} of {total}: {name}...")
 
     print(f"Testing {device.name}. Watch the TV: it may show Apple's test video, then MirrorBridge's test "
-          f"pattern. This takes about two minutes.")
+          f"pattern. If the TV asks whether to allow MirrorBridge, choose Allow. This takes about two minutes.")
     report = await probe.run(manager, device, settings, seconds=args.seconds, public_url=args.url,
                              progress=progress)
     print()

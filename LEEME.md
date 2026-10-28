@@ -125,12 +125,13 @@ Idioma**.
 ### Avisar de una TV que no funciona
 
 Elige la TV en **Dispositivo** y luego **Más opciones** > **Probar esta TV…**. Tarda unos
-dos minutos: mira la TV. MirrorBridge prueba tres formas de enviarle un video, una tras
-otra: `POST /play` con el video de prueba público de Apple, la cola de reproducción con el
-mismo video, y la cola de reproducción con una transmisión corta de la imagen de prueba de
-MirrorBridge desde este equipo (nada de tu pantalla). Al final dice qué hizo la TV con cada
-una y dónde está el informe: `%APPDATA%\MirrorBridge\probe-<fecha>-<hora>.log` (el botón
-**Abrir carpeta de registros** del resultado lleva ahí).
+dos minutos: mira la TV y, si pregunta si permite MirrorBridge, elige **Permitir**.
+MirrorBridge prueba tres formas de enviarle un video, una tras otra: `POST /play` con el
+video de prueba público de Apple, la cola de reproducción con el mismo video, y la cola de
+reproducción con una transmisión corta de la imagen de prueba de MirrorBridge desde este
+equipo (nada de tu pantalla). Al final dice qué hizo la TV con cada una y dónde está el
+informe: `%APPDATA%\MirrorBridge\probe-<fecha>-<hora>.log` (el botón **Abrir carpeta de
+registros** del resultado lleva ahí).
 
 Manda ese archivo junto con `mirrorbridge.log`. Ahí se ve qué anuncia la TV, qué contestó
 a cada pedido de AirPlay, qué dijo mientras reproducía, si descargó el video de este equipo
@@ -139,7 +140,7 @@ a cada pedido de AirPlay, qué dijo mientras reproducía, si descargó el video 
 Lo mismo desde una consola, en la carpeta del exe:
 
 ```
-.\MirrorBridge.exe -v probe "Nombre de la TV"
+.\MirrorBridge.exe probe "Nombre de la TV"
 .\MirrorBridge.exe -v scan
 ```
 

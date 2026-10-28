@@ -67,9 +67,12 @@ def _report(*results):
 REFUSED = probe.TestResult(airplay_patch.PLAY, steps={"play": 404},
                            error=airplay_patch.refusal(404, {"play": 404}, apple=False))
 PLAYED = probe.TestResult(airplay_patch.QUEUE, accepted=True, playing=True, steps=STEPS)
+TAKEN = probe.TestResult(airplay_patch.QUEUE, accepted=True, steps=STEPS)  # answered 2xx, and then nothing
 FETCHED = probe.TestResult("live", accepted=True, playing=True, steps=STEPS,
                            tv=Activity(requests=3, user_agent=TV_AGENT, first_playlist_at=1.0, first_segment_at=2.0))
 NOT_FETCHED = probe.TestResult("live", accepted=True, steps=STEPS)
+LIVE_REFUSED = probe.TestResult("live", steps={**STEPS, "insert": 400}, error=airplay_patch.queue_refused(
+    airplay_queue.QueueRefused("insert", 400), {**STEPS, "insert": 400}))
 
 
 # -- against the fake TV ---------------------------------------------------------------------------
@@ -124,7 +127,7 @@ async def test_the_probe_tries_each_way_and_says_what_the_tv_did(monkeypatch, tm
     # Each test on a connection of its own, and each video stopped and its session ended
     assert manager.connected == tv.connections == 3
     assert tv.names().count("stop") == tv.names().count("teardown") == 2
-    assert airplay_patch._ROUTES == {"TCL": airplay_patch.QUEUE}  # the cast found its way too
+    assert not airplay_patch._ROUTES  # what the tests asked for says nothing about the TV's own way
 
     # The report: everything, pyatv's details included; the other logs as they were
     text = report.report_file.read_text(encoding="utf-8")
@@ -143,7 +146,7 @@ async def test_a_tv_that_takes_nothing_is_said_so(tmp_path):
         results = [await probe._public(manager, _device(), route, "http://127.0.0.1:9/x.m3u8", 0.2)
                    for route in (airplay_patch.PLAY, airplay_patch.QUEUE)]
         assert tv.names()[-1] == "teardown"
-    report = _report(*results, NOT_FETCHED)
+    report = _report(*results, LIVE_REFUSED)
     assert results[1].verdict() == "refused (setup=200 record=200 setup130=501)"
     assert not report.worked and report.conclusion() == "None of the tests got Sala familiar to take the video."
 
@@ -153,7 +156,84 @@ def test_a_tv_that_plays_only_the_internet_video_is_pointed_at_the_firewall():
     assert NOT_FETCHED.verdict() == (
         "the TV took it but never fetched it from this PC (setup=200 record=200 setup130=200 insert=200 "
         "isInterestedInDateRange=200 actionAtItemEnd=200 rate=200)")
-    assert report.worked and "allows MirrorBridge on private networks" in report.conclusion()
+    assert report.worked and report.conclusion() == (
+        "Sala familiar plays video from the internet, but never fetched MirrorBridge's own stream from this PC. "
+        "Check that Windows Firewall allows MirrorBridge on private networks; if it does, this TV may only play "
+        "video from HTTPS addresses.")
+
+
+def test_a_tv_that_only_takes_the_request_is_not_said_to_play_it():
+    """A 2xx answer is not playback: neither the firewall nor HTTPS is blamed for what was not seen."""
+    report = _report(REFUSED, TAKEN, NOT_FETCHED)
+    assert TAKEN.verdict().startswith("the TV took it but did not say that it was playing (setup=200")
+    assert not TAKEN.worked and not report.worked
+    assert report.conclusion() == (
+        "Sala familiar takes the video it is sent, but its player did not start: it did not say that it played "
+        "Apple's video, and never fetched MirrorBridge's stream from this PC. Please send the report with your bug "
+        "report.")
+
+
+def test_a_tv_that_takes_apples_video_but_refuses_mirrorbridges_is_told_which_step():
+    report = _report(REFUSED, PLAYED, LIVE_REFUSED)
+    assert report.conclusion().startswith(
+        "Sala familiar took Apple's video, but not MirrorBridge's stream: refused (setup=200 record=200 setup130=200 "
+        "insert=400")
+    assert "Firewall" not in report.conclusion()
+
+
+@pytest.mark.parametrize("tv, words", [
+    (Activity(requests=1, user_agent=TV_AGENT, first_playlist_at=1.0),
+     "the TV took it and fetched the playlist, but none of the video"),
+    (Activity(missing=2, missing_path="/live.m3u8", user_agent=TV_AGENT),
+     "the TV took it and reached this PC, but asked for /live.m3u8, which MirrorBridge does not serve"),
+    (Activity(preflights=1, user_agent=TV_AGENT),
+     "the TV took it and asked from a web page whether it may fetch it (OPTIONS), but never fetched it"),
+])
+def test_a_tv_that_reached_this_pc_is_not_pointed_at_the_firewall(tv, words):
+    live = probe.TestResult("live", accepted=True, steps=STEPS, tv=tv)
+    report = _report(REFUSED, PLAYED, live)
+    assert live.verdict() == f"{words} (User-Agent: {TV_AGENT})" and not live.worked
+    assert report.conclusion() == (f"Sala familiar reached this PC for MirrorBridge's stream, but did not play it: "
+                                   f"{words} (User-Agent: {TV_AGENT}). Please send the report with your bug report.")
+
+
+async def test_a_tv_that_hangs_up_after_taking_apples_video_has_not_played_it(monkeypatch):
+    class HangingUpTV(QueueTV):
+        """It takes the item, then drops the connection on the next command."""
+
+        def _respond(self, name, request, state):
+            if name == "isInterestedInDateRange":
+                raise ConnectionResetError("hung up")
+            return super()._respond(name, request, state)
+
+        async def _answer_in_turn(self, pending, writer, session, state):
+            try:
+                await super()._answer_in_turn(pending, writer, session, state)
+            except ConnectionResetError:
+                writer.close()
+
+    async with HangingUpTV(said=()) as tv:
+        result = await probe._public(FakeManager(tv), _device(), airplay_patch.QUEUE, "http://127.0.0.1:9/x.m3u8", 2)
+    assert result.accepted and not result.worked
+    assert result.steps["isInterestedInDateRange"] == "connection lost"
+    assert result.verdict() == ("failed: The TV ended the AirPlay session before it played the video: the TV closed "
+                                "the connection.")  # without "use Test this TV": this is it
+
+
+def test_the_firewall_is_not_named_for_apples_video():
+    error = airplay_queue.media_error({"domain": "CoreMediaErrorDomain", "code": -17221}, "devstreaming-cdn.apple.com")
+    assert str(error) == ("The TV's player could not play the video (error -17221, CoreMediaErrorDomain). Its player "
+                          "could not download the video from devstreaming-cdn.apple.com.")
+    assert "Firewall" in airplay_queue.media_error({"domain": "CoreMediaErrorDomain", "code": -17221})
+
+
+def test_a_video_the_tv_ended_early_says_so():
+    ended = probe.TestResult(airplay_patch.QUEUE, accepted=True, playing=True, steps={"insert": 200},
+                             ended=airplay_queue.END_HUNG_UP)
+    assert ended.verdict() == "the TV took it and said it was playing (insert=200), then the TV closed the connection"
+    i18n.set_language("es")
+    assert i18n.say(ended.verdict()) == ("la TV lo aceptó y dijo que lo estaba reproduciendo (insert=200); después, "
+                                         "la TV cerró la conexión")
 
 
 # -- the command line --------------------------------------------------------------------------------
@@ -183,9 +263,10 @@ def test_the_command_line_prints_each_test_and_where_the_report_is(monkeypatch, 
     assert "1. POST /play (AirPlay video v1) with Apple's test video: refused (play=404)" in out
     assert ("3. The play queue with MirrorBridge's test pattern, from this PC: failed: The TV's player could not play "
             "the video (error -17221, CoreMediaErrorDomain). Its player could not download the video") in out
-    assert "Sala familiar takes video from the internet, but did not play MirrorBridge's own stream" in out
+    assert "Sala familiar plays video from the internet, but never fetched MirrorBridge's own stream" in out
+    assert "If the TV asks whether to allow MirrorBridge, choose Allow." in out
     assert f"The full report is in {REPORT_FILE}: please send it with your bug report." in out
-    assert code == 0  # something worked: the video from the internet
+    assert code == 0  # something worked: the TV played the video from the internet
 
 
 def test_errors_name_the_test_as_the_command_line_runs_it():
@@ -291,17 +372,25 @@ def test_test_this_tv_runs_the_tests_and_shows_what_they_found(controller, monke
 
 
 def test_stop_casting_stops_the_test(controller, monkeypatch):
+    import threading
+
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication, QMessageBox
 
     device = _device()
     controller.devices = [device]
     controller.settings.last_device_id = device.identifier
-    started, errors = [], []
+    started, errors, torn_down = [], [], threading.Event()
+    release = threading.Event()
 
     async def run(manager, tv, settings, *, progress):
         started.append(True)
-        await asyncio.sleep(60)
+        try:
+            await asyncio.sleep(60)
+        finally:  # stopping the video on the TV and ending its session take a while
+            while not release.is_set():
+                await asyncio.sleep(0.01)
+            torn_down.set()
 
     monkeypatch.setattr(probe, "run", run)
     monkeypatch.setattr(controller, "show_error", lambda *args: errors.append(args))
@@ -313,8 +402,42 @@ def test_stop_casting_stops_the_test(controller, monkeypatch):
     controller.test_tv()
     _until(lambda: started)
     controller.stop_cast()
+    _until(lambda: controller.status()[1] == "Testing Sala familiar: Stopping…")
+    # Until the test has torn its session down, nothing else may start
+    assert controller.is_active and not _more_options(controller)["Test this TV…"].isEnabled()
+    release.set()
     _until(lambda: controller.probe_future is None)
-    assert not errors and controller.status()[0] == "idle"
+    assert torn_down.is_set() and not errors and controller.status()[0] == "idle"
+
+
+def test_quit_waits_for_the_test_to_stop(controller, monkeypatch):
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    device = _device()
+    controller.devices = [device]
+    controller.settings.last_device_id = device.identifier
+    started, torn_down = [], []
+
+    async def run(manager, tv, settings, *, progress):
+        started.append(True)
+        try:
+            await asyncio.sleep(60)
+        finally:
+            await asyncio.sleep(0.3)
+            torn_down.append(True)
+
+    monkeypatch.setattr(probe, "run", run)
+
+    def start() -> None:
+        dialog = QApplication.activeModalWidget()
+        next(b for b in dialog.buttons() if dialog.buttonRole(b) == QMessageBox.AcceptRole).click()
+
+    QTimer.singleShot(0, start)
+    controller.test_tv()
+    _until(lambda: started)
+    controller.shutdown()
+    assert torn_down
 
 
 def test_the_report_dialog_speaks_the_users_language(controller):

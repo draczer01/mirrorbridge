@@ -140,6 +140,7 @@ class Controller(QObject):
         self.file_future: Optional[concurrent.futures.Future] = None
         self.probe_future: Optional[concurrent.futures.Future] = None  # More options > Test this TV
         self.probe_step = ""
+        self._probe_stop: Optional[asyncio.Event] = None  # set (on the loop) to stop the test
         self.cast_state = State.IDLE
         self.cast_message = ""
         self.casting_to = ""
@@ -515,7 +516,15 @@ class Controller(QObject):
         if self.file_future:
             self.file_future.cancel()
         if self.probe_future:
-            self.probe_future.cancel()
+            self._stop_probe()
+
+    def _stop_probe(self) -> None:
+        """Stop Test this TV. It stops the video on the TV and tears its session down first,
+        and stays active until it has: its future only ends then."""
+        if self._probe_stop is not None:
+            self.runner.loop.call_soon_threadsafe(self._probe_stop.set)
+            self.probe_step = state_text(State.STOPPING)
+            self.activity_changed.emit()
 
     def play_file(self, path: str) -> None:
         device = self.selected_device
@@ -587,14 +596,29 @@ class Controller(QObject):
 
         def ended() -> None:
             self.probe_future = None
+            self._probe_stop = None
             self.probe_step = ""
             self.casting_to = ""
             self.activity_changed.emit()
 
+        stop = asyncio.Event()
+
+        async def run() -> probe.ProbeReport:
+            # Cancelling the future itself would end it at once, while the test still stops the
+            # video on the TV: the test is cancelled here instead, and the future ends with it.
+            test = asyncio.ensure_future(probe.run(self.manager, device, self.settings, progress=progress))
+            stopped = asyncio.ensure_future(stop.wait())
+            try:
+                await asyncio.wait({test, stopped}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                stopped.cancel()
+            test.cancel()  # nothing to cancel once it has finished
+            return await test
+
         self.casting_to = device.name
         self.probe_step = tr("probe_step", number=1, total=len(probe.TESTS))
-        self.probe_future = self.runner.submit(probe.run(self.manager, device, self.settings, progress=progress),
-                                               finished, failed)
+        self._probe_stop = stop
+        self.probe_future = self.runner.submit(run(), finished, failed)
         self.activity_changed.emit()
 
     def _on_probe_step(self, step: str) -> None:
@@ -644,7 +668,15 @@ class Controller(QObject):
             if file_future is not None:
                 file_future.cancel()
             if probe_future is not None:
-                probe_future.cancel()
+                # As a cast: the test stops the video on the TV and ends its session first.
+                self._stop_probe()
+                deadline = time.monotonic() + timeout
+                while not probe_future.done() and time.monotonic() < deadline:
+                    QApplication.processEvents()
+                    time.sleep(0.05)
+                if not probe_future.done():
+                    _LOGGER.warning("Test this TV did not stop within %.0fs", timeout)
+                    probe_future.cancel()
         finally:
             logging.getLogger().removeHandler(self._log_handler)
             self.runner.shutdown()

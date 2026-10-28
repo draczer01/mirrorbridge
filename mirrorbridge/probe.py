@@ -61,11 +61,12 @@ class TestResult:
 
     test: str  # PLAY, QUEUE or "live"
     accepted: bool = False  # the TV took the URL (2xx to /play or to insertPlayQueueItem)
-    playing: bool = False  # the TV said on the event channel that it was playing
+    playing: bool = False  # the TV said that it was playing (event channel, or /playback-info)
     steps: dict = field(default_factory=dict)  # each request's answer
     events: dict = field(default_factory=dict)  # what the TV said, with counts
+    ended: str = ""  # why the TV ended the video before the test did, if it did
     error: Optional[BaseException] = None  # why the test ended early
-    tv: Optional[Activity] = None  # what the TV fetched from this PC ("live" only)
+    tv: Optional[Activity] = None  # what the TV fetched from this PC, once it reached it ("live" only)
 
     @property
     def name(self) -> Text:
@@ -73,10 +74,14 @@ class TestResult:
 
     @property
     def worked(self) -> bool:
-        """The TV took the video, without an error, and, for this PC's stream, fetched it."""
-        if self.test == "live" and (self.tv is None or self.tv.first_segment_at is None):
+        """The TV played the video, as far as MirrorBridge can tell, without an error: it
+        fetched this PC's stream, or it said that it was playing Apple's video. Taking the
+        request (a 2xx answer) is not enough."""
+        if not self.accepted or self.error is not None:
             return False
-        return self.accepted and self.error is None
+        if self.test == "live":
+            return self.tv is not None and self.tv.first_segment_at is not None
+        return self.playing
 
     def verdict(self) -> Text:
         steps = format_steps(self.steps)
@@ -86,7 +91,16 @@ class TestResult:
             return Text("probe_refused", "refused ({steps})", steps=steps)
         if self.error is not None:
             message = self.error.args[0] if self.error.args and isinstance(self.error.args[0], str) else ""
+            if isinstance(message, Text) and message.key == "tv_probe_advice":
+                message = message.values["problem"]  # not "use Test this TV": this is it
             return Text("probe_failed", "failed: {error}", error=message or type(self.error).__name__)
+        verdict = self._taken()
+        if self.ended:
+            return Text("probe_then", "{verdict}, then {ended}", verdict=verdict, ended=self.ended)
+        return verdict
+
+    def _taken(self) -> Text:
+        steps = format_steps(self.steps)
         if self.test == "live" and self.accepted:
             tv = self.tv or Activity()
             agent = Text("probe_agent", "User-Agent: {agent}", agent=tv.user_agent) if tv.user_agent else \
@@ -96,12 +110,18 @@ class TestResult:
             if tv.first_playlist_at is not None:
                 return Text("probe_playlist_only", "the TV took it and fetched the playlist, but none of the "
                             "video ({agent})", agent=agent)
+            if tv.missing:
+                return Text("probe_wrong_path", "the TV took it and reached this PC, but asked for {path}, which "
+                            "MirrorBridge does not serve ({agent})", path=tv.missing_path, agent=agent)
+            if tv.preflights:
+                return Text("probe_preflight_only", "the TV took it and asked from a web page whether it may fetch "
+                            "it (OPTIONS), but never fetched it ({agent})", agent=agent)
             return Text("probe_not_fetched", "the TV took it but never fetched it from this PC ({steps})",
                         steps=steps)
         if self.playing:
             return Text("probe_playing", "the TV took it and said it was playing ({steps})", steps=steps)
         if self.accepted:
-            return Text("probe_took", "the TV took it ({steps})", steps=steps)
+            return Text("probe_took", "the TV took it but did not say that it was playing ({steps})", steps=steps)
         return Text("probe_no_answer", "no answer ({steps})", steps=steps)
 
 
@@ -121,16 +141,35 @@ class ProbeReport:
         return any(result.worked for result in self.results)
 
     def conclusion(self) -> Text:
-        live = next((result for result in self.results if result.test == "live"), None)
-        if live is not None and live.worked:
+        """What the tests say, from what was seen: the firewall and HTTPS are only named when
+        the TV played Apple's video but never reached this PC for MirrorBridge's."""
+        device = self.device
+        live = next((result for result in self.results if result.test == "live"), None) or TestResult("live")
+        public = [result for result in self.results if result.test != "live"]
+        if live.worked:
             return Text("probe_works", "{device} should play your casts: it fetched MirrorBridge's video.",
-                        device=self.device)
-        if self.worked:
-            return Text("probe_internet_only", "{device} takes video from the internet, but did not play "
-                        "MirrorBridge's own stream from this PC. Check that Windows Firewall allows MirrorBridge "
-                        "on private networks; if it does, this TV may only play video from HTTPS addresses.",
-                        device=self.device)
-        return Text("probe_none", "None of the tests got {device} to take the video.", device=self.device)
+                        device=device)
+        if live.tv is not None:  # it reached this PC: neither the firewall nor HTTPS stops it
+            return Text("probe_live_not_played", "{device} reached this PC for MirrorBridge's stream, but did not "
+                        "play it: {result}. Please send the report with your bug report.",
+                        device=device, result=live.verdict())
+        if live.accepted:
+            if any(result.worked for result in public):
+                return Text("probe_internet_only", "{device} plays video from the internet, but never fetched "
+                            "MirrorBridge's own stream from this PC. Check that Windows Firewall allows MirrorBridge "
+                            "on private networks; if it does, this TV may only play video from HTTPS addresses.",
+                            device=device)
+            if any(result.accepted for result in public):
+                return Text("probe_player_silent", "{device} takes the video it is sent, but its player did not "
+                            "start: it did not say that it played Apple's video, and never fetched MirrorBridge's "
+                            "stream from this PC. Please send the report with your bug report.", device=device)
+            return Text("probe_not_fetched_here", "{device} took MirrorBridge's stream but never fetched it from this "
+                        "PC. Check that Windows Firewall allows MirrorBridge on private networks, and send the "
+                        "report with your bug report.", device=device)
+        if any(result.accepted for result in public):
+            return Text("probe_live_refused", "{device} took Apple's video, but not MirrorBridge's stream: {result}. "
+                        "Please send the report with your bug report.", device=device, result=live.verdict())
+        return Text("probe_none", "None of the tests got {device} to take the video.", device=device)
 
     def where(self) -> Text:
         return Text("probe_report_file", "The full report is in {file}: please send it with your bug report.",
@@ -157,9 +196,11 @@ def _note(result: TestResult, cast: Optional[CastContext]) -> None:
     if cast is not None:
         result.accepted = result.accepted or cast.accepted_at is not None
         result.steps = dict(cast.steps)
+        result.playing = cast.played
         if cast.queue is not None:
             result.events = dict(cast.queue.events)
             result.playing = cast.queue.played.is_set()
+            result.ended = cast.queue.end_reason
 
 
 async def _public(manager: DeviceManager, device: Device, route: str, url: str, seconds: float) -> TestResult:
@@ -202,7 +243,7 @@ async def _live(manager: DeviceManager, device: Device, settings: Settings, seco
 
     def watch() -> bool:
         tv = session.tv_activity()
-        if tv.requests or tv.missing:
+        if tv.requests or tv.missing or tv.preflights:  # the TV reached this PC
             result.tv = tv  # the server's own record: still there once the cast has ended
         others.update((ip, client.user_agent or "no User-Agent") for ip, client in session.clients().items()
                       if ip != device.address)
@@ -230,11 +271,12 @@ async def _live(manager: DeviceManager, device: Device, settings: Settings, seco
             await _finish(task)
         _note(result, session.cast)
     tv = result.tv or Activity()
-    _LOGGER.info("The TV fetched %d files from this PC (a playlist: %s, video: %s, User-Agent: %s)%s%s",
+    _LOGGER.info("The TV fetched %d files from this PC (a playlist: %s, video: %s, User-Agent: %s)%s%s%s",
                  tv.requests, "yes" if tv.first_playlist_at is not None else "no",
                  "yes" if tv.first_segment_at is not None else "no", tv.user_agent or "none",
                  f"; it also asked for {tv.missing} files MirrorBridge does not serve, first {tv.missing_path}"
-                 if tv.missing else "", f"; also fetched by {others}" if others else "")
+                 if tv.missing else "", f"; it sent {tv.preflights} CORS preflights" if tv.preflights else "",
+                 f"; also fetched by {others}" if others else "")
     return result
 
 

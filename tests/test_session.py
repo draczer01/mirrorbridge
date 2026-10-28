@@ -50,8 +50,9 @@ def clock(monkeypatch):
 class FakeServer:
     """What each client has fetched by now, from a script of (seconds after T0, ip, path).
 
-    A path that starts with "404 " is a request the server could not answer. The TV
-    accepts the video (answers POST /play) `accepted` seconds after T0; None = never.
+    A path that starts with "404 " is a request the server could not answer, and one that
+    starts with "OPTIONS " a CORS preflight. The TV accepts the video (answers POST /play)
+    `accepted` seconds after T0; None = never.
     """
 
     port = 7878
@@ -68,6 +69,9 @@ class FakeServer:
             if path.startswith("404 "):
                 seen.missing += 1
                 seen.missing_path = seen.missing_path or path[4:]
+                continue
+            if path.startswith("OPTIONS "):
+                seen.preflights += 1
                 continue
             seen.requests += 1
             seen.last_request_at = at
@@ -185,6 +189,46 @@ async def test_tv_that_asks_for_something_else_is_not_sent_to_the_firewall(clock
     with pytest.raises(StreamNotFetched, match="reached MirrorBridge but asked for /live/master.m3u8") as err:
         await session._supervise()
     assert "Firewall" not in str(err.value)
+
+
+async def test_tv_whose_web_player_only_asked_is_not_sent_to_the_firewall(clock):
+    session = _session(clock, [(2, TV, "OPTIONS /master.m3u8")], accepted=1)
+    with pytest.raises(StreamNotFetched, match="reached MirrorBridge and asked whether its player may fetch the "
+                                               "stream from a web page") as err:
+        await session._supervise()
+    assert "Firewall" not in str(err.value)
+
+
+async def test_a_tv_asking_whether_to_allow_mirrorbridge_is_given_its_time(clock):
+    """On the play queue, the TV may hold its first SETUP while it asks; that wait has a limit of its own."""
+    session = _session(clock, accepted=None)
+    session._cast.queue = SimpleNamespace(set_up_at=None)
+    supervise = asyncio.ensure_future(session._supervise())
+    while since(clock, 0) < 100:  # 100 s without an answer to SETUP
+        assert not supervise.done()
+        await asyncio.sleep(0)
+    session._cast.queue.set_up_at = clock[0]
+    with pytest.raises(RuntimeError, match="did not start the video within 45 s"):
+        await supervise
+    assert 45 < since(clock, 100) <= 46.5  # 45 s after the TV answered SETUP
+
+
+@pytest.mark.parametrize("fetches", [[], fetching(TV, 2, until=4)])  # nothing, or only playlists
+async def test_a_play_queue_the_tv_ends_before_it_fetched_the_video_is_an_error(clock, fetches):
+    session = _session(clock, fetches, accepted=1)
+    ended = "The TV ended the AirPlay session before it played the video: the TV closed the event channel."
+    session._cast.queue = SimpleNamespace(set_up_at=T0, ended_early=lambda: ended)
+    session._play_task.set_result(None)  # the queue's wait() returned: the TV ended it
+    with pytest.raises(RuntimeError, match="ended the AirPlay session before it played the video: the TV closed"):
+        await session._supervise()
+
+
+async def test_a_play_queue_the_tv_ends_after_playing_ends_the_cast(clock):
+    session = _session(clock, fetching(TV, 2, until=4, segments_from=3), accepted=1)
+    session._cast.queue = SimpleNamespace(set_up_at=T0)
+    clock[0] = T0 + 10  # the TV played for a few seconds, then ended it
+    session._play_task.set_result(None)
+    await session._supervise()  # stopped from the TV, without an error
 
 
 async def test_tv_that_asks_for_a_missing_segment_says_so(clock):

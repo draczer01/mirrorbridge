@@ -73,6 +73,7 @@ class Activity:
     last_request_at: float = 0.0
     missing: int = 0  # requests answered 404/405: the client reached MirrorBridge, but asked for something else
     missing_path: str = ""  # the first of them
+    preflights: int = 0  # CORS preflights (OPTIONS) from a player in a web page: it reached MirrorBridge too
 
 
 class HlsServer:
@@ -121,6 +122,7 @@ class HlsServer:
             last_request_at=max((c.last_request_at for c in clients), default=0.0),
             missing=sum(c.missing for c in clients),
             missing_path=next((c.missing_path for c in clients if c.missing_path), ""),
+            preflights=sum(c.preflights for c in clients),
         )
 
     def clients(self) -> dict[str, Activity]:
@@ -188,6 +190,7 @@ class HlsServer:
     async def _preflight(self, request: web.Request) -> web.StreamResponse:
         """OPTIONS: what a player in a web page asks before it fetches the stream."""
         ip, client = self._client(request)
+        client.preflights += 1
         if ip not in self._preflights_logged:
             self._preflights_logged.add(ip)
             _LOGGER.info("%s asked whether it may fetch %s from a web page (OPTIONS, User-Agent: %s)",
