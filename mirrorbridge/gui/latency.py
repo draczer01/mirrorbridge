@@ -23,6 +23,7 @@ from .i18n import tr
 
 STATS_LOGGER = "mirrorbridge.mirror.stats"
 CELLS = 10  # one per tenth of a second
+REPAINT_MS = 16  # about 60 times a second, on every screen
 LIT, DARK, TEXT, DIM = QColor("#30d158"), QColor("#2a2a2e"), QColor("white"), QColor("#a0a0aa")
 
 
@@ -51,7 +52,10 @@ class LatencyMeter(QObject):
         self.windows: dict[QScreen, _ClockWindow] = {}
         self._timer = QTimer(self)
         self._timer.setTimerType(Qt.PreciseTimer)
-        self._timer.setInterval(1)  # each window repaints as often as its screen shows a new frame
+        # Painting runs on the GUI thread, under the GIL the mirroring session also needs: a repaint
+        # on every frame of every screen (1 ms, 200 Hz here) starved it to 17 fps, with frames 400 ms
+        # old when sent, and the meter measured itself. The TV shows 60 frames a second at most.
+        self._timer.setInterval(REPAINT_MS)
         self._timer.timeout.connect(self._tick)
         self._handler = _StatsHandler(self.stats_line.emit)
         self.stats_line.connect(self._set_stats)
