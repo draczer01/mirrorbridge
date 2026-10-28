@@ -53,6 +53,7 @@ def _cli_words(message: str, device: Device) -> str:
         "Quality > Delay > Smooth": "--latency smooth",
         "Quality > Encoder > x264 (CPU)": "--encoder libx264",
         "What to cast > Extended screen size > 720p": "--extend-mode 720p",
+        "More options > Test this TV": f'probe -d "{device.name}"',
     }
     for item, option in paths.items():
         message = message.replace(item, option)
@@ -168,7 +169,7 @@ async def cmd_cast(args) -> int:
         atv = await manager.connect(device)
         try:
             print(f"Playing {args.file} on {device.name} (Ctrl+C to stop)")
-            await atv.stream.play_url(args.file)
+            await airplay_patch.play_url(atv, args.file, _file_cast(device))
         finally:
             atv.close()
         return 0
@@ -184,6 +185,12 @@ async def cmd_cast(args) -> int:
     except Exception:  # pylint: disable=broad-except
         return 1
     return 0
+
+
+def _file_cast(device: Device) -> airplay_patch.CastContext:
+    """What playing a video file (or a URL) on `device` hands the patched pyatv code."""
+    return airplay_patch.CastContext(apple=device.is_apple, live=False, password=device.requires_password,
+                                     device=device.identifier, features=device.features)
 
 
 async def cmd_doctor(args) -> int:

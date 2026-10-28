@@ -523,7 +523,9 @@ class Controller(QObject):
             airplay_patch.apply()
             atv = await self.manager.connect(device)
             try:
-                await atv.stream.play_url(path)
+                cast = airplay_patch.CastContext(apple=device.is_apple, live=False, password=device.requires_password,
+                                                 device=device.identifier, features=device.features)
+                await airplay_patch.play_url(atv, path, cast)
             finally:
                 atv.close()
 

@@ -6,13 +6,19 @@ import time
 
 import pytest
 from pyatv import exceptions
+from pyatv.auth.hap_pairing import parse_credentials
+from pyatv.auth.hap_session import HAPSession
+from pyatv.auth.hap_srp import hkdf_expand
+from pyatv.auth.server_auth import CLIENT_CREDENTIALS
 from pyatv.protocols.airplay.player import AirPlayPlayer
+from pyatv.protocols.airplay.server_auth import BaseAirPlayServerAuth
 from pyatv.protocols.raop.protocols import StreamContext
 from pyatv.protocols.raop.protocols import airplayv2 as _airplayv2
-from pyatv.support.http import HttpResponse, http_connect
+from pyatv.protocols.raop.protocols.airplayv2 import EVENTS_READ_INFO, EVENTS_SALT, EVENTS_WRITE_INFO
+from pyatv.support.http import HttpResponse, format_response, http_connect, parse_request, parse_response
 from pyatv.support.rtsp import RtspSession
 
-from mirrorbridge import airplay_patch
+from mirrorbridge import airplay_patch, airplay_queue
 from mirrorbridge.airplay_patch import CastContext, ReceiverRefusedVideo
 
 URL = "http://192.168.1.32:7878/master.m3u8"
@@ -599,10 +605,11 @@ async def test_timing_server_is_closed_however_the_cast_ends(monkeypatch, how):
     assert len(servers) == 1 and servers[0].transport is None
 
 
-async def test_player_stops_the_keepalive_when_the_cast_ends(monkeypatch):
+async def test_player_stops_the_keepalive_when_the_cast_ends(monkeypatch, caplog):
     """pyatv never calls teardown(): its feedback task would ping the TV forever."""
     airplay_patch.apply()
     monkeypatch.setattr(airplay_patch, "BLIND_POLL_SECONDS", 0.05)
+    caplog.set_level(logging.INFO, logger="mirrorbridge.airplay_patch")
 
     def no_playback_info(method, uri, protocol):
         return (501 if uri == "/playback-info" else 200), None, True
@@ -612,7 +619,9 @@ async def test_player_stops_the_keepalive_when_the_cast_ends(monkeypatch):
         player = AirPlayPlayer(v2.rtsp, v2)
         task = asyncio.ensure_future(airplay_patch._player_play_url(player, URL))
         deadline = time.monotonic() + 5
-        while ("GET", "/playback-info", "HTTP/1.1") not in tv.requests:
+        # Until the player has its 501: closing the connection under a request still waiting
+        # for its answer would leave that request to its own 10 s time-out.
+        while "does not report playback status" not in caplog.text:
             if task.done():
                 task.result()  # whatever ended the cast early, as the failure
             assert time.monotonic() < deadline, tv.requests
@@ -630,3 +639,580 @@ def test_patches_target_existing_pyatv_methods():
     assert hasattr(Player, "_wait_for_media_to_end") and hasattr(Player, "play_url")
     assert hasattr(AirPlayV2, "_setup_base") and hasattr(AirPlayV2, "start_feedback")
     assert hasattr(AirPlayV2, "teardown")
+
+
+# -- The play queue (AirPlay video v2), for TVs that have no POST /play --------------------------
+
+TCL_FEATURES = 0x38BCF46 << 32 | 0x7F8AD0  # what the TCL 55QM7L advertises: "0x7F8AD0,0x38BCF46"
+APPLE_TV_FEATURES = 0x3C155FDE << 32 | 0x4A7FDFD5  # an Apple TV 4K (AppleTV6,2)
+STREAM_ID = 3
+CREDENTIALS = parse_credentials(CLIENT_CREDENTIALS)  # what pyatv's own receiver tests pair with
+TV_AGENT = "AppleCoreMedia/1.0.0 (TCL 55QM7L)"
+PLAYING = (
+    {"type": "notification", "name": "currentItemChanged", "reason": "ReasonAddToPlayQueue"},
+    {"type": "playbackState", "name": "loading"},
+    {"type": "playbackState", "name": "playing"},
+)
+BACK = ({"type": "sendMediaRemoteCommand", "value": "pbpr"}, {"type": "sendMediaRemoteCommand", "value": "pbal"})
+HANG_UP = "hang up"  # in what a QueueTV says: it closes its event channel
+XML = "xml"  # (XML, message): said as an XML plist, with no Content-Type
+COMMAND_NAMES = {"insertPlayQueueItem": "insert", "setRate": "rate"}
+
+
+@pytest.fixture(autouse=True)
+def no_remembered_routes():
+    airplay_patch._ROUTES.clear()
+    yield
+    airplay_patch._ROUTES.clear()
+
+
+def _bplist(value):
+    return plistlib.dumps(value, fmt=plistlib.FMT_BINARY)
+
+
+class _Verify(BaseAirPlayServerAuth):
+    """pyatv's receiver side of pair-verify, which hands over the keys it agreed on."""
+
+    def __init__(self):
+        super().__init__("QueueTV")
+        self.agreed = None  # (output key, input key); its own `keys` are its identity
+
+    def enable_encryption(self, output_key, input_key):
+        self.agreed = (output_key, input_key)
+
+
+class QueueTV:
+    """A TV with the play queue and no POST /play, as the TCL 55QM7L: on real sockets,
+    pair-verified and HAP-encrypted, with an event channel on which it says how playback goes.
+
+    `refuse` maps a request's name (play, setup, record, setup130, insert, feedback, teardown...)
+    to the status it gets; /play gets 404 unless told otherwise. `late` maps a name to the
+    seconds the TV takes to answer it, once. `said` is what the TV says on the event channel
+    once it has taken an item; with `fetch`, its player first fetches the item's URL, the
+    playlists in it and a segment. With cseq=False, its answers carry no CSeq.
+    """
+
+    def __init__(self, *, refuse=None, late=None, said=PLAYING + BACK, cseq=True, fetch=False):
+        self.refuse = {"play": 404, **(refuse or {})}
+        self.late = dict(late or {})
+        self.said = list(said)
+        self.cseq = cseq
+        self.fetch = fetch
+        self.requests = []  # (name, method, uri, protocol, headers, body, encrypted) as each arrived
+        self.commands = []  # what each /command said, unwrapped
+        self.overlaps = []  # names of requests that came while another one was still unanswered
+        self.connections = 0
+        self.answers = []  # how the sender answered each event: (status, CSeq)
+        self.fetched = []  # what the TV's player fetched: (path, status)
+        self.port = self.event_port = None
+        self._servers = []
+        self._events = None  # (writer, HAPSession) of the open event channel
+        self._shared = None  # the latest pair-verify's shared secret
+        self._next_event = 1
+        self._tasks = set()
+
+    async def __aenter__(self):
+        control = await asyncio.start_server(self._control, "127.0.0.1", 0)
+        events = await asyncio.start_server(self._event_channel, "127.0.0.1", 0)
+        self._servers = [control, events]
+        self.port = control.sockets[0].getsockname()[1]
+        self.event_port = events.sockets[0].getsockname()[1]
+        return self
+
+    async def __aexit__(self, *_exc):
+        for task in self._tasks:
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        if self._events is not None:
+            self._events[0].close()
+        for server in self._servers:
+            server.close()
+
+    def names(self, *, feedback=False):
+        return [r[0] for r in self.requests if feedback or r[0] != "feedback"]
+
+    def first(self, name):
+        return next(r for r in self.requests if r[0] == name)
+
+    # -- the control connection
+
+    async def _control(self, reader, writer):
+        self.connections += 1
+        session, verify = HAPSession(), _Verify()
+        state = {"unanswered": 0, "remote control": False}
+        pending = asyncio.Queue()
+        answering = asyncio.ensure_future(self._answer_in_turn(pending, writer, session, state))
+        buf = b""
+        try:
+            while True:
+                data = await reader.read(65536)
+                if not data:
+                    break
+                buf += session.decrypt(data)
+                while True:
+                    request, buf = parse_request(buf)
+                    if request is None:
+                        break
+                    name = self._name(request)
+                    self.requests.append((name, request.method, request.path, f"{request.protocol}/{request.version}",
+                                          dict(request.headers), request.body, session.chacha20 is not None))
+                    if name == "pair-verify":  # in the clear, and before anything else is read
+                        writer.write(format_response(verify.handle_request(request)))
+                        if verify.agreed is not None:
+                            session.enable(*verify.agreed)
+                            self._shared = verify.shared_key
+                        continue
+                    if state["unanswered"]:
+                        self.overlaps.append(name)
+                    state["unanswered"] += 1
+                    pending.put_nowait((name, request))
+        except ConnectionError:
+            pass
+        finally:
+            answering.cancel()
+            writer.close()
+
+    async def _answer_in_turn(self, pending, writer, session, state):
+        while True:
+            name, request = await pending.get()
+            delay = self.late.pop(name, 0)
+            if delay:
+                await asyncio.sleep(delay)
+            code, body, then = self._respond(name, request, state)
+            payload = _bplist(body) if body is not None else b""
+            head = (f"{request.protocol}/{request.version} {code} {'OK' if code < 300 else 'Error'}\r\n"
+                    f"Server: AirTunes/377.40.00\r\nContent-Length: {len(payload)}\r\n")
+            if payload:
+                head += "Content-Type: application/x-apple-binary-plist\r\n"
+            if self.cseq and "CSeq" in request.headers:
+                head += f"CSeq: {request.headers['CSeq']}\r\n"
+            state["unanswered"] -= 1
+            if writer.is_closing():
+                return
+            writer.write(session.encrypt(head.encode() + b"\r\n" + payload))
+            if then is not None:
+                task = asyncio.ensure_future(then)
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
+
+    def _name(self, request):
+        if request.path == "/pair-verify":
+            return "pair-verify"
+        if request.method == "SETUP":
+            return "setup130" if "streams" in plistlib.loads(request.body) else "setup"
+        if request.path == "/command":
+            command = plistlib.loads(plistlib.loads(request.body)["params"]["data"])
+            self.commands.append(command)
+            what = command.get("type")
+            return command["property"] if what == "setProperty" else COMMAND_NAMES.get(what, what)
+        return {"RECORD": "record", "TEARDOWN": "teardown"}.get(request.method) or request.path.strip("/")
+
+    def _respond(self, name, request, state):
+        """(status, plist body or None, what to do once answered or None)"""
+        if name in self.refuse:
+            return self.refuse[name], None, None
+        if name == "setup":
+            return 200, {"eventPort": self.event_port, "timingPort": 0}, None
+        if name == "setup130":
+            state["remote control"] = True
+            return 200, {"streams": [{"type": 130, "streamID": STREAM_ID}]}, None
+        if name == "info":
+            return 200, {"psi": "PSI-OF-THE-TV", "features": TCL_FEATURES}, None
+        if request.path == "/command":
+            if not state["remote control"] or request.headers.get("X-Apple-StreamID") != str(STREAM_ID):
+                return 500, None, None
+            command = self.commands[-1]
+            if name == "insert":
+                return 200, None, self._play(command["item"])
+            if name == "playbackInfo":
+                return 200, None, self.say({"kind": "response", "type": "playbackInfo",
+                                            "messageID": command["messageID"],
+                                            "info": {"playbackState": "playing", "rate": 1.0}})
+        return 200, None, None
+
+    async def _play(self, item):
+        if self.fetch:
+            await self._fetch(item["Content-Location"])
+        for message in self.said:
+            if message == HANG_UP:
+                self._events[0].close()
+                continue
+            if isinstance(message, dict) and message.get("type") == "notification":
+                message = {**message, "item": {"uuid": item["uuid"]}}  # notifications name the item
+            await self.say(message)
+
+    async def _fetch(self, url):
+        """As a player would: the playlist, the playlist in it, and the first segment."""
+        import aiohttp
+
+        try:
+            async with aiohttp.ClientSession(headers={"User-Agent": TV_AGENT}) as http:
+                for _ in range(3):
+                    async with http.get(url) as resp:
+                        self.fetched.append((resp.url.path, resp.status))
+                        text = await resp.text(errors="replace") if url.endswith(".m3u8") else ""
+                    entries = [line for line in text.splitlines() if line and not line.startswith("#")]
+                    if not entries:
+                        return
+                    url = str(resp.url.join(aiohttp.client.URL(entries[0])))
+        except aiohttp.ClientError as ex:
+            self.fetched.append((url, repr(ex)))
+
+    # -- the event channel
+
+    async def _event_channel(self, reader, writer):
+        # The TV writes with the key the sender reads with, and the other way round.
+        keys = [hkdf_expand(EVENTS_SALT, info, self._shared) for info in (EVENTS_WRITE_INFO, EVENTS_READ_INFO)]
+        session = HAPSession()
+        session.enable(*keys)
+        channel = self._events = (writer, session)
+        buf = b""
+        try:
+            while True:
+                data = await reader.read(65536)
+                if not data:
+                    break
+                buf += session.decrypt(data)
+                while True:
+                    answer, buf = parse_response(buf)
+                    if answer is None:
+                        break
+                    self.answers.append((answer.code, answer.headers.get("CSeq")))
+        except ConnectionError:
+            pass
+        finally:
+            if self._events is channel:
+                self._events = None
+            writer.close()
+
+    async def say(self, message):
+        """What these TVs say on the event channel: POST /command RTSP/1.0 {params: {data}}."""
+        while self._events is None:
+            await asyncio.sleep(0.01)
+        writer, session = self._events
+        head = f"POST /command RTSP/1.0\r\nCSeq: {self._next_event}\r\nServer: AirTunes/377.40.00\r\n"
+        if isinstance(message, tuple):  # (XML, message): pyatv reads a body with no Content-Type as text
+            body = plistlib.dumps({"params": {"data": _bplist(message[1])}}, fmt=plistlib.FMT_XML)
+        else:
+            body = _bplist({"params": {"data": _bplist(message)}})
+            head += "Content-Type: application/x-apple-binary-plist\r\n"
+        self._next_event += 1
+        writer.write(session.encrypt(head.encode() + f"Content-Length: {len(body)}\r\n\r\n".encode() + body))
+        await writer.drain()
+
+
+class QueueAtv:
+    """What manager.connect() returns, as far as playing a URL goes: pyatv's AirPlayStream.play_url
+    (a connection of its own, AirPlayV2 and its player), against `tv`."""
+
+    def __init__(self, tv):
+        self.tv = tv
+        self.stream = self
+        self.closed = False
+
+    async def play_url(self, url, **_kwargs):
+        connection = await http_connect("127.0.0.1", self.tv.port)
+        try:
+            context = StreamContext()
+            context.credentials = CREDENTIALS
+            v2 = _airplayv2.AirPlayV2(context, RtspSession(connection))
+            await AirPlayPlayer(v2.rtsp, v2).play_url(url, 0)
+        finally:
+            connection.close()
+
+    def close(self):
+        self.closed = True
+
+
+class MockAtv:
+    """The same for a MockReceiver, with _play_url_v2 only, as the byte-for-byte tests above."""
+
+    def __init__(self, receiver):
+        self.receiver = receiver
+        self.stream = self
+
+    async def play_url(self, url, **_kwargs):
+        v2 = await _connect(self.receiver, feedback=False)
+        try:
+            self.response = await airplay_patch._play_url_v2(v2, 1234, url)
+        finally:
+            v2.teardown()
+            v2.rtsp.connection.close()
+
+
+async def _cast_to(atv, cast, url=URL, timeout=10):
+    airplay_patch.apply()
+    return await asyncio.wait_for(asyncio.ensure_future(airplay_patch.play_url(atv, url, cast)), timeout)
+
+
+def _queue_tasks():
+    return [t for t in asyncio.all_tasks() if not t.done() and "QueueSession" in repr(t.get_coro())]
+
+
+@pytest.mark.parametrize("features, route", [
+    (TCL_FEATURES, airplay_patch.QUEUE),
+    (APPLE_TV_FEATURES, airplay_patch.PLAY),  # bit 0, with bits 33 and 49 too
+    (1 << 49, airplay_patch.QUEUE),
+    (1 << 33, airplay_patch.QUEUE),
+    (None, airplay_patch.PLAY),  # it does not say: /play, and the play queue after a 404
+    (1 << 9, airplay_patch.PLAY),  # audio only, as far as it says
+])
+def test_the_route_follows_the_feature_bits(features, route):
+    assert airplay_patch.choose_route(CastContext(features=features))[0] == route
+
+
+def test_a_route_that_worked_or_was_asked_for_comes_first():
+    airplay_patch._remember(CastContext(device="TCL"), airplay_patch.PLAY)
+    assert airplay_patch.choose_route(CastContext(device="TCL", features=TCL_FEATURES)) == (
+        airplay_patch.PLAY, "it worked with this receiver before")
+    assert airplay_patch.choose_route(CastContext(device="TCL", route=airplay_patch.QUEUE)) == (
+        airplay_patch.QUEUE, "asked for")
+
+
+@pytest.mark.parametrize("features", [APPLE_TV_FEATURES, None])
+async def test_receivers_with_airplay_video_v1_get_exactly_the_requests_pyatv_sends(features, caplog):
+    """Apple TVs, and receivers that do not say, see no change: the same bytes as pyatv's own."""
+    pristine = _v2_class(pristine_airplayv2().AirPlayV2)
+    async with MockReceiver(apple_tv) as tv:
+        v2 = await _connect(tv, pristine, feedback=False)
+        assert (await v2.play_url(1234, URL)).code == 200
+        v2.rtsp.connection.close()
+        theirs = list(tv.raw)
+
+    cast = CastContext(apple=True, live=True, device="AppleTV", features=features)
+    async with MockReceiver(apple_tv) as tv:
+        with caplog.at_level(logging.INFO, logger="mirrorbridge.airplay_patch"):
+            await _cast_to(MockAtv(tv), cast)
+        assert tv.raw == theirs
+    assert cast.route == airplay_patch.PLAY and cast.queue is None
+    assert airplay_patch._ROUTES == {"AppleTV": airplay_patch.PLAY}
+    assert "Sending the video by POST /play (AirPlay video v1)" in caplog.text
+
+
+@pytest.mark.parametrize("live", [True, False])
+async def test_a_tv_with_only_the_play_queue_gets_the_url_through_it(live, caplog):
+    cast = CastContext(apple=False, live=live, device="TCL", features=TCL_FEATURES)
+    async with QueueTV() as tv:
+        with caplog.at_level(logging.INFO, logger="mirrorbridge"):
+            await _cast_to(QueueAtv(tv), cast)
+        assert not _queue_tasks()  # the keep-alive is gone with the cast
+    assert tv.connections == 1 and tv.names() == [
+        "pair-verify", "pair-verify", "setup", "record", "setup130", "insert", "isInterestedInDateRange",
+        "actionAtItemEnd", "rate", "stop", "teardown",
+    ]
+    assert all(r[6] for r in tv.requests if r[0] != "pair-verify")  # HAP-encrypted, every one
+    assert tv.overlaps == []
+    assert cast.route == airplay_patch.QUEUE and cast.accepted_at is not None
+    assert airplay_patch._ROUTES == {"TCL": airplay_patch.QUEUE}
+    assert cast.steps == {"setup": 200, "record": 200, "setup130": 200, "insert": 200,
+                          "isInterestedInDateRange": 200, "actionAtItemEnd": 200, "rate": 200}
+
+    setup = plistlib.loads(tv.first("setup")[5])
+    assert setup["timingProtocol"] == "NTP" and isinstance(setup["timingPort"], int)
+    assert setup["deviceID"] == "AA:BB:CC:DD:EE:FF" and "sessionCorrelationUUID" not in setup
+    (stream,) = plistlib.loads(tv.first("setup130")[5])["streams"]
+    assert stream == {"type": 130, "controlType": 1, "clientTypeUUID": "A6B27562-B43A-4F2D-B75F-82391E250194",
+                      "channelID": "AA:BB:CC:DD:EE:FF-RCS-1", "clientUUID": stream["clientUUID"].upper()}
+    _, method, uri, protocol, headers, _, _ = tv.first("insert")
+    assert (method, uri, protocol) == ("POST", "/command", "HTTP/1.1")
+    assert headers["User-Agent"] == "AirPlay/870.14.1" and headers["X-Apple-StreamID"] == str(STREAM_ID)
+    assert headers["Content-Type"] == "application/x-apple-binary-plist" and headers["X-Apple-ProtocolVersion"] == "1"
+    assert headers["X-Apple-Session-ID"] == headers["X-Apple-Session-ID"].upper()
+    insert, date_range, at_end, rate, stop = tv.commands
+    item = insert["item"]
+    assert insert["type"] == "insertPlayQueueItem" and item["Content-Location"] == URL and item["mediaType"] == "file"
+    assert "Start-Position-Seconds" not in item
+    if live:  # the TV's player picks where a live stream starts
+        assert "Start-Position" not in item
+    else:
+        assert item["Start-Position"] == {"value": 0, "timescale": 1000, "flags": 1, "epoch": 0}
+    assert date_range == {"type": "setProperty", "property": "isInterestedInDateRange", "value": True,
+                          "item": {"uuid": item["uuid"]}}
+    assert at_end == {"type": "setProperty", "property": "actionAtItemEnd", "value": 1}
+    assert rate == {"type": "setRate", "rate": 1.0} and stop == {"type": "stop"}
+
+    assert tv.answers == [(200, str(n)) for n in range(1, 6)]  # every event answered, CSeq echoed
+    assert cast.queue.events == {"notification/currentItemChanged": 1, "playbackState/loading": 1,
+                                 "playbackState/playing": 1, "sendMediaRemoteCommand/pbpr": 1,
+                                 "sendMediaRemoteCommand/pbal": 1}
+    assert cast.queue.taken.is_set() and cast.queue.played.is_set()
+    for line in ("Sending the video by the play queue (AirPlay video v2): the receiver advertises the play queue",
+                 "AirPlay video requests: setup=200 record=200 setup130=200 insert=200 isInterestedInDateRange=200 "
+                 "actionAtItemEnd=200 rate=200",
+                 "The TV says playbackState/playing", "The cast ended: BACK was pressed on the TV's remote",
+                 "Ended the AirPlay video session: stop=200 teardown=200"):
+        assert line in caplog.text
+
+
+async def test_a_receiver_that_answers_play_with_404_gets_the_play_queue_on_a_new_connection(caplog):
+    """No features to go by (a TV typed in by hand): /play first, then once the play queue."""
+    cast = CastContext(apple=False, live=True, device="LG")
+    async with QueueTV() as tv:
+        with caplog.at_level(logging.INFO, logger="mirrorbridge.airplay_patch"):
+            await _cast_to(QueueAtv(tv), cast)
+        assert tv.connections == 2
+        assert tv.names() == [
+            "pair-verify", "pair-verify", "setup", "record", "play",  # pyatv's own, on the first connection
+            "pair-verify", "pair-verify", "setup", "record", "setup130", "insert", "isInterestedInDateRange",
+            "actionAtItemEnd", "rate", "stop", "teardown",
+        ]
+        assert cast.steps["play"] == 404 and cast.steps["insert"] == 200 and cast.accepted_at is not None
+        assert "The receiver has no POST /play (HTTP 404); trying the play queue (AirPlay video v2) on a new " \
+               "connection" in caplog.text
+        assert airplay_patch._ROUTES == {"LG": airplay_patch.QUEUE}
+
+        again = CastContext(apple=False, live=True, device="LG")  # the next cast goes straight there
+        sent = len(tv.requests)
+        with caplog.at_level(logging.INFO, logger="mirrorbridge.airplay_patch"):
+            await _cast_to(QueueAtv(tv), again)
+        assert "play" not in [r[0] for r in tv.requests[sent:]] and again.route == airplay_patch.QUEUE
+        assert "it worked with this receiver before" in caplog.text
+
+
+async def test_without_the_fallback_a_404_to_play_is_a_refusal():
+    cast = CastContext(apple=False, live=True, device="LG", fallback=False)
+    async with QueueTV() as tv:
+        with pytest.raises(ReceiverRefusedVideo, match=r"refused video sent from a URL \(play=404\)"):
+            await _cast_to(QueueAtv(tv), cast)
+        assert tv.connections == 1
+    assert not airplay_patch._ROUTES
+
+
+@pytest.mark.parametrize("refuse, words", [
+    ({"setup130": 501}, r"The TV turned down the video sent from a URL \(setup=200 record=200 setup130=501\)\. "
+                        r"Use More options > Test this TV"),
+    ({"insert": 400}, r"turned down the video sent from a URL \(.*setup130=200 insert=400\)"),
+    ({"insert": 403}, r"no longer accepts MirrorBridge's pairing \(HTTP 403\)"),
+    ({"record": 470}, r"\(HTTP 470\)"),
+])
+async def test_a_tv_that_turns_the_play_queue_down_is_explained(refuse, words):
+    cast = CastContext(apple=False, live=True, device="TCL", features=TCL_FEATURES)
+    async with QueueTV(refuse=refuse) as tv:
+        with pytest.raises(ReceiverRefusedVideo, match=words):
+            await _cast_to(QueueAtv(tv), cast)
+        assert tv.names()[-1] == "teardown" and "stop" not in tv.names()  # nothing was playing
+        assert not _queue_tasks()
+    assert not airplay_patch._ROUTES
+
+
+async def test_a_tv_that_does_not_answer_the_play_queue_setup_gets_the_setup_hint(monkeypatch):
+    monkeypatch.setattr(airplay_queue, "REQUEST_TIMEOUT", 0.2)
+    cast = CastContext(apple=False, live=True, device="TCL", features=TCL_FEATURES)
+    async with QueueTV(late={"setup130": 5}) as tv:
+        with pytest.raises(ReceiverRefusedVideo, match=r"did not finish setting up the AirPlay session "
+                                                        r"\(setup=200 record=200 setup130=no answer\)"):
+            await _cast_to(QueueAtv(tv), cast)
+
+
+async def test_the_keep_alive_and_the_tvs_status_never_overlap_a_command(monkeypatch, caplog):
+    """A TV drops the connection when two requests overlap: pyatv's keep-alive runs on its own."""
+    monkeypatch.setattr(airplay_queue, "FEEDBACK_INTERVAL", 0.005)
+    monkeypatch.setattr(airplay_queue, "INFO_INTERVAL", 0.01)
+    cast = CastContext(apple=False, live=True, device="TCL", features=TCL_FEATURES)
+    async with QueueTV(said=PLAYING) as tv:  # it plays until the cast is stopped
+        caplog.set_level(logging.INFO, logger="mirrorbridge.airplay_queue")
+        task = asyncio.ensure_future(_cast_to(QueueAtv(tv), cast))
+        deadline = time.monotonic() + 10
+        while tv.names(feedback=True).count("feedback") < 20 or tv.names().count("playbackInfo") < 5:
+            assert not task.done() and time.monotonic() < deadline, tv.names(feedback=True)
+            await asyncio.sleep(0.02)
+        task.cancel()  # Stop casting
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert tv.overlaps == []
+        assert tv.names()[-2:] == ["stop", "teardown"]
+        assert not _queue_tasks()
+    # What the TV answered on the event channel, once at INFO
+    assert caplog.text.count("The TV is playing: {'info': {'playbackState': 'playing', 'rate': 1.0}, "
+                             "'type': 'playbackInfo'}") == 1
+
+
+@pytest.mark.parametrize("cseq", [True, False])
+async def test_a_late_answer_is_not_taken_for_the_next_one(monkeypatch, cseq):
+    """pyatv's HttpConnection hands each answer to the oldest request still waiting."""
+    monkeypatch.setattr(airplay_queue, "REQUEST_TIMEOUT", 0.4)
+    cast = CastContext(apple=False, live=True, device="TCL", features=TCL_FEATURES)
+    async with QueueTV(refuse={"isInterestedInDateRange": 501}, late={"isInterestedInDateRange": 0.6},
+                       cseq=cseq) as tv:
+        await _cast_to(QueueAtv(tv), cast)
+    assert cast.steps["isInterestedInDateRange"] == "no answer"
+    assert cast.steps["actionAtItemEnd"] == cast.steps["rate"] == 200  # their own answers, not the late 501
+
+
+@pytest.mark.parametrize("said, why", [
+    (PLAYING + BACK, "BACK was pressed on the TV's remote"),
+    (PLAYING + ({"type": "playbackState", "name": "stopped"},), "the TV stopped playing"),
+    (PLAYING + ({"type": "notification", "name": "itemPlayedToEnd"},), "the video ended on the TV"),
+    (PLAYING + (HANG_UP,), "the TV closed the event channel"),
+])
+async def test_the_cast_ends_when_the_tv_says_so_and_is_stopped_on_it(said, why, caplog):
+    cast = CastContext(apple=False, live=True, device="TCL", features=TCL_FEATURES)
+    async with QueueTV(said=said) as tv:
+        with caplog.at_level(logging.INFO, logger="mirrorbridge.airplay_queue"):
+            await _cast_to(QueueAtv(tv), cast)
+        assert tv.names()[-2:] == ["stop", "teardown"]
+    assert cast.queue.end_reason == why and f"The cast ended: {why}" in caplog.text
+
+
+async def test_a_stop_before_the_tv_plays_still_ends_its_session():
+    cast = CastContext(apple=False, live=True, device="TCL", features=TCL_FEATURES)
+    async with QueueTV(said=()) as tv:  # it takes the item and says nothing
+        task = asyncio.ensure_future(_cast_to(QueueAtv(tv), cast))
+        while "rate" not in tv.names():
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert tv.names()[-2:] == ["stop", "teardown"] and not _queue_tasks()
+
+
+async def test_the_tvs_messages_are_read_with_or_without_a_content_type():
+    said = ((XML, PLAYING[2]), {"type": "notification", "name": "rateChanged", "rate": 1.0}) + BACK
+    cast = CastContext(apple=False, live=True, device="TCL", features=TCL_FEATURES)
+    async with QueueTV(said=said) as tv:
+        await _cast_to(QueueAtv(tv), cast)
+    assert tv.answers == [(200, "1"), (200, "2"), (200, "3"), (200, "4")]
+    assert cast.queue.played.is_set() and "notification/rateChanged" in cast.queue.events
+
+
+async def test_the_tvs_player_failing_is_explained(caplog):
+    from mirrorbridge.gui import i18n
+
+    error = {"type": "error", "error": {"domain": "CoreMediaErrorDomain", "code": -12927}}
+    cast = CastContext(apple=False, live=True, device="TCL", features=TCL_FEATURES)
+    async with QueueTV(said=PLAYING[:2] + (error,)) as tv:
+        with pytest.raises(exceptions.PlaybackError) as err:
+            await _cast_to(QueueAtv(tv), cast)
+        assert tv.names()[-2:] == ["stop", "teardown"]
+    assert str(err.value) == ("The TV's player could not play the video (error -12927, CoreMediaErrorDomain). Its "
+                              "player does not take this video format. Please report this TV, with mirrorbridge.log.")
+    i18n.set_language("es")
+    try:
+        spanish = i18n.say(err.value.args[0])
+    finally:
+        i18n.set_language("en")
+    assert spanish == ("La TV no pudo reproducir el video: su reproductor dio el error -12927 (CoreMediaErrorDomain). "
+                       "Su reproductor no acepta este formato de video. Avisa de esta TV y manda mirrorbridge.log.")
+
+
+async def test_a_tv_that_stops_answering_ends_the_cast(monkeypatch):
+    monkeypatch.setattr(airplay_queue, "FEEDBACK_INTERVAL", 0.01)
+    monkeypatch.setattr(airplay_queue, "FEEDBACK_TIMEOUT", 0.05)
+    monkeypatch.setattr(airplay_queue, "CLOSE_TIMEOUT", 0.05)
+    cast = CastContext(apple=False, live=True, device="TCL", features=TCL_FEATURES)
+    async with QueueTV(said=PLAYING, late={"feedback": 30}) as tv:
+        await _cast_to(QueueAtv(tv), cast)
+    assert cast.queue.end_reason == "the TV stopped answering (2 keep-alives in a row)"
+
+
+@pytest.mark.parametrize("error", [
+    airplay_patch.queue_refused(airplay_queue.QueueRefused("setup130", 501), {"setup130": 501}),
+    airplay_patch.queue_refused(airplay_queue.QueueRefused("insert", None), {"insert": "no answer"}),
+    airplay_patch.queue_refused(airplay_queue.QueueRefused("setup130", None), {"setup130": "no answer"}),
+])
+def test_play_queue_refusals_are_in_spanish_for_the_gui(error):
+    test_every_refusal_is_in_spanish_for_the_gui(error)
+    from mirrorbridge import cli
+    from types import SimpleNamespace
+
+    assert " > " not in cli._cli_words(str(error), SimpleNamespace(name="Sala familiar"))

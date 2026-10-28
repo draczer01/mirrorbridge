@@ -701,7 +701,8 @@ def extend_session(tmp_path, monkeypatch):
         monkeypatch.setattr(CastSession, "_launch_encoder", launch_encoder)
         settings = Settings(**{"extend_screen": True, "bind_address": "127.0.0.1", "http_port": 0,
                                "capture_audio": False, **settings})
-        device = types.SimpleNamespace(name="TV", address="127.0.0.1", is_apple=is_apple, requires_password=False)
+        device = types.SimpleNamespace(name="TV", address="127.0.0.1", identifier="TV", features=None,
+                                       is_apple=is_apple, requires_password=False)
         states = []
         session = CastSession(FakeManager(), device, settings, lambda s, m: states.append(s), work_dir=tmp_path)
         return session, events, states

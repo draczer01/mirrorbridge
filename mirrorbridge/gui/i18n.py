@@ -67,6 +67,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "more": {"en": "More options", "es": "Más opciones"},
     "log_folder": {"en": "Open log folder", "es": "Abrir carpeta de registros"},
+    "probe": {"en": "Test this TV…", "es": "Probar esta TV…"},
     "language_menu": {"en": "Language", "es": "Idioma"},
     "quit": {"en": "Quit", "es": "Salir"},
     # Notifications
@@ -442,6 +443,36 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Try a lower resolution or 30 frames per second.",
         "es": "Prueba una resolución más baja o 30 cuadros por segundo.",
     },
+    # The play queue (airplay_queue.py, airplay_patch.py)
+    "tv_queue_refused": {
+        "en": "The TV turned down the video sent from a URL ({steps}). Use {menu_probe} to see which way of "
+              "sending video it takes, and send the test's report with your bug report.",
+        "es": "La TV rechazó el video enviado desde una URL ({steps}). Usa {menu_probe} para ver de qué forma "
+              "acepta el video, y manda el informe de la prueba con tu reporte del problema.",
+    },
+    "tv_media_error": {
+        "en": "The TV's player could not play the video (error {code}, {domain}). {hint}",
+        "es": "La TV no pudo reproducir el video: su reproductor dio el error {code} ({domain}). {hint}",
+    },
+    "tv_media_network": {
+        "en": "Its player could not download the video: allow MirrorBridge in Windows Firewall on private "
+              "networks, and check that the PC and the TV are on the same network.",
+        "es": "Su reproductor no pudo descargar el video: permite MirrorBridge en el Firewall de Windows para "
+              "redes privadas, y revisa que el equipo y la TV estén en la misma red.",
+    },
+    "tv_media_format": {
+        "en": "Its player does not take this video format. Please report this TV, with mirrorbridge.log.",
+        "es": "Su reproductor no acepta este formato de video. Avisa de esta TV y manda mirrorbridge.log.",
+    },
+    "tv_media_decoder": {
+        "en": "Its player could not decode the video. Try a lower resolution or 30 frames per second.",
+        "es": "Su reproductor no pudo decodificar el video. Prueba una resolución más baja o 30 cuadros por "
+              "segundo.",
+    },
+    "tv_media_report": {
+        "en": "Please report this TV, with mirrorbridge.log.",
+        "es": "Avisa de esta TV y manda mirrorbridge.log.",
+    },
 }
 
 _lang = DEFAULT
@@ -494,6 +525,7 @@ def _menu_paths() -> dict[str, str]:
         "menu_smooth": (_item("quality_menu"), _item("latency"), _item("lat_smooth")),
         "menu_x264": (_item("quality_menu"), _item("encoder"), "x264 (CPU)"),
         "menu_720p": (_item("source_menu"), _item("extend_size"), "720p"),
+        "menu_probe": (_item("more"), _item("probe")),
     }
     return {name: " > ".join(words) for name, words in paths.items()}
 
