@@ -300,6 +300,66 @@ async def test_a_failed_set_up_removes_the_virtual_screen(tv, driver, monkeypatc
     assert driver.events == [("start", 1920, 1080, 60), "stop screen"] and session.virtual_device == ""
 
 
+@pytest.mark.parametrize("when", ["setting up", "between the attempts", "setting up again"])
+async def test_a_virtual_screen_lost_while_the_tv_is_set_up_is_what_the_session_says(tv, driver, monkeypatch,
+                                                                                     when):
+    """The PC sleeping while the TV is asked (the first time, or again with the other avcC ending)
+    leaves the TV unanswered too: the session ends with the virtual screen's error, not with the
+    TV's, on either attempt, and removes the screen once."""
+    _ffmpeg()
+    monkeypatch.setattr(mirror_session, "START_SECONDS", 5)
+    if when == "setting up":
+        tv.reconfigure(width=640, height=360, setup_delay=10)  # the SETUP is never answered in time
+    else:  # the TV drops the video at once, so the session is set up once more
+        tv.reconfigure(width=640, height=360, want_trailer=bytes.fromhex("fdf8f800"))
+    connecting = 0
+
+    def lose() -> None:  # on the driver's own thread, as its keep-alive would
+        thread = threading.Thread(target=driver.screens[0].on_lost)
+        thread.start()
+        thread.join()
+
+    def status(state, message) -> None:
+        nonlocal connecting
+        if state == State.CONNECTING:
+            connecting += 1
+            if (when, connecting) in (("setting up", 1), ("setting up again", 2)):
+                lose()
+        elif state == State.STARTING and getattr(message, "key", "") == "mirror_retry_trailer":
+            if when == "between the attempts":
+                lose()
+            else:
+                tv.reconfigure(setup_delay=10)  # the second SETUP is never answered in time
+
+    session = MirrorSession(tv.target(), SETTINGS, status)
+    with pytest.raises(VddError) as caught:
+        await asyncio.wait_for(session.run(), 60)
+    assert caught.value.code == "lost" and session.error is caught.value and session.state == State.FAILED
+    assert connecting == (2 if when == "setting up again" else 1)
+    assert len(tv.videos) == (0 if when == "setting up" else 1)
+    assert driver.started() == [("start", 1920, 1080, 60)] and len(driver.screens) == 1
+    assert driver.events[-1] == "stop screen" and driver.events.count("stop screen") == 1
+    assert session.virtual_device == ""
+
+
+async def test_the_virtual_screen_is_the_sessions_as_soon_as_the_driver_adds_it(tv, driver, monkeypatch):
+    """Windows can list the new monitor before Desktop Duplication shows it to FFmpeg: the tray
+    must already know it is the session's, or What to cast would offer it as one more display."""
+    _ffmpeg()
+    tv.reconfigure(width=640, height=360)
+    seen = []
+
+    def monitors() -> list:  # DXGI a moment behind the driver: two lookups without the new monitor
+        seen.append(session.virtual_device)
+        return [MAIN] if len(seen) <= 2 else driver.monitors()
+
+    monkeypatch.setattr(ffmpeg, "list_monitors", monitors)
+    session = MirrorSession(tv.target(), SETTINGS, seconds=1, remember=False)
+    await asyncio.wait_for(session.run(), 60)
+    assert seen == [VIRTUAL] * 3 and session.error is None
+    assert driver.ffmpegs() == [("ddagrab", VIRTUAL)] and session.virtual_device == ""
+
+
 async def test_stopping_while_the_tv_is_set_up_removes_the_virtual_screen(tv, driver):
     _ffmpeg()
     tv.reconfigure(setup_delay=10)
@@ -364,12 +424,13 @@ async def test_the_mirror_command_chooses_what_to_send_as_cast_does(monkeypatch,
     from mirrorbridge import cli, mirror
     from mirrorbridge.devices import Device
     from pyatv.conf import AppleTV, ManualService
-    from pyatv.const import Protocol
+    from pyatv.const import PairingRequirement, Protocol
 
     Settings(**saved).save()
     conf = AppleTV("127.0.0.1", "TCL 55QM7L")
-    conf.add_service(ManualService("fake-tv", Protocol.AirPlay, 7000, {"features": "0x7F8AD0,0x38BCF46"},
-                                   credentials=CREDENTIALS))
+    conf.add_service(ManualService("fake-tv", Protocol.AirPlay, 7000, {"features": "0x7F8AD0,0x38BCF46",
+                                                                       "model": "55QM7L", "manufacturer": "TCL"},
+                                   credentials=CREDENTIALS, pairing_requirement=PairingRequirement.Mandatory))
     device = Device(conf)
     sessions = []
 
@@ -380,6 +441,10 @@ async def test_the_mirror_command_chooses_what_to_send_as_cast_does(monkeypatch,
         async def run(self) -> None:
             return None
 
+    class Cast(Session):
+        def __init__(self, _manager, device, settings, on_status) -> None:  # pylint: disable=super-init-not-called
+            sessions.append((device.name, settings, "cast"))
+
     async def choose(_manager, args):
         assert args.device == "TCL"
         return device
@@ -388,6 +453,7 @@ async def test_the_mirror_command_chooses_what_to_send_as_cast_does(monkeypatch,
         return None
 
     monkeypatch.setattr(mirror, "MirrorSession", Session)
+    monkeypatch.setattr(cli, "CastSession", Cast)
     monkeypatch.setattr(cli, "_choose", choose)
     monkeypatch.setattr(cli, "_pair_if_needed", paired)
     assert await cli.cmd_mirror(cli.build_parser().parse_args(["mirror", "-d", "TCL", *argv])) == 0
@@ -395,9 +461,9 @@ async def test_the_mirror_command_chooses_what_to_send_as_cast_does(monkeypatch,
     assert name == "TCL 55QM7L" and source == mirror.DESKTOP
     assert (settings.extend_screen, settings.extend_mode, settings.monitor_index, settings.window_title) == (
         extend, mode, monitor, window)
-    cast = Settings.load()  # cast takes the same options the same way
-    cli._what_to_send(cast, cli.build_parser().parse_args(["cast", *argv]))  # pylint: disable=protected-access
-    assert cast == settings
+    # The cast command takes the same options the same way.
+    assert await cli.cmd_cast(cli.build_parser().parse_args(["cast", "-d", "TCL", *argv])) == 0
+    assert sessions[1:] == [("TCL 55QM7L", settings, "cast")]
 
 
 def test_the_mirror_commands_help_names_extend(capsys):

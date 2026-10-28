@@ -262,18 +262,12 @@ class MirrorSession:
                 self._set(State.STOPPED, "Cancelled")
                 return
             try:
-                ended = await self._attempt()
-            except MirrorError as ex:
-                other = self._other_trailer(ex)
-                if other is None:
-                    self._check_screen()  # the screen going away is what to say, if it did
-                    raise
-                await self._retry_with(other)
-                if self._stop.is_set():
-                    self._check_screen()
-                    ended = "Stopped"
-                else:
-                    ended = await self._attempt()
+                ended = await self._attempts()
+            except MirrorError:
+                # If the virtual screen went away (sleep), say that, on either attempt: the TV
+                # not answering or FFmpeg ending afterwards came from it.
+                self._check_screen()
+                raise
             self._set(State.STOPPED, ended)
         except asyncio.CancelledError:
             self._set(State.STOPPED, "Cancelled")
@@ -294,6 +288,21 @@ class MirrorSession:
         self._stop.set()
         if self._starting and self._task and not self._task.done():
             self._task.cancel()
+
+    async def _attempts(self) -> str:
+        """One session, and once more with the other avcC ending if the TV dropped the video at
+        once on a first one."""
+        try:
+            return await self._attempt()
+        except MirrorError as ex:
+            other = self._other_trailer(ex)
+            if other is None:
+                raise
+            await self._retry_with(other)
+            if self._stop.is_set():
+                self._check_screen()
+                return "Stopped"
+            return await self._attempt()
 
     async def _attempt(self) -> str:
         self._starting = True
@@ -377,8 +386,8 @@ class MirrorSession:
             if mode != self.settings.extend_mode:
                 _LOGGER.info("Adding the virtual screen at %s, not %s: mirroring sends no more than %dx%d", mode,
                              self.settings.extend_mode, *MAX_CANVAS)
-            monitor = await self._xscreen.start(mode)
-            self.virtual_device = monitor.device
+            self.virtual_device = await self._xscreen.add(mode)  # out of What to cast now
+            monitor = await self._xscreen.find()
             self.settings = extended.screen_settings(self.settings)
             _LOGGER.info("Mirroring virtual screen %s: %dx%d, fitted into the TV's screen", monitor.device,
                          monitor.width, monitor.height)

@@ -735,6 +735,32 @@ async def test_cancel_while_starting_removes_the_screen_after_ffmpeg(extend_sess
     assert session.finished.is_set() and session.virtual_device == ""
 
 
+async def test_the_virtual_screen_is_the_casts_as_soon_as_the_driver_adds_it(extend_session, monkeypatch):
+    """Windows can list the new monitor before Desktop Duplication shows it to FFmpeg: the tray
+    must already know it is the cast's, or What to cast would offer it as one more display."""
+
+    async def hang(_session):
+        await asyncio.sleep(3600)
+
+    session, events, _states = extend_session(hang)
+    listed, seen = ffmpeg.list_monitors, []
+
+    def lagging() -> list:  # two lookups without the new monitor
+        seen.append(session.virtual_device)
+        return listed()[:1] if len(seen) <= 2 else listed()
+
+    monkeypatch.setattr(ffmpeg, "list_monitors", lagging)
+    task = asyncio.ensure_future(session.run())
+    while not any(isinstance(e, tuple) and e[0] == "launch" for e in events):
+        assert not task.done()
+        await asyncio.sleep(0.01)
+    assert seen == [VIRTUAL] * 3 and events[1][:2] == ("launch", VIRTUAL)
+    await session.stop()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 10)
+    assert session.virtual_device == ""
+
+
 async def test_failed_cast_removes_the_screen_after_the_last_ffmpeg(extend_session):
     from mirrorbridge.session import State
 

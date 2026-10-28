@@ -176,9 +176,9 @@ empezar cada sesión, el registro dice cuáles usó.
 .\MirrorBridge.exe mirror --probe -d "Nombre de la TV"      # averigua cómo lo acepta la TV
 .\MirrorBridge.exe mirror -d "Nombre de la TV"              # duplica la pantalla hasta Ctrl+C
 .\MirrorBridge.exe mirror --test-pattern --seconds 30       # una imagen de prueba en lugar de la pantalla
-.\MirrorBridge.exe mirror --extend                         # la TV como segunda pantalla (un monitor virtual nuevo)
-.\MirrorBridge.exe mirror --extend --extend-mode 720p      # ... a 720p (1080p, 720p o 4k)
-.\MirrorBridge.exe mirror --monitor 2                      # la pantalla 2 (--window "PowerPoint": una ventana)
+.\MirrorBridge.exe mirror --extend                          # la TV como segunda pantalla (un monitor virtual nuevo)
+.\MirrorBridge.exe mirror --extend --extend-mode 720p       # ... a 720p (1080p, 720p o 4k)
+.\MirrorBridge.exe mirror --monitor 2                       # la pantalla 2 (--window "PowerPoint": una ventana)
 ```
 
 Igual que `cast`, `mirror` parte de los ajustes de la app: sin `--monitor`, `--window` ni

@@ -286,8 +286,8 @@ class CastSession:
         s = self.settings
         self._set(State.EXTENDING)
         self._xscreen = extended.ExtendedScreen(on_lost=self._stop_requested.set)
-        monitor = await self._xscreen.start(s.extend_mode)
-        self.virtual_device = monitor.device
+        self.virtual_device = await self._xscreen.add(s.extend_mode)  # out of What to cast from now on
+        monitor = await self._xscreen.find()
         # The virtual screen is already the size the TV should get, so send it as it is. The
         # display and window choices do not apply to this cast.
         s = extended.screen_settings(s)

@@ -56,10 +56,12 @@ class ExtendedScreen:
         self.monitor: Optional[ffmpeg.Monitor] = None  # as FFmpeg captures it
         self._screen: Optional[vdisplay.VirtualScreen] = None
 
-    async def start(self, mode: str) -> ffmpeg.Monitor:
+    async def add(self, mode: str) -> str:
         """Add the monitor Windows extends the desktop onto, at the size of `mode` (a key of
-        vdisplay.EXTEND_MODES), and return it as a display. Raises VddError: the driver missing
-        or broken ("driver:..."), or Windows not putting the monitor on the desktop."""
+        vdisplay.EXTEND_MODES), and return its device name (\\\\.\\DISPLAYn). The session makes
+        that its virtual_device at once, before find(): Windows can list the new monitor while
+        find() still waits for DXGI, and the tray's What to cast menu must already leave it out.
+        Raises VddError when the driver is missing or broken ("driver:...")."""
         loop = asyncio.get_running_loop()
 
         def lost() -> None:  # called from the driver's keep-alive or presence-check thread
@@ -72,7 +74,14 @@ class ExtendedScreen:
         # Kept before it starts, so that stop() can end a start that is still running.
         self._screen = vdisplay.backend()(on_lost=lost)
         width, height, hz = vdisplay.EXTEND_MODES.get(mode, vdisplay.EXTEND_MODES["1080p"])
-        self.device = name = await loop.run_in_executor(None, self._screen.start, width, height, hz)
+        self.device = await loop.run_in_executor(None, self._screen.start, width, height, hz)
+        return self.device
+
+    async def find(self) -> ffmpeg.Monitor:
+        """The monitor add() put on the desktop, as FFmpeg captures it. Raises
+        VddError("not_attached") when Windows does not put it there."""
+        loop = asyncio.get_running_loop()
+        name = self.device
         for _ in range(LOOKUPS):
             monitors = await loop.run_in_executor(None, ffmpeg.list_monitors)  # DXGI is slow right after a mode change
             monitor = next((m for m in monitors if m.device.lower() == name.lower()), None)
