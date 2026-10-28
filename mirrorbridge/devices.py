@@ -129,7 +129,7 @@ class Device:
 
         pyatv joins "low,high" as text, so a receiver that does not zero-pad the low word
         looks to it like one with other bits. Where that changes whether AirPlay video is
-        there, pyatv would refuse play_url ("not supported") after AirCast showed the TV
+        there, pyatv would refuse play_url ("not supported") after MirrorBridge showed the TV
         as ready, so the value is rewritten zero-padded, which pyatv reads correctly.
         Apple's receivers are left alone.
         """

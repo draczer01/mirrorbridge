@@ -10,16 +10,16 @@ import sys
 _LOGGER = logging.getLogger(__name__)
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-VALUE_NAME = "AirCast"
+VALUE_NAME = "MirrorBridge"
 _NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
 def launch_command() -> tuple[str, str]:
-    """(program, arguments) that start AirCast in the tray."""
-    if getattr(sys, "frozen", False):  # PyInstaller AirCast.exe
+    """(program, arguments) that start MirrorBridge in the tray."""
+    if getattr(sys, "frozen", False):  # PyInstaller MirrorBridge.exe
         return sys.executable, ""
     pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-    return (pythonw if os.path.exists(pythonw) else sys.executable), "-m aircast"
+    return (pythonw if os.path.exists(pythonw) else sys.executable), "-m mirrorbridge"
 
 
 def _command_line() -> str:
@@ -32,12 +32,24 @@ def _command_line() -> str:
 APPROVED_KEY = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
 
 
-def _disabled_in_task_manager() -> bool:
+def run_value(name: str = VALUE_NAME) -> str | None:
+    """The command line a Run value holds; None when there is none."""
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+            value, _ = winreg.QueryValueEx(key, name)
+    except OSError:
+        return None
+    return value if isinstance(value, str) else None
+
+
+def disabled_in_task_manager(name: str = VALUE_NAME) -> bool:
     import winreg
 
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, APPROVED_KEY) as key:
-            data, _ = winreg.QueryValueEx(key, VALUE_NAME)
+            data, _ = winreg.QueryValueEx(key, name)
             return bool(data) and bool(data[0] & 1)
     except OSError:
         return False
@@ -46,15 +58,8 @@ def _disabled_in_task_manager() -> bool:
 def autostart_enabled() -> bool:
     if sys.platform != "win32":
         return False
-    import winreg
-
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
-            value, _ = winreg.QueryValueEx(key, VALUE_NAME)
-    except OSError:
-        return False
-    # A value left by a copy of AirCast.exe in another folder does not start this one.
-    return value == _command_line() and not _disabled_in_task_manager()
+    # A value left by a copy of MirrorBridge.exe in another folder does not start this one.
+    return run_value() == _command_line() and not disabled_in_task_manager()
 
 
 def set_autostart(enabled: bool) -> None:
@@ -62,44 +67,58 @@ def set_autostart(enabled: bool) -> None:
         return
     import winreg
 
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
-        if enabled:
+    if enabled:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
             winreg.SetValueEx(key, VALUE_NAME, 0, winreg.REG_SZ, _command_line())
-        else:
-            try:
-                winreg.DeleteValue(key, VALUE_NAME)
-            except FileNotFoundError:
-                pass
-    # Clear a Task Manager "Disabled" mark so turning it on here really turns it on.
+        _clear_task_manager_mark(VALUE_NAME)  # so turning it on here really turns it on
+    else:
+        delete_run_value(VALUE_NAME)
+
+
+def delete_run_value(name: str) -> None:
+    """Remove a Run value, and its Task Manager mark with it."""
+    import winreg
+
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
+        try:
+            winreg.DeleteValue(key, name)
+        except FileNotFoundError:
+            pass
+    _clear_task_manager_mark(name)
+
+
+def _clear_task_manager_mark(name: str) -> None:
+    import winreg
+
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, APPROVED_KEY, 0, winreg.KEY_SET_VALUE) as key:
-            winreg.DeleteValue(key, VALUE_NAME)
+            winreg.DeleteValue(key, name)
     except OSError:
         pass
 
 
-def create_desktop_shortcut(description: str = "AirCast") -> str:
-    """Create 'AirCast.lnk' on the user's desktop (OneDrive-redirected desktops too)."""
+def create_desktop_shortcut(description: str = "MirrorBridge") -> str:
+    """Create 'MirrorBridge.lnk' on the user's desktop (OneDrive-redirected desktops too)."""
     program, args = launch_command()
     # Values travel as environment variables, never spliced into the script, so no
     # path or user name can break PowerShell quoting.
     env = {
         **os.environ,
-        "AIRCAST_LNK_TARGET": program,
-        "AIRCAST_LNK_ARGS": args,
-        "AIRCAST_LNK_DIR": os.path.dirname(program),
-        "AIRCAST_LNK_DESC": description,
+        "MIRRORBRIDGE_LNK_TARGET": program,
+        "MIRRORBRIDGE_LNK_ARGS": args,
+        "MIRRORBRIDGE_LNK_DIR": os.path.dirname(program),
+        "MIRRORBRIDGE_LNK_DESC": description,
     }
     script = (
         "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
         "$d=[Environment]::GetFolderPath('Desktop');"
-        "$p=Join-Path $d 'AirCast.lnk';"
+        "$p=Join-Path $d 'MirrorBridge.lnk';"
         "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($p);"
-        "$s.TargetPath=$env:AIRCAST_LNK_TARGET;"
-        "$s.Arguments=$env:AIRCAST_LNK_ARGS;"
-        "$s.WorkingDirectory=$env:AIRCAST_LNK_DIR;"
-        "$s.IconLocation=$env:AIRCAST_LNK_TARGET+',0';"
-        "$s.Description=$env:AIRCAST_LNK_DESC;"
+        "$s.TargetPath=$env:MIRRORBRIDGE_LNK_TARGET;"
+        "$s.Arguments=$env:MIRRORBRIDGE_LNK_ARGS;"
+        "$s.WorkingDirectory=$env:MIRRORBRIDGE_LNK_DIR;"
+        "$s.IconLocation=$env:MIRRORBRIDGE_LNK_TARGET+',0';"
+        "$s.Description=$env:MIRRORBRIDGE_LNK_DESC;"
         "$s.Save();Write-Output $p"
     )
     result = subprocess.run(

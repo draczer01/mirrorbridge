@@ -361,8 +361,8 @@ _job_handle: Optional[int] = None
 
 
 def kill_with_this_process(process_handle: int) -> bool:
-    """Put a child process in a job that Windows kills when AirCast exits, even if
-    AirCast crashes or is ended from Task Manager, so FFmpeg never lingers."""
+    """Put a child process in a job that Windows kills when MirrorBridge exits, even if
+    MirrorBridge crashes or is ended from Task Manager, so FFmpeg never lingers."""
     global _job_handle  # pylint: disable=global-statement
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateJobObjectW.restype = wintypes.HANDLE

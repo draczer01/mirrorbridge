@@ -28,7 +28,7 @@ from .i18n import menu_paths, state_text, tr
 
 _LOGGER = logging.getLogger(__name__)
 
-LOG_FILE_NAME = "aircast.log"
+LOG_FILE_NAME = "mirrorbridge.log"
 
 
 class UiBridge(QObject):
@@ -50,7 +50,7 @@ class AsyncRunner:
     def __init__(self, bridge: UiBridge) -> None:
         self.bridge = bridge
         self.loop = asyncio.new_event_loop()
-        self.thread = threading.Thread(target=self.loop.run_forever, name="aircast-async", daemon=True)
+        self.thread = threading.Thread(target=self.loop.run_forever, name="mirrorbridge-async", daemon=True)
         self.thread.start()
 
     def submit(
@@ -96,7 +96,7 @@ class _SignalLogHandler(logging.Handler):
 
 
 def setup_file_logging() -> str:
-    """Log to %APPDATA%\\AirCast\\aircast.log (the windowed exe has no console)."""
+    """Log to %APPDATA%\\MirrorBridge\\mirrorbridge.log (the windowed exe has no console)."""
     path = os.path.join(app_data_dir(), LOG_FILE_NAME)
     handler = logging.handlers.RotatingFileHandler(path, maxBytes=2_000_000, backupCount=2, encoding="utf-8")
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
@@ -249,7 +249,7 @@ class Controller(QObject):
         self.runner.submit(probe_async(), done, failed)
 
     def check_virtual_screen(self) -> None:
-        """Remove a virtual screen an AirCast that crashed left behind, and learn whether the
+        """Remove a virtual screen a MirrorBridge that crashed left behind, and learn whether the
         driver is installed (the menu offers to remove it only then)."""
         if not vdisplay.available():
             return

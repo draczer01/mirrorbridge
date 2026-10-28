@@ -4,7 +4,7 @@ from __future__ import annotations
 
 _STRINGS: dict[str, dict[str, str]] = {
     # Tray menu
-    "open": {"en": "Open AirCast", "es": "Abrir AirCast"},
+    "open": {"en": "Open MirrorBridge", "es": "Abrir MirrorBridge"},
     "status_idle": {"en": "Not casting", "es": "Sin transmitir"},
     "status_casting": {"en": "Casting to {device}", "es": "Transmitiendo a {device}"},
     "status_busy": {"en": "{state}…", "es": "{state}…"},
@@ -49,22 +49,25 @@ _STRINGS: dict[str, dict[str, str]] = {
     "autostart": {"en": "Start with Windows", "es": "Iniciar con Windows"},
     "desktop_shortcut": {"en": "Create desktop shortcut", "es": "Crear acceso directo en el escritorio"},
     "shortcut_done": {"en": "Shortcut created on your desktop.", "es": "Acceso directo creado en el escritorio."},
-    "shortcut_description": {"en": "AirCast - cast your screen to Apple TV", "es": "AirCast - transmite tu pantalla al Apple TV"},
+    "shortcut_description": {
+        "en": "MirrorBridge - cast your screen to the TV with AirPlay",
+        "es": "MirrorBridge - transmite tu pantalla a la TV con AirPlay",
+    },
     "more": {"en": "More options", "es": "Más opciones"},
     "log_folder": {"en": "Open log folder", "es": "Abrir carpeta de registros"},
     "quit": {"en": "Quit", "es": "Salir"},
     # Notifications
     "tray_hint": {
-        "en": "AirCast is running here. Click the icon for the menu.",
-        "es": "AirCast está aquí. Haz clic en el icono para ver el menú.",
+        "en": "MirrorBridge is running here. Click the icon for the menu.",
+        "es": "MirrorBridge está aquí. Haz clic en el icono para ver el menú.",
     },
     "already_running": {
-        "en": "AirCast is already running. Use its icon next to the clock.",
-        "es": "AirCast ya se está ejecutando. Usa su icono junto al reloj.",
+        "en": "MirrorBridge is already running. Use its icon next to the clock.",
+        "es": "MirrorBridge ya se está ejecutando. Usa su icono junto al reloj.",
     },
     "hidden_hint": {
-        "en": "AirCast keeps running in the tray. Use Quit in its menu to close it.",
-        "es": "AirCast sigue en la bandeja. Usa Salir en su menú para cerrarlo.",
+        "en": "MirrorBridge keeps running in the tray. Use Quit in its menu to close it.",
+        "es": "MirrorBridge sigue en la bandeja. Usa Salir en su menú para cerrarlo.",
     },
     "cast_started": {"en": "Casting to {device}", "es": "Transmitiendo a {device}"},
     "cast_stopped": {"en": "Casting stopped", "es": "Transmisión detenida"},
@@ -102,12 +105,12 @@ _STRINGS: dict[str, dict[str, str]] = {
     # Extend screen: virtual display driver
     "vdd_install_title": {"en": "Install the virtual screen", "es": "Instalar la pantalla virtual"},
     "vdd_install_text": {
-        "en": "To extend your desktop to the TV, AirCast uses the free \"Parsec Virtual Display Driver\" "
-              "from Parsec (Unity). AirCast will download it from parsec.app (about 500 KB) and Windows "
+        "en": "To extend your desktop to the TV, MirrorBridge uses the free \"Parsec Virtual Display Driver\" "
+              "from Parsec (Unity). MirrorBridge will download it from parsec.app (about 500 KB) and Windows "
               "will ask for your permission once. The virtual screen only exists while you cast. By "
               "installing it you accept Parsec's terms.",
-        "es": "Para extender tu escritorio a la TV, AirCast usa el controlador gratuito \"Parsec Virtual "
-              "Display Driver\" de Parsec (Unity). AirCast lo descargará de parsec.app (unos 500 KB) y "
+        "es": "Para extender tu escritorio a la TV, MirrorBridge usa el controlador gratuito \"Parsec Virtual "
+              "Display Driver\" de Parsec (Unity). MirrorBridge lo descargará de parsec.app (unos 500 KB) y "
               "Windows te pedirá permiso una vez. La pantalla virtual solo existe mientras transmites. "
               "Al instalarlo aceptas los términos de Parsec.",
     },
@@ -151,8 +154,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "No se pudo descargar el controlador. Revisa la conexión a internet o instálalo de otra forma.",
     },
     "vdd_mismatch": {
-        "en": "The downloaded file is not the expected driver installer, so AirCast did not run it.",
-        "es": "El archivo descargado no es el instalador esperado, así que AirCast no lo ejecutó.",
+        "en": "The downloaded file is not the expected driver installer, so MirrorBridge did not run it.",
+        "es": "El archivo descargado no es el instalador esperado, así que MirrorBridge no lo ejecutó.",
     },
     "vdd_install_failed": {"en": "Could not install the driver", "es": "No se pudo instalar el controlador"},
     "vdd_installer_error": {
@@ -232,7 +235,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "st_audio_only": {"en": "Audio only", "es": "Solo audio"},
     "st_restricted": {"en": "AirPlay restricted", "es": "AirPlay restringido"},
     # Main window
-    "window_title": {"en": "AirCast - AirPlay for Windows", "es": "AirCast - AirPlay para Windows"},
+    "window_title": {"en": "MirrorBridge - AirPlay for Windows", "es": "MirrorBridge - AirPlay para Windows"},
     "devices": {"en": "AirPlay devices", "es": "Dispositivos AirPlay"},
     "entire_display": {"en": "Entire display", "es": "Pantalla completa"},
     "single_window": {"en": "Single window", "es": "Una ventana"},

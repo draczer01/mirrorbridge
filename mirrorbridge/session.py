@@ -211,7 +211,7 @@ class CastSession:
         backend = await loop.run_in_executor(None, ffmpeg.pick_capture_backend, ff, s, monitor, region)
 
         if self._work_dir is None:
-            self._work_dir = Path(tempfile.mkdtemp(prefix="aircast-"))
+            self._work_dir = Path(tempfile.mkdtemp(prefix="mirrorbridge-"))
         self._work_dir.mkdir(parents=True, exist_ok=True)
 
         # If the first choice dies (driver refuses ddagrab, GPU encoder out of sessions),
@@ -331,7 +331,7 @@ class CastSession:
         self._stderr_tail.clear()
         self._proc = ffmpeg.popen(cmd)
         threading.Thread(
-            target=self._drain_stderr, args=(self._proc,), name="aircast-ffmpeg-log", daemon=True
+            target=self._drain_stderr, args=(self._proc,), name="mirrorbridge-ffmpeg-log", daemon=True
         ).start()
         if audio_port is not None:
             self._feeder = audio.LoopbackFeeder(audio_port)
@@ -376,7 +376,7 @@ class CastSession:
 
     def _tv_activity(self) -> Activity:
         """What the TV fetched. Only its own address counts: a player opened on the PC or
-        a phone must neither hide a TV that cannot reach AirCast nor keep a cast going."""
+        a phone must neither hide a TV that cannot reach MirrorBridge nor keep a cast going."""
         if self._server is None:
             return Activity()
         return self._server.activity(self.device.address)
@@ -398,21 +398,21 @@ class CastSession:
             if accepted is not None and now - accepted > PLAYLIST_TIMEOUT:
                 if tv.missing:
                     raise StreamNotFetched(
-                        f"The TV reached AirCast but asked for {tv.missing_path}, which AirCast does "
+                        f"The TV reached MirrorBridge but asked for {tv.missing_path}, which MirrorBridge does "
                         f"not serve, instead of the stream at {self.stream_url}. Please report this "
-                        "TV, with aircast.log."
+                        "TV, with mirrorbridge.log."
                     )
                 port = self._server.port if self._server else self.settings.http_port
                 raise StreamNotFetched(
                     f"The TV accepted the video but never downloaded it from {self.stream_url}. "
-                    f"Allow AirCast (or inbound TCP port {port}) in Windows Firewall on private "
+                    f"Allow MirrorBridge (or inbound TCP port {port}) in Windows Firewall on private "
                     "networks, and check that the PC and the TV are on the same network."
                     + self._other_clients()
                 )
             if accepted is None and now - started_at > NO_REQUEST_TIMEOUT:
                 raise RuntimeError(
                     f"The TV did not start the video within {NO_REQUEST_TIMEOUT} s and never asked for "
-                    f"it at {self.stream_url}. Allow AirCast in Windows Firewall on private networks, "
+                    f"it at {self.stream_url}. Allow MirrorBridge in Windows Firewall on private networks, "
                     "and check that the PC and the TV are on the same network." + self._other_clients()
                 )
         elif tv.first_segment_at is None and now - tv.first_playlist_at > SEGMENT_TIMEOUT:
@@ -429,7 +429,7 @@ class CastSession:
                         "Try What to cast > Extended screen size > 720p, or 30 frames per second.")
             else:
                 hint = "Try a lower resolution or 30 frames per second."
-            asked = (f" (it also asked for {tv.missing_path}, which AirCast does not have)"
+            asked = (f" (it also asked for {tv.missing_path}, which MirrorBridge does not have)"
                      if tv.missing else "")
             raise StreamRejected(
                 f"The TV downloaded the playlist but none of the video{asked}, so it probably "

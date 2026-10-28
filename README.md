@@ -1,14 +1,32 @@
-# AirCast: AirPlay casting for Windows
+# MirrorBridge: AirPlay casting for Windows
 
-AirCast casts your Windows screen (a whole display or one window) with system audio to an
-Apple TV or other AirPlay video receiver. It finds receivers on your network, pairs with
-the PIN shown on the TV, and streams with your GPU's hardware H.264 encoder.
+MirrorBridge casts your Windows screen (a whole display or one window) with system audio
+to an Apple TV or another AirPlay TV or video receiver (LG, Samsung, TCL...). It finds
+receivers on your network, pairs with the PIN shown on the TV, and streams with your GPU's
+hardware H.264 encoder.
 
-It is a single `AirCast.exe` (FFmpeg included, nothing to install; only Extend screen
-needs a driver, which AirCast offers to install the first time) that lives in the
+It is a single `MirrorBridge.exe` (FFmpeg included, nothing to install; only Extend screen
+needs a driver, which MirrorBridge offers to install the first time) that lives in the
 system tray. Every feature is in the tray icon's menu; the full window only opens when
-you choose **Open AirCast** in that menu. The interface follows the Windows display
+you choose **Open MirrorBridge** in that menu. The interface follows the Windows display
 language (Spanish or English). There is also a command line.
+
+## Formerly AirCast
+
+MirrorBridge was called AirCast up to version 0.2.1. To move over, quit AirCast (its tray
+icon > **Quit**) and start `MirrorBridge.exe`. The first time it starts, MirrorBridge:
+
+* copies AirCast's settings and TV pairings (`settings.json` and `pairings.json` in
+  `%APPDATA%\AirCast`) to `%APPDATA%\MirrorBridge`, so the TV stays paired. It never changes
+  the AirCast folder, and never replaces a file MirrorBridge already has;
+* starts with Windows in AirCast's place, if AirCast did (but not if you had turned AirCast
+  off in Task Manager's Startup tab).
+
+Windows Firewall then asks again, this time for `MirrorBridge.exe`: allow it on private
+networks. After that, delete `AirCast.exe` and the `AirCast` shortcut on your desktop, which
+MirrorBridge leaves alone; once MirrorBridge casts to your TV, `%APPDATA%\AirCast` can go
+too. AirCast and MirrorBridge do not know about each other, so if both run, there are two
+icons in the tray.
 
 ## What it can and cannot do
 
@@ -16,7 +34,7 @@ language (Spanish or English). There is also a command line.
 |---|---|
 | Discover Apple TVs / AirPlay receivers (mDNS, or by IP when mDNS is blocked) | Works |
 | PIN pairing (Apple TV shows a 4-digit code, you type it in), saved for next time | Works |
-| AirPlay password-protected receivers | Not for video: AirCast cannot send the AirPlay password with a video it plays from a URL, so turn the password off on the TV |
+| AirPlay password-protected receivers | Not for video: MirrorBridge cannot send the AirPlay password with a video it plays from a URL, so turn the password off on the TV |
 | Cast a display or a single window, with system audio | Works, with a 3 to 7 second delay on Apple TV, about 7 or more on other TVs (see below) |
 | Extend screen: the TV as a second monitor | Experimental, not yet tested with the real driver; needs a free driver from Parsec, installed the first time |
 | Hardware encoding: NVIDIA NVENC, Intel Quick Sync, AMD AMF, Media Foundation, x264 fallback | Auto-detected |
@@ -30,10 +48,10 @@ is protected with Apple's FairPlay encryption. Projects like UxPlay and RPiPlay 
 implement the **receiving** side. Commercial Windows apps such as AirParrot have licensed
 or reverse-engineered the sender. In 2026 a young open-source sender, doubletake (Go,
 Linux only), reports mirroring working with Apple TV; porting that approach to Windows is
-on the roadmap, but AirCast does not do it today.
+on the roadmap, but MirrorBridge does not do it today.
 
-AirCast uses the part of AirPlay that is open: **AirPlay video**, the same feature the
-YouTube app uses to send a video to the TV. AirCast turns your screen into a live HLS
+MirrorBridge uses the part of AirPlay that is open: **AirPlay video**, the same feature the
+YouTube app uses to send a video to the TV. MirrorBridge turns your screen into a live HLS
 video stream, serves it from your PC, and tells the Apple TV to play it. This gives
 excellent picture quality and stable sound. The cost is delay, because the Apple TV
 buffers a few segments before it starts playing:
@@ -43,10 +61,10 @@ buffers a few segments before it starts playing:
 * **Smooth**: about 7 seconds. Best for watching video, and handles weak Wi-Fi.
 
 AirPlay TVs from other brands (LG, Samsung, TCL...) play the stream with their own
-video players, so AirCast sends them, and any receiver that does not say what it is,
+video players, so MirrorBridge sends them, and any receiver that does not say what it is,
 what Apple's rules for AirPlay 2 TVs ask for: 2-second segments and a 12-second playlist
 whatever the Delay setting. Expect about 7 seconds of delay or more on those TVs. The cast
-also takes about 6 seconds longer to start there, because AirCast waits until the
+also takes about 6 seconds longer to start there, because MirrorBridge waits until the
 playlist holds its whole 12 seconds before it hands it to the TV.
 
 It is not suited to gaming or anything where you interact with the mouse while you watch
@@ -54,21 +72,21 @@ the TV.
 
 ## Quick start (Windows 10/11)
 
-1. Download **`AirCast.exe`** and double-click it. Windows SmartScreen may warn that the
-   app is unrecognised (it is not code-signed): click *More info* > *Run anyway*.
-2. An AirCast icon appears in the tray, next to the clock (it may be under the **^**
+1. Download **`MirrorBridge.exe`** and double-click it. Windows SmartScreen may warn that
+   the app is unrecognised (it is not code-signed): click *More info* > *Run anyway*.
+2. A MirrorBridge icon appears in the tray, next to the clock (it may be under the **^**
    arrow; drag it out to keep it visible). Left- or right-click it to open the menu.
-3. When Windows Firewall asks, **allow AirCast on private networks**. The Apple TV has
+3. When Windows Firewall asks, **allow MirrorBridge on private networks**. The Apple TV has
    to download the stream from your PC.
 4. In the menu, choose your TV under **Device**, then **Start casting**, and type the
    PIN the TV shows. You only pair once.
 5. **More options** has *Start with Windows*, *Create desktop shortcut* and the log
-   folder. **Open AirCast** shows the full window; closing it keeps AirCast in the tray.
-   **Quit** stops any cast and exits.
+   folder. **Open MirrorBridge** shows the full window; closing it keeps MirrorBridge in the
+   tray. **Quit** stops any cast and exits.
 
 ### Casting a single window
 
-AirCast captures the rectangle the window occupies on screen when the cast starts
+MirrorBridge captures the rectangle the window occupies on screen when the cast starts
 (through Desktop Duplication, so browsers, video players and other GPU-drawn apps are
 not black). Anything you drag over it is cast too, and if you move the window, stop and
 start the cast again. Minimized windows cannot be cast.
@@ -84,20 +102,21 @@ cast stops. **Extended screen size** picks 1080p (the default), 720p (bigger tex
 lighter stream, like AirParrot's "force 720p") or 4K (sent at 20 Mbps or more). The TV gets
 exactly that size, so the Resolution setting does not apply in this mode.
 
-Windows cannot add a monitor by itself, so AirCast uses the free **Parsec Virtual Display
-Driver**, a Microsoft-signed driver from Parsec (now part of Unity). AirCast does not
-include it. The first time, AirCast asks before doing anything; if you agree, it downloads
-Parsec's official installer from parsec.app (about 500 KB), checks that it is exactly the
-expected file (SHA-256), and runs it. Windows asks for permission once; AirCast itself never
-runs as administrator. By installing the driver you accept
+Windows cannot add a monitor by itself, so MirrorBridge uses the free **Parsec Virtual
+Display Driver**, a Microsoft-signed driver from Parsec (now part of Unity). MirrorBridge
+does not include it. The first time, MirrorBridge asks before doing anything; if you agree,
+it downloads Parsec's official installer from parsec.app (about 500 KB), checks that it is
+exactly the expected file (SHA-256), and runs it. Windows asks for permission once;
+MirrorBridge itself never runs as administrator. By installing the driver you accept
 [Parsec's terms](https://parsec.app/terms). If the download is blocked, the same dialog
 offers `winget install -e --id Parsec.ParsecVDD` or a manual download.
 
 To remove the driver, choose *More options* > *Remove the virtual display driver*. It opens
 Settings > Apps, where you uninstall **Parsec Virtual Display Driver**.
 
-If AirCast crashes or is ended from Task Manager, the driver removes the screen by itself
-about a second later. Sleep also removes it; start the cast again after waking the PC.
+If MirrorBridge crashes or is ended from Task Manager, the driver removes the screen by
+itself about a second later. Sleep also removes it; start the cast again after waking the
+PC.
 
 ### Running from source
 
@@ -105,7 +124,7 @@ about a second later. Sleep also removes it; start the cast again after waking t
 py -3 -m venv .venv
 .venv\Scripts\activate
 pip install -e .
-aircast            # starts the tray app; aircast gui --open also shows the window
+mirrorbridge       # starts the tray app; mirrorbridge gui --open also shows the window
 ```
 
 From source, FFmpeg comes from the `imageio-ffmpeg` package, or from any FFmpeg on PATH
@@ -114,29 +133,29 @@ or installed with winget, Chocolatey or Scoop.
 ## Command line
 
 ```text
-AirCast.exe doctor                        # check FFmpeg, GPU encoders, audio capture, and scan
-AirCast.exe scan                          # list receivers
-AirCast.exe scan --host 192.168.1.50      # scan one IP directly (when mDNS is blocked)
-AirCast.exe scan -v                       # also show what each receiver advertises
-AirCast.exe pair -d "Living Room"         # pair using the on-screen PIN
-AirCast.exe cast -d "Living Room"         # cast the app's choice (at first, the main display) with audio
-AirCast.exe cast --monitor 2 --fps 60 --bitrate 15000 --latency smooth
-AirCast.exe cast --window "PowerPoint"    # cast a single window
-AirCast.exe cast --file movie.mp4         # play a video file on the TV
-AirCast.exe cast --extend                 # the TV as a second screen (a new virtual monitor)
-AirCast.exe cast --extend --extend-mode 4k   # ... at 4K (1080p, 720p or 4k)
-AirCast.exe vdd status                    # is the virtual display driver installed and working?
-AirCast.exe vdd install                   # download and install it (asks first; one UAC prompt)
-AirCast.exe forget -d "Living Room"       # remove the saved pairing
+MirrorBridge.exe doctor                        # check FFmpeg, GPU encoders, audio capture, and scan
+MirrorBridge.exe scan                          # list receivers
+MirrorBridge.exe scan --host 192.168.1.50      # scan one IP directly (when mDNS is blocked)
+MirrorBridge.exe scan -v                       # also show what each receiver advertises
+MirrorBridge.exe pair -d "Living Room"         # pair using the on-screen PIN
+MirrorBridge.exe cast -d "Living Room"         # cast the app's choice (at first, the main display) with audio
+MirrorBridge.exe cast --monitor 2 --fps 60 --bitrate 15000 --latency smooth
+MirrorBridge.exe cast --window "PowerPoint"    # cast a single window
+MirrorBridge.exe cast --file movie.mp4         # play a video file on the TV
+MirrorBridge.exe cast --extend                 # the TV as a second screen (a new virtual monitor)
+MirrorBridge.exe cast --extend --extend-mode 4k   # ... at 4K (1080p, 720p or 4k)
+MirrorBridge.exe vdd status                    # is the virtual display driver installed and working?
+MirrorBridge.exe vdd install                   # download and install it (asks first; one UAC prompt)
+MirrorBridge.exe forget -d "Living Room"       # remove the saved pairing
 ```
 
 `cast` starts from the app's settings, so without `--monitor`, `--window` or `--extend` it
 casts what the app has selected under *What to cast*, the virtual screen included.
 
-`AirCast.exe` is a windowed program, so a command opens its own console window, which
-waits for Enter before closing. With output redirected (`AirCast.exe doctor > out.txt`)
+`MirrorBridge.exe` is a windowed program, so a command opens its own console window, which
+waits for Enter before closing. With output redirected (`MirrorBridge.exe doctor > out.txt`)
 it writes there instead, and asks for a PIN in a small dialog. From source, the same
-commands are `aircast doctor` and so on.
+commands are `mirrorbridge doctor` and so on.
 
 ## How it works
 
@@ -150,27 +169,29 @@ pyatv: mDNS discovery → PIN pair-setup → pair-verify → AirPlay /play (URL 
 
 | Module | Role |
 |---|---|
-| `aircast/devices.py` | Discovery, PIN pairing and connection through pyatv, with one shared credential store |
-| `aircast/ffmpeg.py` | Finds FFmpeg, checks which encoders really work, builds the capture and encode command |
-| `aircast/audio.py` | Captures system audio with WASAPI loopback and sends it to FFmpeg |
-| `aircast/hls_server.py` | Serves only the playlist and segments, with no caching |
-| `aircast/session.py` | Runs a cast from start to stop, watches every part, and cleans up |
-| `aircast/airplay_patch.py` | Keeps pyatv's playback session open for an endless live stream, and plays on TVs that skip Apple's optional requests |
-| `aircast/winmonitors.py` | Displays at their real resolution and GPU, window rectangles, and a job object that ends FFmpeg with AirCast |
-| `aircast/vdisplay.py` | Extend screen: adds and removes the virtual monitor through the Parsec driver, keeps it alive, installs the driver |
-| `aircast/gui/tray.py` | The tray icon and its menu, with every feature |
-| `aircast/gui/window.py` | The full window, opened from the menu's *Open* |
-| `aircast/gui/controller.py` | State shared by the menu and the window; runs pyatv on a background asyncio loop |
-| `aircast/gui/extend.py` | The Extend screen choice: driver check, consent and install dialogs |
-| `aircast/gui/app.py` | Single instance, startup and quit |
-| `aircast/cli.py` | Command line |
+| `mirrorbridge/devices.py` | Discovery, PIN pairing and connection through pyatv, with one shared credential store |
+| `mirrorbridge/ffmpeg.py` | Finds FFmpeg, checks which encoders really work, builds the capture and encode command |
+| `mirrorbridge/audio.py` | Captures system audio with WASAPI loopback and sends it to FFmpeg |
+| `mirrorbridge/hls_server.py` | Serves only the playlist and segments, with no caching |
+| `mirrorbridge/session.py` | Runs a cast from start to stop, watches every part, and cleans up |
+| `mirrorbridge/airplay_patch.py` | Keeps pyatv's playback session open for an endless live stream, and plays on TVs that skip Apple's optional requests |
+| `mirrorbridge/winmonitors.py` | Displays at their real resolution and GPU, window rectangles, and a job object that ends FFmpeg with MirrorBridge |
+| `mirrorbridge/vdisplay.py` | Extend screen: adds and removes the virtual monitor through the Parsec driver, keeps it alive, installs the driver |
+| `mirrorbridge/gui/tray.py` | The tray icon and its menu, with every feature |
+| `mirrorbridge/gui/window.py` | The full window, opened from the menu's *Open* |
+| `mirrorbridge/gui/controller.py` | State shared by the menu and the window; runs pyatv on a background asyncio loop |
+| `mirrorbridge/gui/extend.py` | The Extend screen choice: driver check, consent and install dialogs |
+| `mirrorbridge/gui/app.py` | Single instance, startup and quit |
+| `mirrorbridge/migration.py` | Moves settings, pairings and Start with Windows over from the app's old name (see above) |
+| `mirrorbridge/cli.py` | Command line |
 
-Settings are saved in `%APPDATA%\AirCast\settings.json`, pairings in
-`%APPDATA%\AirCast\pairings.json`, and the log in `%APPDATA%\AirCast\aircast.log`
-(*More options* > *Open log folder*). While a virtual screen exists it is also noted in
-`%APPDATA%\AirCast\vdd_state.json`, so the next start can remove one a crash left behind
-(possible only when another program, such as the Parsec app, keeps the driver awake). The
-downloaded driver installer stays in `%LOCALAPPDATA%\AirCast\downloads`.
+Settings are saved in `%APPDATA%\MirrorBridge\settings.json`, pairings in
+`%APPDATA%\MirrorBridge\pairings.json`, and the log in
+`%APPDATA%\MirrorBridge\mirrorbridge.log` (*More options* > *Open log folder*). While a
+virtual screen exists it is also noted in `%APPDATA%\MirrorBridge\vdd_state.json`, so the
+next start can remove one a crash left behind (possible only when another program, such as
+the Parsec app, keeps the driver awake). The downloaded driver installer stays in
+`%LOCALAPPDATA%\MirrorBridge\downloads`.
 
 ## Troubleshooting
 
@@ -179,14 +200,15 @@ downloaded driver installer stays in `%LOCALAPPDATA%\AirCast\downloads`.
   so use **Add by IP** (Apple TV: Settings > Network shows the IP).
 * **No PIN on the TV**: on the Apple TV, open Settings > AirPlay and HomeKit > Allow
   Access, and choose "Everyone on the same network" or "Anyone on the same network".
-* **TV shows a spinner, then gives up**: the TV cannot reach your PC. Allow AirCast (or
-  inbound TCP 7878) in Windows Firewall, and set the network profile to *Private*. Only
+* **TV shows a spinner, then gives up**: the TV cannot reach your PC. Allow MirrorBridge
+  (or inbound TCP 7878) in Windows Firewall, and set the network profile to *Private*. Only
   requests from the TV's own address count: opening the stream in a player on the PC or
   a phone does not keep a cast going.
 * **Third-party AirPlay TVs** (LG, Samsung, Sony, Roku, Hisense, TCL...): many support
-  AirPlay 2 video, but some only accept audio or photos from non-Apple senders. AirCast
-  marks those as "audio only" or "restricted" in the device list. A TV that pairs but
-  refuses video sent from a URL gets an error listing what it answered to each request.
+  AirPlay 2 video, but some only accept audio or photos from non-Apple senders.
+  MirrorBridge marks those as "audio only" or "restricted" in the device list. A TV that
+  pairs but refuses video sent from a URL gets an error listing what it answered to each
+  request.
 * **"The TV downloaded the playlist but none of the video"**: the TV does not accept
   the video format. On an Apple TV choose *Quality > Delay > Smooth*; on other TVs try a
   lower resolution (with Extend screen, *What to cast > Extended screen size > 720p*) or
@@ -194,28 +216,28 @@ downloaded driver installer stays in `%LOCALAPPDATA%\AirCast\downloads`.
   codecs the encoder produces, choose *Quality > Encoder > x264 (CPU)*
   (`--encoder libx264` on the command line).
 * **"The TV did not finish setting up the AirPlay session"** or **"The TV rejected
-  AirCast's credentials"**: most often the TV has dropped AirCast's pairing (a firmware
-  update, or AirCast removed from the TV's list of AirPlay devices). Use *Device > Forget
-  pairing*, then cast again and type the new PIN.
-* **Reporting a TV that does not work**: run `AirCast.exe -v scan` and
-  `AirCast.exe -v cast -d "TV name"`, and send their output with `aircast.log`. They show
-  what the TV advertises, what it answered to each AirPlay request, when (and with
-  which video player) it fetched the stream, and anything it asked for that AirCast
-  does not serve.
+  MirrorBridge's credentials"**: most often the TV has dropped MirrorBridge's pairing (a
+  firmware update, or MirrorBridge removed from the TV's list of AirPlay devices). Use
+  *Device > Forget pairing*, then cast again and type the new PIN.
+* **Reporting a TV that does not work**: run `MirrorBridge.exe -v scan` and
+  `MirrorBridge.exe -v cast -d "TV name"`, and send their output with `mirrorbridge.log`.
+  They show what the TV advertises, what it answered to each AirPlay request, when (and
+  with which video player) it fetched the stream, and anything it asked for that
+  MirrorBridge does not serve.
 * **Choppy video**: choose Smooth latency, lower the bitrate or resolution, or use 5 GHz
   Wi-Fi or Ethernet.
-* **No audio**: `aircast doctor` shows whether system audio capture works. Audio is taken
-  from the default playback device.
+* **No audio**: `mirrorbridge doctor` shows whether system audio capture works. Audio is
+  taken from the default playback device.
 * **Black picture when casting a window**: pick *Entire display*, or make sure the window
   is not minimized. Protected video (Netflix in Edge, for example) is always black in any
   screen capture.
 * **Extend screen**: if Windows does not show the new screen, press Win+P and choose
-  *Extend*. If AirCast says the virtual screen is turned off, enable it in Device Manager >
-  Display adapters > Parsec Virtual Display Adapter. `AirCast.exe vdd status` shows the
-  driver's state. If the virtual screen is drawn by a GPU other than the main one (DXGI
-  adapter 0), AirCast captures it with GDI, which uses more CPU.
-* The full log is in `%APPDATA%\AirCast\aircast.log`; `AirCast.exe -v cast ...` adds
-  debug detail.
+  *Extend*. If MirrorBridge says the virtual screen is turned off, enable it in Device
+  Manager > Display adapters > Parsec Virtual Display Adapter. `MirrorBridge.exe vdd status`
+  shows the driver's state. If the virtual screen is drawn by a GPU other than the main one
+  (DXGI adapter 0), MirrorBridge captures it with GDI, which uses more CPU.
+* The full log is in `%APPDATA%\MirrorBridge\mirrorbridge.log`; `MirrorBridge.exe -v cast ...`
+  adds debug detail.
 
 ## Tests
 
@@ -246,13 +268,20 @@ the presence check, the mode fallback, the installer check (a cached file includ
 before any download, the clean-up after a crash, the virtual screen being removed only
 after FFmpeg has stopped (on stop, failure, cancel, a lost screen and a TV that stops
 fetching), and another brand's TV getting its own stream of the virtual screen, all with a
-fake driver, so no real monitor is ever created.
+fake driver, so no real monitor is ever created. The move from the old name is covered
+too: settings and pairings copied byte for byte with the old folder left exactly as it was,
+a file MirrorBridge already has never replaced, a missing or unreadable old folder, the TV
+still paired afterwards, and the Start with Windows entry (on, off in Task Manager, another
+program's, or none) against a fake registry. One more test fails if the old name shows up
+anywhere it is not needed.
 
-## Building AirCast.exe
+## Building MirrorBridge.exe
 
 On Windows: `.\packaging\build_exe.ps1`. It installs the pinned build requirements
 (`packaging/requirements-build.txt`), takes FFmpeg 7.1 from `imageio-ffmpeg`, and runs
-PyInstaller with `packaging/AirCast.spec` to produce a one-file `dist\AirCast.exe`.
+PyInstaller with `packaging/MirrorBridge.spec` to produce a one-file
+`dist\MirrorBridge.exe`. To bundle another FFmpeg build instead, set `MIRRORBRIDGE_FFMPEG`
+to its `ffmpeg.exe` (`AIRCAST_FFMPEG`, the name from before the rename, still works).
 
 On Linux the same exe can be built under Wine with a Windows Python:
 `WINPY=/path/to/windows-python ./packaging/build_exe_wine.sh`.

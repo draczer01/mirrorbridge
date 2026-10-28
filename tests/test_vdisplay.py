@@ -16,9 +16,9 @@ import urllib.request
 
 import pytest
 
-from aircast import ffmpeg, vdisplay
-from aircast.config import Settings
-from aircast.vdisplay import DriverStatus, VddError
+from mirrorbridge import ffmpeg, vdisplay
+from mirrorbridge.config import Settings
+from mirrorbridge.vdisplay import DriverStatus, VddError
 
 FILE_READ_ACCESS, FILE_WRITE_ACCESS, METHOD_BUFFERED = 1, 2, 0
 VIRTUAL = r"\\.\DISPLAY9"
@@ -73,15 +73,15 @@ def test_errors_carry_a_code_and_the_driver_status():
 
 
 def test_every_string_has_english_and_spanish():
-    from aircast.gui import i18n
+    from mirrorbridge.gui import i18n
 
     for key, entry in i18n._STRINGS.items():  # pylint: disable=protected-access
         assert entry.get("en") and entry.get("es"), key
 
 
 def test_every_problem_has_english_and_spanish_text():
-    pytest.importorskip("PySide6.QtWidgets")  # aircast.gui.extend shows Qt dialogs
-    from aircast.gui import extend, i18n
+    pytest.importorskip("PySide6.QtWidgets")  # mirrorbridge.gui.extend shows Qt dialogs
+    from mirrorbridge.gui import extend, i18n
 
     for status in DriverStatus:
         if status is not DriverStatus.OK:
@@ -108,7 +108,7 @@ def test_driver_calls_fail_cleanly_off_windows():
 @pytest.mark.skipif(sys.platform != "win32", reason="real Win32 calls")
 def test_win32_bindings_answer_without_the_driver():
     """Only queries: nothing here opens the driver or adds a monitor."""
-    from aircast import winmonitors
+    from mirrorbridge import winmonitors
 
     assert isinstance(vdisplay.driver_status(), DriverStatus)
     assert isinstance(vdisplay.interface_paths(), list)
@@ -341,8 +341,8 @@ def test_waiting_for_the_monitor_can_be_cancelled(desktop):
 
 def test_left_behind_monitors_are_removed_only_when_safe():
     entries = [
-        {"index": 0, "uid": 256, "pid": 111, "time": 2000},  # its AirCast died; still attached
-        {"index": 1, "uid": 257, "pid": 222, "time": 2000},  # its AirCast still runs
+        {"index": 0, "uid": 256, "pid": 111, "time": 2000},  # its MirrorBridge died; still attached
+        {"index": 1, "uid": 257, "pid": 222, "time": 2000},  # its MirrorBridge still runs
         {"index": 2, "uid": 258, "pid": 333, "time": 500},  # from before the last restart
         {"index": 3, "uid": 259, "pid": 444, "time": 2000},  # already gone
     ]
@@ -353,7 +353,7 @@ def test_left_behind_monitors_are_removed_only_when_safe():
 
 @pytest.fixture
 def left_behind(tmp_path, monkeypatch):
-    """A state file with a monitor whose AirCast died and one whose AirCast still runs."""
+    """A state file with a monitor whose MirrorBridge died and one whose MirrorBridge still runs."""
     entries = [{"index": 0, "uid": 256, "pid": 111, "time": 2000}, {"index": 1, "uid": 257, "pid": 222, "time": 2000}]
     monkeypatch.setattr(vdisplay, "app_data_dir", lambda: tmp_path)
     monkeypatch.setattr(vdisplay, "vdd_sources", lambda: [
@@ -365,7 +365,7 @@ def left_behind(tmp_path, monkeypatch):
     return entries
 
 
-def test_startup_removes_the_monitor_a_dead_aircast_left(left_behind, monkeypatch):
+def test_startup_removes_the_monitor_a_dead_mirrorbridge_left(left_behind, monkeypatch):
     device = FakeDevice()
     monkeypatch.setattr(vdisplay, "driver_status", lambda: DriverStatus.OK)
     monkeypatch.setattr(vdisplay.VddDevice, "open", classmethod(lambda cls: device))
@@ -669,7 +669,7 @@ class FakeManager:
 @pytest.fixture
 def extend_session(tmp_path, monkeypatch):
     """A CastSession whose virtual screen and encoder are fakes that log what happens, in order."""
-    from aircast.session import CastSession
+    from mirrorbridge.session import CastSession
 
     events: list = []
     FakeScreen.events = events
@@ -709,7 +709,7 @@ def extend_session(tmp_path, monkeypatch):
 
 
 async def test_cancel_while_starting_removes_the_screen_after_ffmpeg(extend_session):
-    from aircast.session import State
+    from mirrorbridge.session import State
 
     async def hang(_session):
         await asyncio.sleep(3600)
@@ -734,7 +734,7 @@ async def test_cancel_while_starting_removes_the_screen_after_ffmpeg(extend_sess
 
 
 async def test_failed_cast_removes_the_screen_after_the_last_ffmpeg(extend_session):
-    from aircast.session import State
+    from mirrorbridge.session import State
 
     async def dies(_session):
         raise RuntimeError("FFmpeg exited (code 1)")
@@ -751,7 +751,7 @@ async def test_failed_cast_removes_the_screen_after_the_last_ffmpeg(extend_sessi
 
 @pytest.mark.parametrize("is_apple", [True, False])
 async def test_lost_screen_ends_the_cast_with_its_own_message(extend_session, is_apple):
-    from aircast.session import State
+    from mirrorbridge.session import State
 
     async def runs(_session):
         return None
@@ -776,8 +776,8 @@ async def test_another_brands_tv_gets_its_own_stream_of_the_virtual_screen(exten
     stops fetching, the cast ends as any other, and the screen goes once FFmpeg has stopped."""
     import aiohttp
 
-    from aircast import session as session_module
-    from aircast.session import State
+    from mirrorbridge import session as session_module
+    from mirrorbridge.session import State
 
     monkeypatch.setattr(session_module, "IDLE_REQUEST_TIMEOUT", 0.5)
     launched = []
@@ -841,8 +841,8 @@ class FakeController:
 
 @pytest.fixture
 def setup_without_consent(monkeypatch):
-    pytest.importorskip("PySide6.QtWidgets")  # aircast.gui.extend shows Qt dialogs
-    from aircast.gui import extend
+    pytest.importorskip("PySide6.QtWidgets")  # mirrorbridge.gui.extend shows Qt dialogs
+    from mirrorbridge.gui import extend
 
     ran: list = []
     monkeypatch.setattr(vdisplay, "download_installer", lambda *_a, **_k: ran.append("download"))
@@ -861,7 +861,7 @@ def test_no_download_without_consent(setup_without_consent):
 
 
 def test_a_cast_that_finds_no_driver_turns_extend_off(setup_without_consent):
-    from aircast.gui import i18n
+    from mirrorbridge.gui import i18n
 
     extend, ran = setup_without_consent
     c = FakeController(extend_screen=True)
@@ -895,7 +895,7 @@ def test_extend_settings_round_trip(tmp_path):
 
 
 def test_command_line_options():
-    from aircast.cli import build_parser
+    from mirrorbridge.cli import build_parser
 
     args = build_parser().parse_args(["cast", "--extend", "--extend-mode", "720p"])
     assert args.extend and args.extend_mode == "720p"
@@ -913,7 +913,7 @@ def _driver(monkeypatch, status: DriverStatus) -> None:
 
 
 async def test_vdd_install_explains_an_installer_that_would_not_start(monkeypatch, capsys, tmp_path):
-    from aircast import cli
+    from mirrorbridge import cli
 
     _driver(monkeypatch, DriverStatus.NOT_INSTALLED)
     monkeypatch.setattr(vdisplay, "download_installer", lambda progress=None: tmp_path / "parsec-vdd.exe")
@@ -928,7 +928,7 @@ async def test_vdd_install_explains_an_installer_that_would_not_start(monkeypatc
 
 
 async def test_vdd_install_after_an_install_that_needs_a_restart_only_says_so(monkeypatch, capsys):
-    from aircast import cli
+    from mirrorbridge import cli
 
     _driver(monkeypatch, DriverStatus.RESTART_REQUIRED)
     monkeypatch.setattr(vdisplay, "download_installer", lambda **_k: pytest.fail("downloaded again"))

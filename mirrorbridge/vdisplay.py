@@ -1,10 +1,10 @@
 """Extend screen: a temporary virtual monitor that the TV shows as a second screen.
 
-Windows has no built-in way for an app to add a monitor, so AirCast drives the Parsec Virtual
+Windows has no built-in way for an app to add a monitor, so MirrorBridge drives the Parsec Virtual
 Display Driver: a Microsoft-signed IddCx (UMDF) driver that the user installs once, with one
 UAC prompt, from Parsec's official installer. After that a normal (asInvoker) process controls
 it with IOCTLs. The driver removes all its monitors about 1 s after the last keep-alive ping, so
-a crashed or killed AirCast leaves nothing behind.
+a crashed or killed MirrorBridge leaves nothing behind.
 
 Driver facts (nomi-san/parsec-vdd core/parsec-vdd.h, app/Vdd/Core.cs, docs/PARSEC_VDD_RE.md, and
 the driver's own mm.inf):
@@ -42,7 +42,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable, Optional
 
-from . import __version__
+from . import APP_NAME, CLI_NAME, __version__
 from .config import app_data_dir
 from .winmonitors import _DEVMODEW, _GUID
 
@@ -87,7 +87,7 @@ PARSEC_TERMS_URL = "https://parsec.app/terms"
 # (bigger text on the TV and a lighter stream); 4K is a preset of the driver.
 EXTEND_MODES = {"1080p": (1920, 1080, 60), "720p": (1280, 720, 60), "4k": (3840, 2160, 60)}
 
-STATE_FILE = "vdd_state.json"  # monitors this user's AirCast added and has not removed yet
+STATE_FILE = "vdd_state.json"  # monitors this user's MirrorBridge added and has not removed yet
 
 # -- Win32 ------------------------------------------------------------------------
 
@@ -210,10 +210,10 @@ class DriverStatus(enum.Enum):
     INACCESSIBLE = "inaccessible"
 
 
-_BROKEN = "The virtual screen driver is not responding. Reinstall it with 'aircast vdd install'."
+_BROKEN = f"The virtual screen driver is not responding. Reinstall it with '{CLI_NAME} vdd install'."
 _MESSAGES = {
     "driver:not_installed": "The Parsec Virtual Display Driver is not installed. Choose Extend screen "
-                            "in the app, or run 'aircast vdd install'.",
+                            f"in the app, or run '{CLI_NAME} vdd install'.",
     "driver:disabled": "The virtual screen is turned off in Windows. Enable it in Device Manager > "
                        "Display adapters > Parsec Virtual Display Adapter.",
     "driver:restart_required": "Restart Windows to use the virtual screen.",
@@ -539,14 +539,14 @@ def _raise_thread_priority() -> None:
 
 
 class KeepAlive(threading.Thread):
-    """Pings the driver every 100 ms while AirCast owns a monitor, and does nothing else: a ping
+    """Pings the driver every 100 ms while MirrorBridge owns a monitor, and does nothing else: a ping
     that waits for anything (a display enumeration, ADD's 5 s) can cost the monitor.
 
     Calls on_lost once when the driver stops answering (5 failed pings in a row), then stops.
     """
 
     def __init__(self, device: VddDevice, on_lost: Optional[Callable[[], None]] = None) -> None:
-        super().__init__(name="aircast-vdd-keepalive", daemon=True)
+        super().__init__(name="mirrorbridge-vdd-keepalive", daemon=True)
         self._device = device
         self._on_lost = on_lost
         self._stop_event = threading.Event()
@@ -582,7 +582,7 @@ class PresenceWatch(threading.Thread):
     """
 
     def __init__(self, present: Callable[[], bool], on_lost: Callable[[], None]) -> None:
-        super().__init__(name="aircast-vdd-presence", daemon=True)
+        super().__init__(name="mirrorbridge-vdd-presence", daemon=True)
         self._present = present
         self._on_lost = on_lost
         self._stop_event = threading.Event()
@@ -798,7 +798,7 @@ def _wait_until_gone(uid: int, timeout: float) -> None:
 
 
 # -- monitors left behind ------------------------------------------------------------------
-# The watchdog removes a crashed AirCast's monitor, unless another program (the Parsec app,
+# The watchdog removes a crashed MirrorBridge's monitor, unless another program (the Parsec app,
 # ParsecDisplay) keeps pinging the driver. So every monitor is written down when it is added and
 # crossed out when it is removed; whatever is still written down at the next start is removed.
 
@@ -848,7 +848,7 @@ def split_state(
 ) -> tuple[list[int], list[dict]]:
     """(indexes to remove now, entries to keep) for the monitors written in the state file.
 
-    An entry whose AirCast is still running (the command line next to the app) is kept. Any other
+    An entry whose MirrorBridge is still running (the command line next to the app) is kept. Any other
     entry is dropped, and its monitor removed if one with that UID is still attached and the
     entry is from this boot (a monitor never outlives a restart).
     """
@@ -888,13 +888,13 @@ def _remove_stale(device: VddDevice) -> None:
     attached = {src.uid for src in vdd_sources()}
     stale, keep = split_state(entries, attached, _process_alive, _boot_time())
     for index in stale:
-        _LOGGER.info("Removing virtual screen %s that an earlier AirCast left behind", index)
+        _LOGGER.info("Removing virtual screen %s that an earlier MirrorBridge left behind", index)
         device.remove(index)
     _write_state(keep)
 
 
 def recover_stale() -> None:
-    """At startup: remove virtual monitors an earlier AirCast added and never removed."""
+    """At startup: remove virtual monitors an earlier MirrorBridge added and never removed."""
     if not _read_state():
         return
     try:
@@ -907,7 +907,7 @@ def recover_stale() -> None:
             return
     except VddError as ex:
         _LOGGER.debug("Virtual screen clean-up skipped: %s", ex)
-    # Without a working driver no monitor can be left; keep only what a running AirCast owns.
+    # Without a working driver no monitor can be left; keep only what a running MirrorBridge owns.
     _write_state([e for e in _read_state() if _process_alive(e.get("pid"))])
 
 
@@ -1072,9 +1072,9 @@ atexit.register(_stop_active)
 
 
 def downloads_dir() -> Path:
-    """%LOCALAPPDATA%\\AirCast\\downloads: a downloaded installer does not need to roam."""
+    """%LOCALAPPDATA%\\MirrorBridge\\downloads: a downloaded installer does not need to roam."""
     local = os.environ.get("LOCALAPPDATA")
-    return (Path(local) / "AirCast" if local else app_data_dir()) / "downloads"
+    return (Path(local) / APP_NAME if local else app_data_dir()) / "downloads"
 
 
 def sha256_of(path: Path) -> str:
@@ -1098,7 +1098,7 @@ def download_installer(dest_dir: Optional[Path] = None,
     dest_dir = dest_dir or downloads_dir()
     target = dest_dir / VDD_INSTALLER_URL.rsplit("/", 1)[1]
     part = target.with_name(target.name + ".part")
-    request = urllib.request.Request(VDD_INSTALLER_URL, headers={"User-Agent": f"AirCast/{__version__}"})
+    request = urllib.request.Request(VDD_INSTALLER_URL, headers={"User-Agent": f"{APP_NAME}/{__version__}"})
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
         if target.exists():
@@ -1184,7 +1184,7 @@ def wait_until_ready(timeout_s: float = 30.0) -> DriverStatus:
 
 def winget_path() -> str:
     """winget's App Execution Alias, by full path: a bare "winget" would run a winget.exe left
-    next to AirCast.exe or in the current folder (often Downloads) first."""
+    next to MirrorBridge.exe or in the current folder (often Downloads) first."""
     local = os.environ.get("LOCALAPPDATA")
     path = os.path.join(local, "Microsoft", "WindowsApps", "winget.exe") if local else ""
     if not path or not os.path.exists(path):

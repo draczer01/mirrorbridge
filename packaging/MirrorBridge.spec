@@ -1,5 +1,5 @@
-# PyInstaller spec for the standalone AirCast.exe (one file, FFmpeg included).
-# Build on Windows:  pyinstaller --noconfirm --clean packaging/AirCast.spec
+# PyInstaller spec for the standalone MirrorBridge.exe (one file, FFmpeg included).
+# Build on Windows:  pyinstaller --noconfirm --clean packaging/MirrorBridge.spec
 import os
 import shutil
 
@@ -7,9 +7,10 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 
-# FFmpeg: AIRCAST_FFMPEG=C:\path\ffmpeg.exe, or the build from the imageio-ffmpeg wheel
-# (FFmpeg 7.1 with ddagrab, NVENC, Quick Sync, AMF and Media Foundation).
-ffmpeg_src = os.environ.get("AIRCAST_FFMPEG")
+# FFmpeg: MIRRORBRIDGE_FFMPEG=C:\path\ffmpeg.exe (or AIRCAST_FFMPEG, its name before the rename),
+# or the build from the imageio-ffmpeg wheel (FFmpeg 7.1 with ddagrab, NVENC, Quick Sync, AMF and
+# Media Foundation).
+ffmpeg_src = os.environ.get("MIRRORBRIDGE_FFMPEG") or os.environ.get("AIRCAST_FFMPEG")
 if not ffmpeg_src:
     import imageio_ffmpeg
 
@@ -20,11 +21,11 @@ shutil.copyfile(ffmpeg_src, os.path.join(stage, "ffmpeg.exe"))  # the app looks 
 
 hidden = collect_submodules("pyatv") + collect_submodules("zeroconf") + ["soundcard", "soundcard.mediafoundation"]
 # Extend screen (normal imports reach these too; listed so the bundle can never miss them).
-hidden += ["aircast.vdisplay", "aircast.gui.extend"]
+hidden += ["mirrorbridge.vdisplay", "mirrorbridge.gui.extend"]
 datas = collect_data_files("pyatv") + collect_data_files("soundcard")
 
 a = Analysis(
-    [os.path.join(SPECPATH, "aircast_entry.py")],
+    [os.path.join(SPECPATH, "mirrorbridge_entry.py")],
     pathex=[ROOT],
     binaries=[(os.path.join(stage, "ffmpeg.exe"), "ffmpeg")],
     datas=datas,
@@ -39,9 +40,9 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="AirCast",
+    name="MirrorBridge",
     console=False,
-    icon=os.path.join(SPECPATH, "aircast.ico"),
+    icon=os.path.join(SPECPATH, "mirrorbridge.ico"),
     version=os.path.join(SPECPATH, "version_info.txt"),
     upx=False,
 )

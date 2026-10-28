@@ -4,7 +4,7 @@ import logging
 import pytest
 from pyatv.const import Protocol
 
-from aircast import config, devices
+from mirrorbridge import config, devices
 
 
 async def test_corrupt_pairings_file_does_not_break_everything(tmp_path, monkeypatch):
@@ -79,11 +79,11 @@ def _pyatv_allows_play_url(device) -> bool:
 @pytest.mark.parametrize("features", ["0x7F8AD0,0x18BCF46", "0x7F8AD0,0x20000"])
 def test_other_brands_video_bits_are_handed_to_pyatv_zero_padded(features, caplog):
     """VideoV2 (bit 49) is set, but pyatv's reading of the unpadded value says no video:
-    without the fix AirCast would show the TV as ready and pyatv would refuse play_url."""
+    without the fix MirrorBridge would show the TV as ready and pyatv would refuse play_url."""
     dev = _device({"features": features, "manufacturer": "TCL"})
     assert dev.can_cast_video and not _pyatv_allows_play_url(dev)
     bits = devices.feature_bits(dev.features)
-    with caplog.at_level(logging.INFO, logger="aircast.devices"):
+    with caplog.at_level(logging.INFO, logger="mirrorbridge.devices"):
         dev.fix_features()
     assert _pyatv_allows_play_url(dev)
     assert devices.feature_bits(dev.features) == bits  # the same bits, now read alike
@@ -115,7 +115,7 @@ async def test_connect_logs_what_the_receiver_advertises(monkeypatch, caplog):
 
     manager = devices.DeviceManager(asyncio.get_running_loop(), storage=MemoryStorage())
     dev = _device({"features": "0x7F8AD0,0x20000", "model": "55QM7L", "manufacturer": "TCL"})
-    with caplog.at_level(logging.INFO, logger="aircast.devices"):
+    with caplog.at_level(logging.INFO, logger="mirrorbridge.devices"):
         assert await manager.connect(dev) == "atv"
     assert ("Receiver Sala familiar (192.168.1.40): model=55QM7L; manufacturer=TCL; "
             "features=0x7F8AD0,0x20000 (bits 4,6,7,9,11,15,16,17,18,19,20,21,22,49; "
@@ -124,7 +124,7 @@ async def test_connect_logs_what_the_receiver_advertises(monkeypatch, caplog):
 
 
 def test_scan_verbose_prints_what_each_receiver_advertises(capsys):
-    from aircast import cli
+    from mirrorbridge import cli
 
     dev = _device({"features": SAMSUNG_FEATURES, "model": "QN90D", "manufacturer": "Samsung"})
     cli._print_devices([dev])

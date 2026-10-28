@@ -1,4 +1,4 @@
-"""AirCast desktop app: lives in the tray; the full window opens from the menu's "Open"."""
+"""MirrorBridge desktop app: lives in the tray; the full window opens from the menu's "Open"."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from PySide6.QtCore import QLocale, QLockFile, QTimer
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 
-from .. import APP_NAME, __version__
+from .. import APP_NAME, __version__, migration
 from ..config import Settings, app_data_dir
 from .controller import Controller, setup_file_logging
 from .i18n import set_language, tr
@@ -33,15 +33,17 @@ def _instance_name() -> str:
         user = getpass.getuser()
     except Exception:  # pylint: disable=broad-except
         user = "user"
-    return f"AirCast-{user}"
+    return f"{APP_NAME}-{user}"
 
 
-class AirCastApp:
+class MirrorBridgeApp:
     def __init__(self, app: QApplication, open_window: bool = False) -> None:
         self.app = app
         self.settings = Settings.load()
         set_language(self.settings.language or _system_language())
         self.controller = Controller(self.settings)
+        if not self.settings.old_autostart_checked and migration.migrate_autostart():
+            self.controller.update_settings(old_autostart_checked=True)
         self.window = None
         self.tray: Optional[TrayMenu] = None
         self.server: Optional[QLocalServer] = None
@@ -52,7 +54,8 @@ class AirCastApp:
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.tray = TrayMenu(self.controller, self.open_window, self.quit)
             self.tray.show()
-            if not self.settings.tray_hint_shown:
+            # Also on the first start after the rename: Windows hides a new program's tray icon under ^.
+            if not self.settings.tray_hint_shown or migration.copied():
                 QTimer.singleShot(1500, self._first_run_hint)
         else:  # no tray (very rare): a normal window app, closing the window quits
             _LOGGER.warning("No system tray available; running as a normal window")
@@ -154,7 +157,7 @@ def run_gui(open_window: bool = False) -> int:
     # One copy per user. The lock decides who runs; the local socket is how a second
     # launch asks the running copy to show itself.
     request = "open" if open_window else "hello"
-    lock = QLockFile(os.path.join(app_data_dir(), "aircast.lock"))
+    lock = QLockFile(os.path.join(app_data_dir(), "mirrorbridge.lock"))
     lock.setStaleLockTime(0)  # never expire by age; a crashed owner is detected by PID
     if not lock.tryLock(0):
         for _ in range(20):  # the running copy may still be starting, or be quitting
@@ -167,7 +170,9 @@ def run_gui(open_window: bool = False) -> int:
 
     log_path = setup_file_logging()
     _LOGGER.info("%s %s starting (log: %s)", APP_NAME, __version__, log_path)
-    aircast = AirCastApp(app, open_window=open_window)  # noqa: F841  (keeps the app alive)
+    for path in migration.copied():  # copied before there was a log to say so
+        _LOGGER.info("Brought over %s", path)
+    mirrorbridge = MirrorBridgeApp(app, open_window=open_window)  # noqa: F841  (keeps the app alive)
     try:
         return app.exec()
     finally:

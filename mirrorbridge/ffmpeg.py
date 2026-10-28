@@ -69,7 +69,7 @@ def _windows_ffmpeg_candidates(exe: str) -> list[Path]:
     """Places winget, Chocolatey and Scoop put ffmpeg.exe.
 
     An app started before FFmpeg was installed keeps the old PATH (that is why
-    'winget install Gyan.FFmpeg' can say "already installed" while AirCast still
+    'winget install Gyan.FFmpeg' can say "already installed" while MirrorBridge still
     cannot see it), so these folders are searched directly.
     """
     local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
@@ -135,8 +135,8 @@ def find_ffmpeg(configured: str = "") -> str:
     except Exception:  # pylint: disable=broad-except
         pass
     raise FFmpegNotFound(
-        "FFmpeg was not found. Use the AirCast.exe build (FFmpeg included), run "
-        "'pip install imageio-ffmpeg', or put ffmpeg.exe next to AirCast."
+        "FFmpeg was not found. Use the MirrorBridge.exe build (FFmpeg included), run "
+        "'pip install imageio-ffmpeg', or put ffmpeg.exe next to MirrorBridge."
     )
 
 
@@ -400,7 +400,7 @@ def build_command(
     """Build the ffmpeg command: capture -> scale -> H.264 + AAC -> live HLS in out_dir.
 
     If audio_port is given, ffmpeg listens on 127.0.0.1:audio_port for raw float32 PCM
-    (system audio captured by aircast.audio). Otherwise a silent track is added, since
+    (system audio captured by mirrorbridge.audio). Otherwise a silent track is added, since
     some Apple TV versions refuse to start an HLS stream without audio.
     for_apple=False writes the stream for TVs of other brands (see OTHER_TV_*), with
     MASTER_PLAYLIST next to the media playlist.
@@ -475,7 +475,7 @@ def popen(cmd: list[str]) -> subprocess.Popen:
 
         try:
             if not winmonitors.kill_with_this_process(int(proc._handle)):  # pylint: disable=protected-access
-                _LOGGER.debug("Could not tie FFmpeg to AirCast's lifetime")
+                _LOGGER.debug("Could not tie FFmpeg to MirrorBridge's lifetime")
         except Exception:  # pylint: disable=broad-except
             _LOGGER.debug("Job object setup failed", exc_info=True)
     return proc

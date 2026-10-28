@@ -9,17 +9,24 @@ import sys
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
+from . import APP_NAME, migration
+
 _LOGGER = logging.getLogger(__name__)
 
 
 def app_data_dir() -> Path:
-    """Return (and create) the folder where AirCast keeps its files."""
+    """Return (and create) the folder where MirrorBridge keeps its files.
+
+    Everything that reads settings or pairings gets here first, so this is where the settings
+    and pairings of the app's old name are brought over (see migration.bring_over).
+    """
     if sys.platform == "win32":
         base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
     else:
         base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    path = base / "AirCast"
+    path = base / APP_NAME
     path.mkdir(parents=True, exist_ok=True)
+    migration.bring_over(path)
     return path
 
 
@@ -62,6 +69,7 @@ class Settings:
     tray_hint_shown: bool = False
     hide_hint_shown: bool = False
     extend_tip_shown: bool = False
+    old_autostart_checked: bool = False  # the old name's Start with Windows entry was moved over
 
     # Misc
     ffmpeg_path: str = ""

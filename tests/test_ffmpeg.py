@@ -4,8 +4,8 @@ import time
 
 import pytest
 
-from aircast import audio, ffmpeg
-from aircast.config import Settings
+from mirrorbridge import audio, ffmpeg
+from mirrorbridge.config import Settings
 
 FF = shutil.which("ffmpeg")
 needs_ffmpeg = pytest.mark.skipif(FF is None, reason="ffmpeg not installed")
@@ -102,8 +102,8 @@ def test_scaled_height_is_even_and_never_upscaled(tmp_path):
 
 
 def test_window_region_crops_ddagrab_relative_to_its_display(tmp_path):
-    from aircast.ffmpeg import Monitor, Region, build_command
-    from aircast.config import Settings
+    from mirrorbridge.ffmpeg import Monitor, Region, build_command
+    from mirrorbridge.config import Settings
 
     mon = Monitor(1, left=1920, top=0, width=2560, height=1440, dxgi_output=1)
     cmd = build_command("ffmpeg", Settings(window_title="Video"), tmp_path, encoder="libx264",
@@ -113,8 +113,8 @@ def test_window_region_crops_ddagrab_relative_to_its_display(tmp_path):
 
 
 def test_window_region_with_gdigrab_uses_desktop_coordinates(tmp_path):
-    from aircast.ffmpeg import Monitor, Region, build_command
-    from aircast.config import Settings
+    from mirrorbridge.ffmpeg import Monitor, Region, build_command
+    from mirrorbridge.config import Settings
 
     mon = Monitor(0, 0, 0, 1920, 1080)
     cmd = build_command("ffmpeg", Settings(window_title="Video"), tmp_path, encoder="libx264",
@@ -124,8 +124,8 @@ def test_window_region_with_gdigrab_uses_desktop_coordinates(tmp_path):
 
 
 def test_window_region_picks_display_and_clips_to_even(monkeypatch):
-    import aircast.ffmpeg as ff
-    from aircast import winmonitors
+    import mirrorbridge.ffmpeg as ff
+    from mirrorbridge import winmonitors
 
     monkeypatch.setattr(ff.sys, "platform", "win32")
     left, right = ff.Monitor(0, 0, 0, 1920, 1080, True), ff.Monitor(1, 1920, 0, 1920, 1080)
@@ -140,8 +140,8 @@ def test_window_region_picks_display_and_clips_to_even(monkeypatch):
 
 
 def test_window_without_region_falls_back_to_gdigrab(monkeypatch):
-    import aircast.ffmpeg as ff
-    from aircast.config import Settings
+    import mirrorbridge.ffmpeg as ff
+    from mirrorbridge.config import Settings
 
     monkeypatch.setattr(ff.sys, "platform", "win32")
     monkeypatch.setattr(ff, "has_filter", lambda *_a: True)
@@ -158,9 +158,9 @@ def test_display_drawn_by_another_gpu_is_captured_with_gdigrab(monkeypatch, tmp_
     one `-f lavfi -i ddagrab` opens: it gets gdigrab over its desktop rectangle."""
     import logging
 
-    import aircast.ffmpeg as ff
-    from aircast import winmonitors
-    from aircast.config import Settings
+    import mirrorbridge.ffmpeg as ff
+    from mirrorbridge import winmonitors
+    from mirrorbridge.config import Settings
 
     monkeypatch.setattr(ff.sys, "platform", "win32")
     monkeypatch.setattr(ff, "has_filter", lambda *_a: True)
@@ -172,7 +172,7 @@ def test_display_drawn_by_another_gpu_is_captured_with_gdigrab(monkeypatch, tmp_
     assert (main.device, main.dxgi_output, main.dxgi_adapter) == (r"\\.\DISPLAY1", 0, 0)
     assert (virtual.device, virtual.dxgi_output, virtual.dxgi_adapter) == (r"\\.\DISPLAY5", None, 1)
     assert ff.pick_capture_backend("ffmpeg", Settings(), main) == "ddagrab"
-    with caplog.at_level(logging.INFO, logger="aircast.ffmpeg"):
+    with caplog.at_level(logging.INFO, logger="mirrorbridge.ffmpeg"):
         assert ff.pick_capture_backend("ffmpeg", Settings(), virtual) == "gdigrab"
     assert "DISPLAY5" in caplog.text and "adapter 1" in caplog.text
     cmd = ff.build_command("ffmpeg", Settings(), tmp_path, encoder="h264_nvenc", backend="gdigrab", monitor=virtual)
@@ -241,7 +241,7 @@ def test_stream_for_other_tvs_declares_codecs_and_program_date_time(tmp_path):
     """FFmpeg's master playlist must carry what Apple's rules for AirPlay 2 TVs ask for."""
     import re
 
-    from aircast.hls_server import complete_variants, fix_target_duration
+    from mirrorbridge.hls_server import complete_variants, fix_target_duration
 
     settings = Settings(latency_mode="low", output_height=360)
     cmd = ffmpeg.build_command(FF, settings, tmp_path, encoder="libx264", backend="test", for_apple=False)

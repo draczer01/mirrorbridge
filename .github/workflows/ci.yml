@@ -30,16 +30,16 @@ jobs:
           python-version: "3.12"
       - run: pip install -r packaging/requirements-build.txt pytest pytest-asyncio
       - run: pip install --no-deps -e .
-      - run: pytest -q tests/test_ffmpeg.py tests/test_hls_server.py tests/test_patch.py tests/test_vdisplay.py
+      - run: pytest -q tests/test_ffmpeg.py tests/test_hls_server.py tests/test_patch.py tests/test_vdisplay.py tests/test_migration.py
       - run: .\packaging\build_exe.ps1
         shell: pwsh
       - name: Smoke test the exe
         shell: pwsh
         run: |
-          $out = & .\dist\AirCast.exe --version | Out-String
+          $out = & .\dist\MirrorBridge.exe --version | Out-String
           Write-Host $out
-          if ($out -notmatch "AirCast") { throw "AirCast.exe --version printed nothing" }
+          if ($out -notmatch "MirrorBridge") { throw "MirrorBridge.exe --version printed nothing" }
       - uses: actions/upload-artifact@v4
         with:
-          name: AirCast-windows
-          path: dist/AirCast.exe
+          name: MirrorBridge-windows
+          path: dist/MirrorBridge.exe

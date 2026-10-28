@@ -1,4 +1,4 @@
-"""Command line interface. `aircast` with no arguments opens the GUI."""
+"""Command line interface. `mirrorbridge` with no arguments opens the GUI."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import getpass
 import logging
 import sys
 
-from . import __version__, airplay_patch, audio, ffmpeg, vdisplay, winmonitors
+from . import APP_NAME, CLI_NAME, __version__, airplay_patch, audio, ffmpeg, vdisplay, winmonitors
 from .config import Settings, app_data_dir, credentials_file
 from .devices import Device, DeviceManager
 from .session import CastSession, State
@@ -18,7 +18,7 @@ _QT_APP = None
 
 
 def _ask_in_dialogs() -> bool:
-    """AirCast.exe with its output redirected has no keyboard to read: ask in dialogs."""
+    """MirrorBridge.exe with its output redirected has no keyboard to read: ask in dialogs."""
     return sys.platform == "win32" and bool(getattr(sys, "frozen", False)) and sys.stdin is None
 
 
@@ -28,11 +28,11 @@ def _dialog_prompt(text: str, secret: bool = False, choices: list[str] | None = 
     global _QT_APP  # pylint: disable=global-statement
     _QT_APP = QApplication.instance() or QApplication([])  # kept alive for later prompts
     if choices:
-        value, ok = QInputDialog.getItem(None, "AirCast", text, choices, 0, False)
+        value, ok = QInputDialog.getItem(None, APP_NAME, text, choices, 0, False)
         value = str(choices.index(value) + 1) if ok else ""
     else:
         mode = QLineEdit.Password if secret else QLineEdit.Normal
-        value, ok = QInputDialog.getText(None, "AirCast", text, mode)
+        value, ok = QInputDialog.getText(None, APP_NAME, text, mode)
     if not ok:
         raise KeyboardInterrupt
     return value.strip()
@@ -188,7 +188,7 @@ async def cmd_cast(args) -> int:
 
 async def cmd_doctor(args) -> int:
     settings = Settings.load()
-    print(f"AirCast {__version__}  (data folder: {app_data_dir()})")
+    print(f"{APP_NAME} {__version__}  (data folder: {app_data_dir()})")
     try:
         ff = ffmpeg.find_ffmpeg(settings.ffmpeg_path)
     except ffmpeg.FFmpegNotFound as ex:
@@ -213,12 +213,12 @@ async def cmd_doctor(args) -> int:
 
 _VDD_STATUS_TEXT = {
     vdisplay.DriverStatus.OK: "working",
-    vdisplay.DriverStatus.NOT_INSTALLED: "driver not installed ('aircast vdd install')",
+    vdisplay.DriverStatus.NOT_INSTALLED: f"driver not installed ('{CLI_NAME} vdd install')",
     vdisplay.DriverStatus.DISABLED: "driver disabled in Device Manager (Display adapters > "
                                     "Parsec Virtual Display Adapter > Enable)",
     vdisplay.DriverStatus.RESTART_REQUIRED: "driver installed; restart Windows to finish",
-    vdisplay.DriverStatus.DRIVER_ERROR: "driver not responding (reinstall: 'aircast vdd install')",
-    vdisplay.DriverStatus.UNKNOWN_PROBLEM: "driver has a problem (see Device Manager, or 'aircast vdd install')",
+    vdisplay.DriverStatus.DRIVER_ERROR: f"driver not responding (reinstall: '{CLI_NAME} vdd install')",
+    vdisplay.DriverStatus.UNKNOWN_PROBLEM: f"driver has a problem (see Device Manager, or '{CLI_NAME} vdd install')",
     vdisplay.DriverStatus.INACCESSIBLE: "cannot check the driver",
 }
 
@@ -261,7 +261,7 @@ async def _vdd_install(args) -> int:
         print("The virtual display driver is installed. Restart Windows to finish installing it.")
         return 0
     about = (
-        "AirCast's Extend screen uses the free \"Parsec Virtual Display Driver\" from Parsec (Unity).\n"
+        "MirrorBridge's Extend screen uses the free \"Parsec Virtual Display Driver\" from Parsec (Unity).\n"
         "It is downloaded from parsec.app (about 500 KB) and Windows asks for permission once.\n"
         f"By installing it you accept Parsec's terms: {vdisplay.PARSEC_TERMS_URL}"
     )
@@ -300,8 +300,9 @@ async def _vdd_install(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="aircast", description="Cast your Windows screen to Apple TV / AirPlay.")
-    parser.add_argument("--version", action="version", version=f"AirCast {__version__}")
+    parser = argparse.ArgumentParser(prog=CLI_NAME,
+                                     description="Cast your Windows screen to Apple TV and other AirPlay TVs.")
+    parser.add_argument("--version", action="version", version=f"{APP_NAME} {__version__}")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     sub = parser.add_subparsers(dest="command")
 

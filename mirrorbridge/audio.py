@@ -50,7 +50,7 @@ class LoopbackFeeder(threading.Thread):
     """
 
     def __init__(self, port: int, source=None) -> None:
-        super().__init__(name="aircast-audio", daemon=True)
+        super().__init__(name="mirrorbridge-audio", daemon=True)
         self.port = port
         self._source = source  # injectable for tests: callable(frames) -> bytes
         self._stop_event = threading.Event()  # not "_stop": threading.Thread uses that name

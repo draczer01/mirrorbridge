@@ -1,4 +1,4 @@
-"""PyInstaller entry point for AirCast.exe (a windowed app that also has a CLI)."""
+"""PyInstaller entry point for MirrorBridge.exe (a windowed app that also has a CLI)."""
 import sys
 
 SUBCOMMANDS = {"scan", "pair", "forget", "cast", "doctor", "vdd"}
@@ -6,17 +6,17 @@ INFO_FLAGS = {"-h", "--help", "--version"}
 
 
 def _wants_console(argv: list[str]) -> bool:
-    """CLI use (`AirCast.exe doctor`, `AirCast.exe --help`), not the tray app."""
+    """CLI use (`MirrorBridge.exe doctor`, `MirrorBridge.exe --help`), not the tray app."""
     return any(arg in SUBCOMMANDS or arg in INFO_FLAGS for arg in argv)
 
 
 def _open_own_console() -> bool:
     """Give a CLI command a console window of its own.
 
-    AirCast.exe is a windowed program, so cmd/PowerShell do not wait for it. Sharing
-    their console would make the shell and AirCast read the keyboard at the same time,
+    MirrorBridge.exe is a windowed program, so cmd/PowerShell do not wait for it. Sharing
+    their console would make the shell and MirrorBridge read the keyboard at the same time,
     and PyInstaller's launcher process has no console to share anyway. When output is
-    already redirected (`AirCast.exe doctor > out.txt`), that is used as it is.
+    already redirected (`MirrorBridge.exe doctor > out.txt`), that is used as it is.
     """
     if sys.stdout is not None:
         return False
@@ -24,7 +24,7 @@ def _open_own_console() -> bool:
 
     if not ctypes.windll.kernel32.AllocConsole():
         return False
-    ctypes.windll.kernel32.SetConsoleTitleW("AirCast")
+    ctypes.windll.kernel32.SetConsoleTitleW("MirrorBridge")
     sys.stdout = open("CONOUT$", "w", encoding="utf-8", buffering=1)  # noqa: SIM115
     sys.stderr = sys.stdout
     sys.stdin = open("CONIN$", "r", encoding="utf-8")  # noqa: SIM115
@@ -33,7 +33,7 @@ def _open_own_console() -> bool:
 
 if __name__ == "__main__":
     own_console = sys.platform == "win32" and _wants_console(sys.argv[1:]) and _open_own_console()
-    from aircast.cli import main
+    from mirrorbridge.cli import main
 
     try:
         code = main()

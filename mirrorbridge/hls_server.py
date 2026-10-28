@@ -61,7 +61,7 @@ class Activity:
     first_playlist_at: float | None = None
     first_segment_at: float | None = None
     last_request_at: float = 0.0
-    missing: int = 0  # requests answered 404/405: the client reached AirCast, but asked for something else
+    missing: int = 0  # requests answered 404/405: the client reached MirrorBridge, but asked for something else
     missing_path: str = ""  # the first of them
 
 
@@ -158,7 +158,7 @@ class HlsServer:
         key = (ip, f"{request.method} {request.raw_path}")
         if key not in self._missing_logged and len(self._missing_logged) < MISSING_LOG_LIMIT:
             self._missing_logged.add(key)
-            _LOGGER.info("%s asked for %s, which AirCast does not serve (HTTP %s, User-Agent: %s)",
+            _LOGGER.info("%s asked for %s, which MirrorBridge does not serve (HTTP %s, User-Agent: %s)",
                          ip, key[1], status, client.user_agent or "none")
         else:
             _LOGGER.debug("%s %s: HTTP %s", ip, key[1], status)
@@ -196,7 +196,7 @@ class HlsServer:
         app.router.add_get("/{name}", self._handle)
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
-        # On Windows SO_REUSEADDR would let a second AirCast bind the same port silently,
+        # On Windows SO_REUSEADDR would let a second MirrorBridge bind the same port silently,
         # so the "port busy" fallback in session.py would never run.
         site = web.TCPSite(self._runner, self.host, self.port, reuse_address=os.name == "posix")
         await site.start()

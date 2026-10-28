@@ -2,7 +2,7 @@ import logging
 
 import aiohttp
 
-from aircast.hls_server import HlsServer
+from mirrorbridge.hls_server import HlsServer
 
 
 async def test_serves_playlist_and_blocks_other_files(tmp_path):
@@ -29,7 +29,7 @@ async def test_serves_playlist_and_blocks_other_files(tmp_path):
 
 
 def test_sub_second_target_duration_is_raised_to_one():
-    from aircast.hls_server import fix_target_duration
+    from mirrorbridge.hls_server import fix_target_duration
 
     assert b"#EXT-X-TARGETDURATION:1\n" in fix_target_duration(b"#EXTM3U\n#EXT-X-TARGETDURATION:0\n")
     assert b"#EXT-X-TARGETDURATION:2\n" in fix_target_duration(b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n")
@@ -55,7 +55,7 @@ async def test_records_each_client_and_its_first_playlist_and_segment(tmp_path, 
     try:
         assert server.activity().requests == 0 and server.activity().first_playlist_at is None
         async with aiohttp.ClientSession(headers={"User-Agent": "AppleCoreMedia/1.0.0"}) as http:
-            with caplog.at_level(logging.INFO, logger="aircast.hls_server"):
+            with caplog.at_level(logging.INFO, logger="mirrorbridge.hls_server"):
                 async with http.get(server.url("master.m3u8")) as resp:
                     assert resp.status == 200
                 async with http.get(server.url("seg_00001.ts")) as resp:
@@ -76,15 +76,15 @@ async def test_records_each_client_and_its_first_playlist_and_segment(tmp_path, 
 
 
 async def test_requests_it_cannot_serve_are_logged_and_counted_but_are_not_fetches(tmp_path, caplog):
-    """A TV that reaches AirCast but asks for the wrong thing must not look like a firewall problem."""
+    """A TV that reaches MirrorBridge but asks for the wrong thing must not look like a firewall problem."""
     (tmp_path / "stream.m3u8").write_text("#EXTM3U\n")
     server = HlsServer(tmp_path, "127.0.0.1", 0)
     await server.start()
     base = f"http://127.0.0.1:{server.port}"
     try:
         async with aiohttp.ClientSession(headers={"User-Agent": "ExoPlayerLib/2.18"}) as http:
-            with caplog.at_level(logging.INFO, logger="aircast.hls_server"):
-                for method, path, status in (("GET", "/aircast/stream.m3u8", 404), ("GET", "/aircast/stream.m3u8", 404),
+            with caplog.at_level(logging.INFO, logger="mirrorbridge.hls_server"):
+                for method, path, status in (("GET", "/live/stream.m3u8", 404), ("GET", "/live/stream.m3u8", 404),
                                              ("GET", "/seg_00009.ts", 404), ("OPTIONS", "/stream.m3u8", 405)):
                     async with http.request(method, base + path) as resp:
                         assert resp.status == status
@@ -92,12 +92,12 @@ async def test_requests_it_cannot_serve_are_logged_and_counted_but_are_not_fetch
         await server.close()
     tv = server.activity("127.0.0.1")
     assert tv.requests == 0 and tv.first_playlist_at is None  # nothing was fetched
-    assert tv.missing == 4 and tv.missing_path == "/aircast/stream.m3u8"
+    assert tv.missing == 4 and tv.missing_path == "/live/stream.m3u8"
     agent = "User-Agent: ExoPlayerLib/2.18"
     assert [r.getMessage() for r in caplog.records] == [  # once per request, with the player that asked
-        f"127.0.0.1 asked for GET /aircast/stream.m3u8, which AirCast does not serve (HTTP 404, {agent})",
-        f"127.0.0.1 asked for GET /seg_00009.ts, which AirCast does not serve (HTTP 404, {agent})",
-        f"127.0.0.1 asked for OPTIONS /stream.m3u8, which AirCast does not serve (HTTP 405, {agent})",
+        f"127.0.0.1 asked for GET /live/stream.m3u8, which MirrorBridge does not serve (HTTP 404, {agent})",
+        f"127.0.0.1 asked for GET /seg_00009.ts, which MirrorBridge does not serve (HTTP 404, {agent})",
+        f"127.0.0.1 asked for OPTIONS /stream.m3u8, which MirrorBridge does not serve (HTTP 405, {agent})",
     ]
 
 
@@ -107,7 +107,7 @@ FFMPEG_MASTER = (b"#EXTM3U\n#EXT-X-VERSION:3\n"
 
 
 def test_master_playlist_gets_frame_rate_and_average_bandwidth():
-    from aircast.hls_server import complete_variants
+    from mirrorbridge.hls_server import complete_variants
 
     done = complete_variants(FFMPEG_MASTER, 30, 8160000)
     assert done == FFMPEG_MASTER.replace(b'mp4a.40.2"\n', b'mp4a.40.2",FRAME-RATE=30.000,AVERAGE-BANDWIDTH=8160000\n')

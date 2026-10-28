@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "aircast"
+name = "mirrorbridge"
 version = "0.2.1"
-description = "Cast your Windows screen and audio to Apple TV / AirPlay receivers"
+description = "Cast your Windows screen and audio to Apple TV and other AirPlay TVs (LG, Samsung, TCL...)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -25,13 +25,13 @@ dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 build = ["pyinstaller>=6", "imageio-ffmpeg>=0.6"]
 
 [project.scripts]
-aircast = "aircast.cli:main"
+mirrorbridge = "mirrorbridge.cli:main"
 
 [project.gui-scripts]
-aircast-gui = "aircast.gui.app:run_gui"
+mirrorbridge-gui = "mirrorbridge.gui.app:run_gui"
 
 [tool.setuptools.packages.find]
-include = ["aircast*"]
+include = ["mirrorbridge*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

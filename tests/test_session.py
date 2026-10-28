@@ -10,12 +10,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from aircast import ffmpeg
-from aircast import session as session_module
-from aircast.airplay_patch import CastContext
-from aircast.config import Settings
-from aircast.hls_server import Activity
-from aircast.session import CastSession, State, StreamNotFetched, StreamRejected
+from mirrorbridge import ffmpeg
+from mirrorbridge import session as session_module
+from mirrorbridge.airplay_patch import CastContext
+from mirrorbridge.config import Settings
+from mirrorbridge.hls_server import Activity
+from mirrorbridge.session import CastSession, State, StreamNotFetched, StreamRejected
 
 T0 = 1000.0
 STEP = 0.5  # fake seconds per supervision round
@@ -158,7 +158,7 @@ async def test_tv_that_never_answers_gets_an_error_too(clock):
 
 async def test_only_the_tvs_own_fetches_count(clock):
     """A player on the PC fetching the stream neither hides a TV that cannot reach
-    AirCast nor counts as the TV casting."""
+    MirrorBridge nor counts as the TV casting."""
     agents = {PC: "VLC/3.0.20 LibVLC/3.0.20"}
     session = _session(clock, fetching(PC, 2, until=80, segments_from=2), accepted=1, agents=agents)
     states = []
@@ -171,15 +171,15 @@ async def test_only_the_tvs_own_fetches_count(clock):
 
 
 async def test_tv_that_asks_for_something_else_is_not_sent_to_the_firewall(clock):
-    session = _session(clock, [(2, TV, "404 /aircast/master.m3u8")], accepted=1)
-    with pytest.raises(StreamNotFetched, match="reached AirCast but asked for /aircast/master.m3u8") as err:
+    session = _session(clock, [(2, TV, "404 /live/master.m3u8")], accepted=1)
+    with pytest.raises(StreamNotFetched, match="reached MirrorBridge but asked for /live/master.m3u8") as err:
         await session._supervise()
     assert "Firewall" not in str(err.value)
 
 
 async def test_tv_that_asks_for_a_missing_segment_says_so(clock):
     fetches = fetching(TV, 3, until=60) + [(4, TV, "404 /seg_00001.ts")]
-    with pytest.raises(StreamRejected, match=r"also asked for /seg_00001\.ts, which AirCast does not have"):
+    with pytest.raises(StreamRejected, match=r"also asked for /seg_00001\.ts, which MirrorBridge does not have"):
         await _session(clock, fetches, accepted=1)._supervise()
 
 

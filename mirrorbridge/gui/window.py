@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QSlider, QSplitter, QStyle, QVBoxLayout, QWidget,
 )
 
-from .. import ffmpeg, vdisplay
+from .. import APP_NAME, ffmpeg, vdisplay
 from ..session import State
 from .controller import Controller
 from .extend import EXTEND_SIZES, size_label
@@ -243,7 +243,7 @@ class MainWindow(QMainWindow):
         current = self.c.settings.window_title or self.window_combo.currentText()
         with self._filling():
             self.window_combo.clear()
-            self.window_combo.addItems([t for t in ffmpeg.list_windows() if not t.startswith("AirCast")])
+            self.window_combo.addItems([t for t in ffmpeg.list_windows() if not t.startswith(APP_NAME)])
             self.window_combo.setCurrentText(current)
 
     def _load_settings(self) -> None:

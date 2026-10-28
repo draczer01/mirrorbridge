@@ -10,7 +10,7 @@ from PySide6.QtCore import QObject
 from PySide6.QtGui import QAction, QActionGroup, QCursor, QFont
 from PySide6.QtWidgets import QFileDialog, QMenu, QSystemTrayIcon
 
-from .. import ffmpeg, vdisplay
+from .. import APP_NAME, ffmpeg, vdisplay
 from ..config import app_data_dir
 from . import winintegration
 from .controller import Controller
@@ -77,7 +77,7 @@ class TrayMenu(QObject):
     def _refresh_status(self, *_args) -> None:
         state, tip = self.c.status()
         self.tray.setIcon(self.icons[state])
-        self.tray.setToolTip(f"AirCast - {tip}")
+        self.tray.setToolTip(f"{APP_NAME} - {tip}")
 
     # -- menu --------------------------------------------------------------
 
@@ -190,7 +190,7 @@ class TrayMenu(QObject):
             self._action(sizes, size_label(mode), (lambda _=False, m=mode: c.update_settings(extend_mode=m)),
                          checkable=True, checked=s.extend_mode == mode, group=sgroup)
         windows = self._submenu(sub, tr("window_menu") + (": " + s.window_title[:40].replace("&", "&&") if s.window_title else ""))
-        titles = [t for t in ffmpeg.list_windows() if not t.startswith("AirCast")]
+        titles = [t for t in ffmpeg.list_windows() if not t.startswith(APP_NAME)]
         if not titles:
             self._action(windows, tr("no_windows"), enabled=False)
         wgroup = QActionGroup(windows)

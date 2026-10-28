@@ -12,8 +12,8 @@ from pyatv.protocols.raop.protocols import airplayv2 as _airplayv2
 from pyatv.support.http import HttpResponse, http_connect
 from pyatv.support.rtsp import RtspSession
 
-from aircast import airplay_patch
-from aircast.airplay_patch import CastContext, ReceiverRefusedVideo
+from mirrorbridge import airplay_patch
+from mirrorbridge.airplay_patch import CastContext, ReceiverRefusedVideo
 
 URL = "http://192.168.1.32:7878/master.m3u8"
 
@@ -236,7 +236,7 @@ async def _connect(receiver, cls=MockV2, feedback=True):
     conn = await http_connect("127.0.0.1", receiver.port)
     rtsp = RtspSession(conn)
     # Fixed instead of random, so that two sessions' requests can be compared byte for byte.
-    rtsp.dacp_id, rtsp.active_remote, rtsp.session_id = "AIRCAST", 1, 1
+    rtsp.dacp_id, rtsp.active_remote, rtsp.session_id = "MIRRORBRIDGE", 1, 1
     v2 = cls(StreamContext(), rtsp)
     v2.uuid = "u"
     v2.feedback = feedback
@@ -287,7 +287,7 @@ async def test_put_refused_on_every_protocol_still_plays(caplog):
     """The 55QM7L case: POST /play works, PUT /setProperty is 501 Not Implemented."""
     cast = CastContext(apple=False, live=True)
     async with MockReceiver(put_refused_everywhere) as tv:
-        with caplog.at_level(logging.INFO, logger="aircast.airplay_patch"):
+        with caplog.at_level(logging.INFO, logger="mirrorbridge.airplay_patch"):
             resp = await _play(await _connect(tv), cast)
         sent = tv.sent()
     assert resp.code == 200
@@ -302,7 +302,7 @@ async def test_put_refused_on_every_protocol_still_plays(caplog):
     assert cast.steps == {"play": 200, "isInterestedInDateRange": "501/HTTP:501",
                           "actionAtItemEnd": "501/HTTP:501", "rate": 200,
                           "forwardEndTime": "skipped", "reverseEndTime": "skipped"}
-    # One line in aircast.log answers "what did the TV say to each request?"
+    # One line in mirrorbridge.log answers "what did the TV say to each request?"
     assert "Receiver answered /play with HTTP 200 OK" in caplog.text
     assert ("AirPlay video requests: play=200 isInterestedInDateRange=501/HTTP:501 "
             "actionAtItemEnd=501/HTTP:501 rate=200 forwardEndTime=skipped reverseEndTime=skipped") in caplog.text
@@ -372,8 +372,8 @@ async def test_receiver_that_refuses_everything():
 
 
 @pytest.mark.parametrize("code, words", [
-    (401, "password .*which AirCast cannot send"), (403, "Forget pairing"), (453, "busy with another AirPlay sender"),
-    (470, "restricted"),
+    (401, "password .*which MirrorBridge cannot send"), (403, "Forget pairing"),
+    (453, "busy with another AirPlay sender"), (470, "restricted"),
 ])
 async def test_refusals_are_explained(code, words):
     def refuses(method, uri, protocol):
@@ -390,8 +390,8 @@ def test_menu_items_in_errors_are_named_as_the_gui_and_the_command_line_name_the
     """The errors are in English, but a Spanish menu has no "Forget pairing" to click."""
     from types import SimpleNamespace
 
-    from aircast import cli
-    from aircast.gui import i18n
+    from mirrorbridge import cli
+    from mirrorbridge.gui import i18n
 
     message = " ".join(str(e) for e in (
         airplay_patch.refusal(403, {"play": 403}),
@@ -434,7 +434,7 @@ async def test_setup_401_is_not_reported_as_a_403(password):
         return (401 if method == "SETUP" else 200), None, True
 
     async with MockReceiver(wants_password) as tv:
-        with pytest.raises(ReceiverRefusedVideo, match="rejected AirCast's credentials") as err:
+        with pytest.raises(ReceiverRefusedVideo, match="rejected MirrorBridge's credentials") as err:
             await _play(await _connect(tv), CastContext(apple=False, password=password))
     assert err.value.steps == {"setup": "not authenticated"} and err.value.code is None
     assert "403" not in str(err.value) and "Device > Forget pairing" in str(err.value)
@@ -507,7 +507,7 @@ class FakeStreamProtocol:
 
 
 async def test_player_names_the_refusal_and_cleans_up():
-    """pyatv says AuthenticationError('status code: 404'); AirCast says what happened."""
+    """pyatv says AuthenticationError('status code: 404'); MirrorBridge says what happened."""
     async with MockReceiver(apple_tv) as tv:
         conn = await http_connect("127.0.0.1", tv.port)
         protocol = FakeStreamProtocol(404)
@@ -572,7 +572,7 @@ async def test_timing_server_is_closed_however_the_cast_ends(monkeypatch, how):
         if how == "refused":
             with pytest.raises(ReceiverRefusedVideo):
                 await asyncio.wait_for(task, 5)
-        else:  # Stop pressed: AirCast cancels the play task
+        else:  # Stop pressed: MirrorBridge cancels the play task
             while ("GET", "/playback-info", "HTTP/1.1") not in tv.requests:
                 assert not task.done()
                 await asyncio.sleep(0.02)

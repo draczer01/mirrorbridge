@@ -4,13 +4,13 @@ VSVersionInfo(
                     fileType=0x1, subtype=0x0, date=(0, 0)),
   kids=[
     StringFileInfo([StringTable('040904B0', [
-      StringStruct('CompanyName', 'AirCast'),
-      StringStruct('FileDescription', 'AirCast - AirPlay para Windows'),
+      StringStruct('CompanyName', 'MirrorBridge'),
+      StringStruct('FileDescription', 'MirrorBridge - AirPlay para Windows'),
       StringStruct('FileVersion', '0.2.1'),
-      StringStruct('InternalName', 'AirCast'),
+      StringStruct('InternalName', 'MirrorBridge'),
       StringStruct('LegalCopyright', 'MIT License'),
-      StringStruct('OriginalFilename', 'AirCast.exe'),
-      StringStruct('ProductName', 'AirCast'),
+      StringStruct('OriginalFilename', 'MirrorBridge.exe'),
+      StringStruct('ProductName', 'MirrorBridge'),
       StringStruct('ProductVersion', '0.2.1')])]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])
   ]
