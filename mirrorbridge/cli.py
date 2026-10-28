@@ -8,7 +8,8 @@ import getpass
 import logging
 import sys
 
-from . import APP_NAME, CLI_NAME, __version__, airplay_patch, audio, ffmpeg, mirror, probe, vdisplay, winmonitors
+from . import (APP_NAME, CLI_NAME, __version__, airplay_patch, audio, ffmpeg, googlecast, mirror, probe, vdisplay,
+               winmonitors)
 from .config import Settings, app_data_dir, credentials_file
 from .devices import Device, DeviceManager
 from .session import CastSession, State
@@ -269,6 +270,46 @@ async def cmd_mirror(args) -> int:
     return 0
 
 
+async def cmd_googlecast(args) -> int:
+    """Google Cast screen mirroring (experimental), or with --list, the Cast receivers."""
+    if args.list or not args.device:
+        devices = await googlecast.scan(args.timeout, args.host)
+        if not devices:
+            print("No Google Cast receivers found. Name one by its IP address: googlecast -d 192.168.1.33")
+            return 1
+        for device in devices:
+            print(f"  {device.describe()}{'' if device.has_video else '  (no screen)'}")
+        if args.list:
+            return 0
+        print('\nChoose one with -d "name" or -d IP.')
+        return 1
+    settings = Settings.load()
+    _what_to_send(settings, args)
+    if args.bitrate:
+        settings.video_bitrate_kbps = args.bitrate
+    if args.framerate:
+        settings.framerate = args.framerate
+    if args.encoder:
+        settings.encoder = args.encoder
+    device = await googlecast.find(args.device, args.timeout)
+    if device is None:
+        print(f"No Google Cast receiver called {args.device!r}. Try googlecast --list, or its IP address.")
+        return 1
+
+    def status(state: State, message: str) -> None:
+        print(f"[{state.value}] {message}" if message else f"[{state.value}]")
+
+    source = mirror.TEST_PATTERN if args.test_pattern else mirror.DESKTOP
+    session = googlecast.GoogleCastMirror(device, settings, status, source=source, seconds=args.seconds,
+                                          delay_ms=args.delay)
+    print(f"Mirroring to {device.describe()}. Press Ctrl+C to stop.")
+    try:
+        await session.run()
+    except Exception:  # pylint: disable=broad-except
+        return 1
+    return 0
+
+
 async def cmd_doctor(args) -> int:
     settings = Settings.load()
     print(f"{APP_NAME} {__version__}  (data folder: {app_data_dir()})")
@@ -443,6 +484,19 @@ def build_parser() -> argparse.ArgumentParser:
                            help="mirror a test pattern, not the screen (and no virtual screen)")
     mirroring.add_argument("--seconds", type=float, help="stop after this many seconds (--probe: 10)")
 
+    gcast = common(sub.add_parser("googlecast", help="mirror the screen to a Chromecast or a TV with Chromecast "
+                                                     "built-in (experimental)"))
+    gcast.add_argument("-d", "--device", help="name, id or IP address")
+    gcast.add_argument("--list", action="store_true", help="list the Google Cast receivers on the network")
+    what_to_send(gcast, "mirror")
+    gcast.add_argument("--test-pattern", action="store_true", help="mirror a test pattern, not the screen")
+    gcast.add_argument("--seconds", type=float, help="stop after this many seconds")
+    gcast.add_argument("--delay", type=int, help="ms the TV shows each frame after it was taken "
+                                                 f"(default {googlecast.DEFAULT_DELAY_MS})")
+    gcast.add_argument("--fps", dest="framerate", type=int)
+    gcast.add_argument("--bitrate", type=int, help="video kbps")
+    gcast.add_argument("--encoder", choices=["auto", *ffmpeg.ENCODER_PREFERENCE])
+
     vdd = sub.add_parser("vdd", help="the virtual display driver that --extend uses")
     vdd_sub = vdd.add_subparsers(dest="vdd_command", required=True, metavar="{status,install}")
     vdd_sub.add_parser("status", help="show whether the driver is installed and working")
@@ -473,7 +527,8 @@ def main(argv: list[str] | None = None) -> int:
         logging.getLogger("pyatv").setLevel(logging.WARNING)
 
     handler = {"scan": cmd_scan, "pair": cmd_pair, "forget": cmd_forget, "cast": cmd_cast, "doctor": cmd_doctor,
-               "probe": cmd_probe, "vdd": cmd_vdd, "mirror": cmd_mirror}[args.command]
+               "probe": cmd_probe, "vdd": cmd_vdd, "mirror": cmd_mirror,
+               "googlecast": cmd_googlecast}[args.command]
     try:
         return asyncio.run(handler(args))
     except KeyboardInterrupt:

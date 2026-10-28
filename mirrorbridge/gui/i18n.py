@@ -390,6 +390,37 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Encoder stopped unexpectedly:\n{errors}",
         "es": "El codificador se detuvo de forma inesperada:\n{errors}",
     },
+    # Google Cast screen mirroring (googlecast/)
+    "gc_no_connection": {
+        "en": "Could not connect to {device} over Google Cast ({error}).",
+        "es": "No se pudo conectar con {device} por Google Cast ({error}).",
+    },
+    "gc_no_launch": {
+        "en": "{device} did not start Cast screen mirroring ({error}).",
+        "es": "{device} no inició la duplicación de pantalla por Cast ({error}).",
+    },
+    "gc_no_answer": {
+        "en": "{device} did not take the video ({error}).",
+        "es": "{device} no aceptó el video ({error}).",
+    },
+    "gc_tv_closed": {
+        "en": "{device} closed the Cast connection.",
+        "es": "{device} cerró la conexión de Cast.",
+    },
+    "gc_tv_ended": {
+        "en": "{device} ended screen mirroring",
+        "es": "{device} terminó la duplicación de pantalla",
+    },
+    "gc_no_picture": {
+        "en": "FFmpeg gave no picture in {seconds} s.",
+        "es": "FFmpeg no dio imagen en {seconds} s.",
+    },
+    "gc_no_rtcp": {
+        "en": "{device} stopped answering the video ({seconds} s without a word). Check that the PC and the TV are "
+              "on the same network.",
+        "es": "{device} dejó de responder al video ({seconds} s sin respuesta). Revisa que la PC y la TV estén en "
+              "la misma red.",
+    },
     "window_hidden": {
         "en": "The window \"{title}\" is not on screen. Restore it if it is minimized, or pick another one.",
         "es": "La ventana \"{title}\" no está en la pantalla. Restáurala si está minimizada, o elige otra.",
