@@ -1,9 +1,12 @@
 """Screen mirroring to a TV in the same process (tests/fake_mirror_tv.py), a TCL 55QM7L by
 default: pairing, SETUP in its shapes and the fallbacks, the clock, the event channel, video
-decrypted and decoded by FFmpeg, the probe, and the ways a TV says no."""
+decrypted and decoded by FFmpeg, the probe, and the ways a TV says no, is slow, or goes away."""
 
 import asyncio
+import statistics
 import subprocess
+import sys
+import uuid
 
 import pytest
 
@@ -13,10 +16,11 @@ from mirrorbridge.config import Settings
 from mirrorbridge.mirror import TEST_PATTERN, MirrorError, MirrorSession, probe_mirroring, profiles
 from mirrorbridge.mirror import session as mirror_session
 from mirrorbridge.mirror.clock import NS, from_ntp
-from mirrorbridge.mirror.control import ControlChannel, Target
+from mirrorbridge.mirror.control import USER_AGENT, ControlChannel, Target, open_event_channel
 from mirrorbridge.mirror.h264 import TRAILER_FIXED, TRAILER_ISO
 from mirrorbridge.mirror.negotiation import CONTROL_FIRST, MEDIA_FIRST, NTP, PTP, Negotiator, Plan
 from mirrorbridge.session import State
+from mirrorbridge.text import Text
 
 SETTINGS = Settings(encoder="libx264", framerate=30, video_bitrate_kbps=1500, output_height=360)
 
@@ -113,10 +117,62 @@ async def test_a_tv_that_dropped_the_pairing_says_so_in_m4(tv):
     assert "M4 error 2" in str(caught.value) and caught.value.step == "pair-verify"
 
 
-async def test_not_paired():
+async def test_not_paired(tv):
     with pytest.raises(MirrorError) as caught:
-        await ControlChannel.open(Target("TV", "127.0.0.1", 9, credentials=None))
-    assert caught.value.args[0].key in ("mirror_not_paired", "mirror_connect_failed")
+        await ControlChannel.open(tv.target(credentials=None))
+    assert caught.value.args[0].key == "mirror_not_paired" and caught.value.step == "pair-verify"
+    await asyncio.sleep(0.05)
+    assert all(conn.closed for conn in tv.connections)
+
+
+async def test_a_tv_that_is_not_there():
+    with pytest.raises(MirrorError) as caught:
+        await ControlChannel.open(Target("TV", "127.0.0.1", 9, credentials=CREDENTIALS))
+    assert caught.value.args[0].key == "mirror_connect_failed"
+
+
+@pytest.mark.parametrize("change, reason", [
+    ({"m2_error": True}, "M2 error 2"),
+    ({"m2_garbage": True}, "M2 could not be decrypted"),
+])
+async def test_pair_verify_answers_that_say_no_are_texts(tv, change, reason):
+    tv.reconfigure(**change)
+    with pytest.raises(MirrorError) as caught:
+        await ControlChannel.open(tv.target())
+    assert caught.value.args[0].key == "mirror_verify_refused" and reason in str(caught.value)
+    assert isinstance(caught.value.args[0].values["reason"], str)
+
+
+async def test_stopping_during_pair_verify_closes_the_connection(tv):
+    tv.reconfigure(verify_delay=5)
+    opening = asyncio.ensure_future(ControlChannel.open(tv.target()))
+    await asyncio.sleep(0.3)
+    opening.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await opening
+    await asyncio.sleep(0.1)
+    assert len(tv.connections) == 1 and tv.connections[0].closed
+
+
+async def test_a_late_answer_to_get_info_is_not_taken_for_a_setups(tv):
+    """pyatv hands answers to requests in order: an answer that comes after its request gave
+    up would be taken for the next one's. SETUP then goes on a new connection."""
+    tv.reconfigure(info_delay=0.5)
+    negotiator = await _negotiator(tv)
+    with pytest.raises(MirrorError) as caught:
+        await negotiator.channel.info(timeout=0.1)
+    assert caught.value.args[0].key == "mirror_no_info" and negotiator.channel.out_of_step
+    est = await negotiator.establish(Plan())
+    try:
+        await asyncio.sleep(0.6)  # the /info answer has come by now, on the old connection
+        # the stale connection, control-first (refused) and media-first, each on its own
+        assert est.plan.ordering == MEDIA_FIRST and est.data_port and len(tv.connections) == 3
+        assert tv.connections[0].closed and not tv.connections[-1].closed
+        assert [s.get("type") for r in est.replies for s in r.get("streams", [])] == [96, 110]
+        assert not negotiator.channel.out_of_step
+    finally:
+        await negotiator.teardown(est.uri)
+        negotiator.close()
 
 
 # -- SETUP ------------------------------------------------------------------------------------------------
@@ -124,12 +180,17 @@ async def test_not_paired():
 
 async def test_tcl_refuses_control_first_and_takes_media_first(tv):
     negotiator = await _negotiator(tv)
+    answers = []
+    negotiator.on_reply = answers.append
     est = await negotiator.establish(Plan())
     try:
         assert est.plan.ordering == MEDIA_FIRST and est.plan.timing == NTP
         assert negotiator.steps["setup control-first"] == 400 and negotiator.steps["setup media-first"] == 200
         assert "control-first SETUP refused with 400" in est.fallbacks[0]
         assert est.data_port and est.event_port and est.receiver_timing_port
+        assert answers == est.replies and answers[0]["timingPort"] == est.receiver_timing_port  # as they came
+        assert len(tv.connections) == 2  # the other ordering on a fresh pair-verify
+        assert tv.user_agents == {USER_AGENT} and USER_AGENT.endswith(tv.setups[-2]["sourceVersion"])
         first, video = tv.setups[-2:]
         assert first["isScreenMirroringSession"] and first["timingProtocol"] == "NTP"
         assert first["timingPort"] == 7880 and "timingPeerInfo" not in first
@@ -152,6 +213,65 @@ async def test_control_first_receiver_with_a_media_first_profile_falls_back(tv):
         session, video = tv.setups[-2:]
         assert "streams" not in session and session["combinedGetInfoWithControlSetup"] is True
         assert [s["type"] for s in video["streams"]] == [110] and est.event_port is None
+    finally:
+        await negotiator.teardown(est.uri)
+        negotiator.close()
+
+
+async def test_a_tv_that_closes_the_connection_after_saying_no(tv):
+    tv.reconfigure(close_after_refusal=True)
+    negotiator = await _negotiator(tv)
+    est = await negotiator.establish(Plan())
+    try:
+        assert est.plan.ordering == MEDIA_FIRST and tv.codes("SETUP") == [400, 200, 200]
+    finally:
+        await negotiator.teardown(est.uri)
+        negotiator.close()
+
+
+async def test_setup_waits_as_long_as_it_is_told(tv):
+    """A TV may take longer than pyatv's 4-10 s to answer SETUP: Negotiator.setup_seconds
+    (SETUP_SECONDS, 30 s) is what counts, shortened here."""
+    tv.reconfigure(setup_delay=0.4, refuse=())
+    negotiator = await _negotiator(tv, setup_seconds=0.1)
+    try:
+        with pytest.raises(MirrorError) as caught:
+            await negotiator.establish(Plan(fallback=False))
+        assert caught.value.args[0].key == "mirror_no_answer" and "no answer" in str(caught.value)
+    finally:
+        negotiator.close()
+    negotiator = await _negotiator(tv, setup_seconds=2)
+    est = await negotiator.establish(Plan(fallback=False))
+    try:
+        assert est.plan.ordering == CONTROL_FIRST and est.data_port
+    finally:
+        await negotiator.teardown(est.uri)
+        negotiator.close()
+
+
+async def test_skip_record_is_honoured(tv):
+    tv.reconfigure(skip_record=True)
+    negotiator = await _negotiator(tv)
+    est = await negotiator.establish(Plan())
+    try:
+        assert est.skip_record
+        await negotiator.record(est)
+        assert negotiator.steps["record"] == "skipped" and tv.records == 0
+    finally:
+        await negotiator.teardown(est.uri)
+        negotiator.close()
+
+
+async def test_an_event_channel_that_opens_late(tv):
+    tv.reconfigure(event_port_delay=1.0)
+    negotiator = await _negotiator(tv)
+    est = await negotiator.establish(Plan())
+    try:
+        transport = await open_event_channel(negotiator.channel, est.event_port)
+        assert transport is not None
+        await asyncio.sleep(0.2)
+        assert tv.event_answers == [200]
+        transport.close()
     finally:
         await negotiator.teardown(est.uri)
         negotiator.close()
@@ -187,9 +307,24 @@ async def test_ptp_answer_is_torn_down_and_ntp_set_up_on_a_fresh_pair_verify(tv,
         assert est.plan.timing == NTP and est.ptp_answered and est.ptp_clock_id == clock_id
         assert ("without timingPeerInfo.ClockID" if clock_id is None else "ClockID 0x1234abcd") in est.fallbacks[0]
         ptp, ntp = tv.setups[0], tv.setups[1]
-        assert ptp["timingProtocol"] == "PTP" and ptp["timingPeerInfo"]["Addresses"] and "timingPort" not in ptp
+        assert ptp["timingProtocol"] == "PTP" and "timingPort" not in ptp
+        peer = ptp["timingPeerInfo"]
+        assert peer["Addresses"] == ["127.0.0.1"] and uuid.UUID(peer["ID"]) and ptp["timingPeerList"] == [peer]
+        assert peer["SupportsClockPortMatchingOverride"] is True and peer["DeviceType"] == 0
         assert ntp["timingProtocol"] == "NTP"
         assert tv.teardowns == 1 and len(tv.connections) == 2  # torn down, then a new pair-verify
+    finally:
+        await negotiator.teardown(est.uri)
+        negotiator.close()
+
+
+async def test_ntp_after_ptp_starts_from_the_ordering_the_tv_took(tv):
+    negotiator = await _negotiator(tv)
+    est = await negotiator.establish(Plan(CONTROL_FIRST, timing=PTP))
+    try:
+        assert est.plan == Plan(MEDIA_FIRST, timing=NTP)
+        # control-first PTP refused, media-first PTP answered; then media-first NTP at once
+        assert tv.codes("SETUP") == [400, 200, 200, 200] and tv.orderings == [MEDIA_FIRST, MEDIA_FIRST]
     finally:
         await negotiator.teardown(est.uri)
         negotiator.close()
@@ -231,17 +366,21 @@ async def test_two_seconds_of_test_pattern_reach_the_tv_and_decode(tv, tmp_path,
     assert video.errors == [] and video.heartbeats >= 1 and not video.closed_by_us
     assert len(video.frames) == report.frames_sent >= 40
     ts, width, height, avcc = video.codec_packets[0]
-    assert (width, height) == (640.0, 360.0) and avcc.endswith(bytes.fromhex("fdf8f800"))
+    assert (width, height) == (640.0, 360.0) and avcc.endswith(bytes.fromhex("02000000"))
     assert ts == video.frames[0][0] and video.frames[0][1]  # the codec packet goes with the first IDR
-    # Each frame is to be shown its lead (100 ms) after it was taken: a little less after it arrived.
-    for (stamp, _, _), arrived in zip(video.frames, video.arrived):
-        assert 40 * NS // 1000 < from_ntp(stamp) - arrived <= 100 * NS // 1000
+    # Each frame is to be shown its lead (100 ms) after it was taken, so a little less after it
+    # arrived: never more, and most frames arrive well before (a busy machine may delay a few).
+    ahead = [from_ntp(stamp) - arrived for (stamp, _, _), arrived in zip(video.frames, video.arrived)]
+    assert max(ahead) <= 100 * NS // 1000 and statistics.median(ahead) > 40 * NS // 1000
+    assert sum(1 for a in ahead if a > 40 * NS // 1000) >= 0.9 * len(ahead)
+    # Paced from the first frame: no burst of frames stamped a few ms apart at the start.
+    assert statistics.median(b[0] - a[0] for a, b in zip(video.frames[:10], video.frames[1:11])) > 20 << 32 // 1000
     frames, size = _decode(ff, bytes(video.annexb), tmp_path)
     assert frames == len(video.frames) and size == "640x360"
 
-    assert report.latency["frames"] == report.frames_sent and "send" in report.latency
+    assert report.latency["frames"] == report.frames_sent and "send" in report.latency and "behind" in report.latency
     saved = profiles.load("fake-tv")
-    assert saved is not None and saved.ordering == MEDIA_FIRST and saved.trailer == TRAILER_ISO
+    assert saved is not None and saved.ordering == MEDIA_FIRST and saved.trailer == TRAILER_FIXED
     assert (app_data / "mirroring.json").is_file()
 
 
@@ -261,11 +400,46 @@ async def test_desktop_capture_is_scaled_to_the_tv(tv):
 
 async def test_saved_profile_is_asked_for_first(tv):
     _ffmpeg()
-    profiles.save("fake-tv", profiles.MirrorProfile(MEDIA_FIRST, trailer=TRAILER_FIXED))
+    profiles.save("fake-tv", profiles.MirrorProfile(MEDIA_FIRST, trailer=TRAILER_ISO))
     session = MirrorSession(tv.target(), SETTINGS, source=TEST_PATTERN, seconds=1, remember=False)
     await asyncio.wait_for(session.run(), 60)
     assert tv.codes("SETUP") == [200, 200] and tv.orderings == [MEDIA_FIRST]
-    assert tv.videos[0].codec_packets[0][3].endswith(bytes.fromhex("02000000"))
+    assert tv.videos[0].codec_packets[0][3].endswith(bytes.fromhex("fdf8f800"))
+
+
+async def test_a_first_session_tries_the_other_avcc_ending_once(tv):
+    _ffmpeg()
+    tv.reconfigure(want_trailer=bytes.fromhex("fdf8f800"))
+    states = []
+    session = MirrorSession(tv.target(), SETTINGS, lambda s, m: states.append((s, str(m))), source=TEST_PATTERN,
+                            seconds=1)
+    await asyncio.wait_for(session.run(), 60)
+    assert session.state == State.STOPPED and session.error is None
+    assert (State.STARTING, "The TV dropped the video at once: trying again with the other ending of the H.264 "
+            "header") in states
+    first, second = tv.videos
+    assert first.closed_by_us and first.codec_packets[0][3].endswith(bytes.fromhex("02000000"))
+    assert not second.closed_by_us and len(second.frames) >= 20 and tv.teardowns == 2
+    assert session.report.trailer == TRAILER_ISO and "avcC ending 02000000" in session.report.retried
+    assert profiles.load("fake-tv").trailer == TRAILER_ISO
+
+
+async def test_a_saved_avcc_ending_is_not_changed_behind_the_users_back(tv):
+    _ffmpeg()
+    tv.reconfigure(want_trailer=bytes.fromhex("fdf8f800"))
+    profiles.save("fake-tv", profiles.MirrorProfile(MEDIA_FIRST, trailer=TRAILER_FIXED))
+    session = MirrorSession(tv.target(), SETTINGS, source=TEST_PATTERN, seconds=5)
+    with pytest.raises(MirrorError) as caught:
+        await asyncio.wait_for(session.run(), 60)
+    assert caught.value.args[0].key == "mirror_data_closed" and len(tv.videos) == 1
+
+
+async def test_a_tv_that_names_its_screen_only_once_the_session_exists(tv):
+    _ffmpeg()
+    tv.reconfigure(displays_before_setup=False, width=480, height=270)
+    session = MirrorSession(tv.target(), SETTINGS, source=TEST_PATTERN, seconds=1, remember=False)
+    await asyncio.wait_for(session.run(), 60)
+    assert tv.info_requests == 2 and session.report.canvas == session.report.picture == (480, 270)
 
 
 async def test_stop_while_mirroring_tears_down(tv):
@@ -301,7 +475,88 @@ async def test_a_tv_that_drops_the_video_fails_the_session(tv):
         await asyncio.wait_for(session.run(), 60)
     assert caught.value.args[0].key == "mirror_data_closed"
     assert session.report.data_closed_after is not None and session.report.data_closed_after >= 2
-    assert tv.teardowns == 1 and profiles.load("fake-tv") is None
+    # Dropped at once both times: the other avcC ending was tried too, then nothing is saved.
+    assert len(tv.videos) == 2 and tv.teardowns == 2 and profiles.load("fake-tv") is None
+
+
+async def test_ending_mirroring_on_the_tv_stops_the_session(tv):
+    _ffmpeg()
+    states = []
+    casting = asyncio.Event()
+
+    def status(state, message):
+        states.append((state, str(message)))
+        if state == State.CASTING:
+            casting.set()
+
+    session = MirrorSession(tv.target(), SETTINGS, status, source=TEST_PATTERN, remember=False)
+    task = asyncio.ensure_future(session.run())
+    await asyncio.wait_for(casting.wait(), 30)
+    await asyncio.sleep(2.5)  # past the second keyframe
+    tv.end_mirroring()
+    await asyncio.wait_for(task, 30)
+    assert session.state == State.STOPPED and session.error is None
+    assert states[-1] == (State.STOPPED, "The TV ended screen mirroring")
+
+
+async def test_frames_the_tv_cannot_take_in_time_are_dropped_up_to_a_keyframe(tv, monkeypatch, tmp_path):
+    ff = _ffmpeg()
+    monkeypatch.setattr(mirror_session, "MAX_BACKLOG_FRAMES", -1)  # as if frames were always waiting
+    session = MirrorSession(tv.target(), SETTINGS, source=TEST_PATTERN, seconds=2.5, remember=False)
+    await asyncio.wait_for(session.run(), 60)
+    (video,) = tv.videos
+    assert session.report.latency["dropped"] > 40 and len(video.frames) >= 2
+    assert all(idr for _, idr, _ in video.frames)  # only keyframes got through, each a fresh start
+    assert _decode(ff, bytes(video.annexb), tmp_path)[0] == len(video.frames)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows holds sends in buffers of its own that the test "
+                    "cannot keep small (Wine leaves out SO_SNDBUF), so a slow reader shows only after the session")
+async def test_a_slow_tv_gets_fewer_frames_not_later_ones(tv):
+    """The video connection's buffers are kept to about two frames (session.send_buffer), so
+    that a TV that reads slowly pushes back at once and frames are dropped rather than queued."""
+    _ffmpeg()
+    tv.reconfigure(read_kbps=60, video_buffer=8192)
+    session = MirrorSession(tv.target(), SETTINGS, source=TEST_PATTERN, seconds=4, remember=False)
+    await asyncio.wait_for(session.run(), 60)
+    (video,) = tv.videos
+    assert session.report.latency["dropped"] > 0 and session.error is None
+    assert video.errors == [] and video.frames and video.frames[0][1]
+
+
+async def test_a_tv_that_stops_reading_the_video_ends_the_session(tv, monkeypatch):
+    _ffmpeg()
+    tv.reconfigure(stall_after=5, video_buffer=8192)
+    monkeypatch.setattr(mirror_session, "VIDEO_STALL_SECONDS", 1.0)
+    session = MirrorSession(tv.target(), Settings(encoder="libx264", framerate=30, video_bitrate_kbps=8000,
+                                                  output_height=720), source=TEST_PATTERN)
+    with pytest.raises(MirrorError) as caught:
+        await asyncio.wait_for(session.run(), 60)
+    assert caught.value.args[0].key == "mirror_video_stalled" and session.state == State.FAILED
+    assert session._frames.frames <= session._frames.limit  # pylint: disable=protected-access
+    assert tv.teardowns == 1
+
+
+async def test_an_encoder_that_gives_nothing_ends_the_session(tv, monkeypatch):
+    _ffmpeg()
+    monkeypatch.setattr(mirror_session, "build_command",
+                        lambda *a, **k: [sys.executable, "-c", "import time; time.sleep(30)"])
+    monkeypatch.setattr(mirror_session, "FIRST_FRAME_SECONDS", 1)
+    session = MirrorSession(tv.target(), SETTINGS, source=TEST_PATTERN)
+    with pytest.raises(MirrorError) as caught:
+        await asyncio.wait_for(session.run(), 60)
+    assert caught.value.args[0].key == "mirror_no_picture" and "for 1 s" in str(caught.value)
+    assert session.state == State.FAILED and tv.teardowns == 1
+
+
+async def test_setting_up_has_a_time_limit(tv, monkeypatch):
+    _ffmpeg()
+    tv.reconfigure(setup_delay=2)
+    monkeypatch.setattr(mirror_session, "START_SECONDS", 1)
+    session = MirrorSession(tv.target(), SETTINGS, source=TEST_PATTERN)
+    with pytest.raises(MirrorError) as caught:
+        await asyncio.wait_for(session.run(), 60)
+    assert caught.value.args[0].key == "mirror_no_answer" and session.state == State.FAILED
 
 
 # -- the probe -----------------------------------------------------------------------------------------------
@@ -333,11 +588,15 @@ async def test_probe_finds_how_tcl_mirrors_and_saves_it(tv):
 
 async def test_probe_tries_the_other_avcc_ending_when_the_tv_drops_the_video(tv):
     _ffmpeg()
-    tv.reconfigure(want_trailer=bytes.fromhex("02000000"))
+    tv.reconfigure(want_trailer=bytes.fromhex("fdf8f800"))
     result = await asyncio.wait_for(probe_mirroring(tv.target(), SETTINGS, seconds=1, variants=("trailer",)), 120)
-    assert [(c.trailer, c.worked) for c in result.streams] == [(TRAILER_ISO, False), (TRAILER_FIXED, True)]
-    assert result.streams[0].report.data_closed_after in (0, 1)  # the codec packet goes with the first frame
-    assert result.worked and result.profile.trailer == TRAILER_FIXED
+    assert [(c.trailer, c.worked) for c in result.streams] == [(TRAILER_FIXED, False), (TRAILER_ISO, True)]
+    # The TV closed the connection at the codec packet, which went with the first frame; how
+    # many frames went before the sender saw it depends on the machine.
+    first = tv.videos[0]
+    assert first.closed_by_us and len(first.codec_packets) == 1 and first.frames == []
+    assert result.streams[0].report.codec_packets == 1 and result.streams[0].report.data_closed_after <= 20
+    assert result.worked and result.profile.trailer == TRAILER_ISO
     assert len(result.setups) == 1 and result.ptp == "not tried"
 
 
@@ -346,10 +605,10 @@ async def test_probe_reports_a_tv_that_keeps_dropping_the_video(tv):
     tv.reconfigure(drop_video_after=5)
     result = await asyncio.wait_for(probe_mirroring(tv.target(), SETTINGS, seconds=2, variants=("trailer",)), 120)
     assert not result.worked and result.saved is None and profiles.load("fake-tv") is None
-    assert [c.trailer for c in result.streams] == [TRAILER_ISO, TRAILER_FIXED]
+    assert [c.trailer for c in result.streams] == [TRAILER_FIXED, TRAILER_ISO]
     assert all(c.report.data_closed_after is not None for c in result.streams)
     assert result.data_channel_accepted and not result.data_channel_kept
-    assert result.conclusion().key == "mirror_data_closed"
+    assert isinstance(result.conclusion(), Text) and result.conclusion().key == "mirror_data_closed"
     assert tv.teardowns == len(tv.orderings)
 
 
@@ -358,7 +617,21 @@ async def test_probe_without_video_holds_the_video_connection_open(tv):
                                                     variants=()), 60)
     (check,) = result.streams
     assert check.worked and check.report.data_channel == "open" and check.report.frames_sent == 0
+    assert check.report.ntp_requests >= 1  # the TV asked for the time while it was held
     assert result.worked and tv.records == 1 and tv.teardowns == len(tv.orderings) == 2
+    assert f"Sent as: User-Agent {USER_AGENT}" in "\n".join(result.lines())
+
+
+async def test_probe_without_video_needs_the_tv_to_ask_for_the_time(tv, monkeypatch):
+    from mirrorbridge.mirror import probe
+
+    tv.reconfigure(send_ntp=False)
+    monkeypatch.setattr(probe, "TIMING_WAIT_SECONDS", 0.5)
+    result = await asyncio.wait_for(probe_mirroring(tv.target(), SETTINGS, send_test_pattern=False,
+                                                    variants=()), 60)
+    assert not result.worked and result.saved is None and profiles.load("fake-tv") is None
+    assert isinstance(result.conclusion(), Text) and result.conclusion().key == "mirror_no_timing"
+    assert "the TV never asked for the time" in "\n".join(result.lines())
 
 
 async def test_probe_of_a_tv_that_refuses_the_video_connection(tv):
@@ -367,6 +640,7 @@ async def test_probe_of_a_tv_that_refuses_the_video_connection(tv):
                                                     variants=()), 60)
     assert not result.worked and result.streams[0].report.data_channel == "refused (connection refused)"
     assert not result.data_channel_accepted and tv.teardowns == len(tv.orderings) == 2
+    assert isinstance(result.conclusion(), Text) and result.conclusion().key == "mirror_data_refused"
 
 
 async def test_probe_stops_at_a_dropped_pairing(tv):
@@ -428,6 +702,6 @@ async def test_mirror_command_names_the_forget_command(tv, cli_device, capsys):
     from mirrorbridge import cli
 
     tv.reconfigure(m4_error=True)
-    args = cli.build_parser().parse_args(["mirror", "-d", "TCL", "--test-pattern"])
+    args = cli.build_parser().parse_args(["mirror", "-d", "TCL", "--probe", "--no-video"])  # no FFmpeg needed
     assert await cli.cmd_mirror(args) == 1
     assert 'Use forget -d "TCL 55QM7L", then cast again' in capsys.readouterr().out

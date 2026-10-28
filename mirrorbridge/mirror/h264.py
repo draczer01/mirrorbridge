@@ -7,8 +7,10 @@ filler or parameter sets of its own.
 
 Which ending of avcC a TV accepts is not known for every receiver: after the PPS, the ISO form
 (what FFmpeg writes) has 4 more bytes for the High profiles, fd f8 f8 00 for 4:2:0 8-bit video
-and nothing for the others; some senders end every record with 02 00 00 00 instead. Both are
-here (TRAILERS), and a device's working one is saved (mirror.profiles).
+and nothing for the others; some senders end every record with 02 00 00 00 instead, and that is
+the form reported to work with TVs of other brands, so it is the one tried first
+(DEFAULT_TRAILER). Both are here (TRAILERS); a session that the TV drops at once tries the other
+one, and a device's working one is saved (mirror.profiles).
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ _NOT_IN_FRAMES = {NAL_SEI, NAL_SPS, NAL_PPS, NAL_AUD, NAL_END_SEQUENCE, NAL_END_
 TRAILER_ISO = "fdf8f800"  # ISO/IEC 14496-15, as FFmpeg writes it: High profiles only
 TRAILER_FIXED = "02000000"  # appended to every record
 TRAILERS = (TRAILER_ISO, TRAILER_FIXED)
+DEFAULT_TRAILER = TRAILER_FIXED
 
 # Profiles whose avcC carries chroma format and bit depths (ISO/IEC 14496-15 5.3.3.1.2)
 _HIGH_PROFILES = {100, 110, 122, 144}

@@ -5,17 +5,21 @@ same display, window and mouse pointer choices), and a test pattern (FFmpeg's te
 gradient and a frame counter) that needs no screen at all. Either is scaled to fit the TV's
 screen as GET /info gives it (never up), and encoded with ffmpeg.mirror_encoder_args: the
 encoder MirrorBridge picks for casts, with every option that makes it hold frames back turned
-off.
+off. FFmpeg's own queue of captured frames is kept short too (INPUT_QUEUE): when the encoder
+cannot keep up, capture waits (and the next picture is a newer one) instead of the frames
+piling up seconds late.
 
 A thread of its own reads the pipe in large reads and hands each complete frame, with the time
-its last byte arrived, to the asyncio loop.
+its last byte arrived, to the asyncio loop, where they wait in a FrameQueue.
 """
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 import os
+import re
 import subprocess
 import threading
 from collections import deque
@@ -26,7 +30,7 @@ from .. import ffmpeg
 from ..config import Settings
 from ..text import Text
 from .clock import now_ns
-from .flv import FlvError, FlvReader
+from .flv import FRAME, FlvError, FlvReader
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,6 +39,7 @@ TEST_PATTERN = "test"
 SOURCES = (DESKTOP, TEST_PATTERN)
 READ_SIZE = 1 << 20
 STOP_SECONDS = 5
+INPUT_QUEUE = 2  # captured frames FFmpeg may hold before encoding them (its own default is 8)
 
 
 @dataclass
@@ -46,6 +51,28 @@ class Unit:
     keyframe: bool
     data: bytes
     arrived_ns: int  # when its last byte came out of the pipe (clock.now_ns)
+
+
+def _version(ff: str) -> tuple[int, int]:
+    """FFmpeg's version as (major, minor); (99, 0) for a build from git, (0, 0) if unknown."""
+    try:
+        line = ffmpeg.ffmpeg_version(ff)
+    except (OSError, subprocess.SubprocessError):
+        return 0, 0
+    found = re.search(r"version n?(\d+)\.(\d+)", line)
+    if found:
+        return int(found.group(1)), int(found.group(2))
+    return (99, 0) if re.search(r"version N-", line) else (0, 0)
+
+
+def _paced(video_in: list[str], ff: str) -> list[str]:
+    """With -re, FFmpeg 6.1 and later read the first half second of input at once: as many
+    frames, stamped a few ms apart, then the real pace. -readrate_initial_burst 0 makes the
+    first frames come at the pace of the others too."""
+    if "-re" not in video_in or _version(ff) < (6, 1):
+        return video_in
+    at = video_in.index("-re") + 1
+    return video_in[:at] + ["-readrate_initial_burst", "0"] + video_in[at:]
 
 
 def build_command(
@@ -68,12 +95,14 @@ def build_command(
     else:
         capture = dataclasses.replace(settings, framerate=fps)
         video_in, filters = ffmpeg._video_input(backend, capture, monitor, region)  # pylint: disable=protected-access
+        # Bilinear: a quarter less CPU than bicubic for a 1440p desktop on a 1080p TV, every frame.
         filters = list(filters) + [
             f"scale=w='min({width},iw)':h='min({height},ih)':force_original_aspect_ratio=decrease"
-            ":force_divisible_by=2:flags=bicubic",
+            ":force_divisible_by=2:flags=bilinear",
         ]
     filters.append("format=yuv420p" if encoder == "libx264" else "format=nv12")
-    cmd = [ff, "-hide_banner", "-nostats", "-loglevel", "warning", "-thread_queue_size", "64", *video_in]
+    video_in = _paced(video_in, ff)
+    cmd = [ff, "-hide_banner", "-nostats", "-loglevel", "warning", "-thread_queue_size", str(INPUT_QUEUE), *video_in]
     cmd += ["-vf", ",".join(filters), "-an"]
     cmd += ffmpeg.mirror_encoder_args(encoder, settings.video_bitrate_kbps, fps)
     cmd += ["-flush_packets", "1", "-flvflags", "no_duration_filesize+no_metadata", "-f", "flv", "pipe:1"]
@@ -149,6 +178,64 @@ class FFmpegSource:
                 proc.kill()
                 proc.wait()
         self.returncode = proc.returncode
+
+
+class FrameQueue:
+    """FFmpeg's frames on the asyncio loop, waiting to be sent.
+
+    At most `limit` frames wait. When the TV takes nothing for a while, the oldest frames make
+    way for new ones (`take_trimmed` says how many went, and the sender then waits for the next
+    keyframe), so a TV that stops reading costs no memory. The avcC and the end (None) are
+    always kept.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = max(2, limit)
+        self.last_frame_ns: Optional[int] = None  # when the last frame came out of the pipe
+        self._units: deque[Optional[Unit]] = deque()
+        self._ready = asyncio.Event()
+        self._frames = 0
+        self._trimmed = 0
+
+    def put(self, unit: Optional[Unit]) -> None:
+        """On the loop (call_soon_threadsafe from FFmpeg's pipe thread)."""
+        self._units.append(unit)
+        if unit is not None and unit.kind == FRAME:
+            self._frames += 1
+            self.last_frame_ns = unit.arrived_ns
+            while self._frames > self.limit:
+                self._trim()
+        self._ready.set()
+
+    def _trim(self) -> None:
+        for index, unit in enumerate(self._units):
+            if unit is not None and unit.kind == FRAME:
+                del self._units[index]
+                self._frames -= 1
+                self._trimmed += 1
+                return
+
+    async def get(self) -> Optional[Unit]:
+        while not self._units:
+            self._ready.clear()
+            await self._ready.wait()
+        unit = self._units.popleft()
+        if unit is not None and unit.kind == FRAME:
+            self._frames -= 1
+        return unit
+
+    @property
+    def frames(self) -> int:
+        """Frames waiting."""
+        return self._frames
+
+    def keyframe_waiting(self) -> bool:
+        return any(unit is not None and unit.kind == FRAME and unit.keyframe for unit in self._units)
+
+    def take_trimmed(self) -> int:
+        """Frames that made way for newer ones since the last call."""
+        trimmed, self._trimmed = self._trimmed, 0
+        return trimmed
 
 
 def ended_text(source: FFmpegSource) -> Text:

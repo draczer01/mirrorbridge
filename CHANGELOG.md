@@ -13,12 +13,17 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   a cast's seconds. Each frame goes as soon as FFmpeg has encoded it, encrypted, over a
   connection of its own, timed by MirrorBridge's own clock that the TV asks over UDP (allow
   inbound UDP 7880-7889 in Windows Firewall). Apple TVs and Macs need FairPlay and are not
-  supported. No sound yet.
+  supported. No sound yet. When the network or the TV cannot keep up, frames are dropped up to
+  the next keyframe instead of piling up; a TV that takes no video for 5 seconds ends the
+  session with an error, and ending mirroring on the TV stops it.
 - `mirror --probe` finds out how a TV takes screen mirroring (the SETUP order, the audio stream,
   PTP or NTP timing, the avcC ending), reports what it answered to each step, and saves what
-  worked in `mirroring.json` for the next session.
+  worked in `mirroring.json` for the next session. Before a probe, a TV that drops the video at
+  once gets one more try with the other avcC ending.
 - The log says every 5 seconds where mirrored frames' time goes (FFmpeg's pipe, packing and
-  encryption, the network), as median and 95th percentile.
+  encryption, the network), as median and 95th percentile, with the frame rate FFmpeg delivers
+  (and a warning when it falls short), what waits to be sent, and how often the TV asked for
+  the time.
 
 ## [0.3.0] - 2026-10-28
 

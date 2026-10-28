@@ -194,9 +194,15 @@ MirrorBridge.exe mirror --test-pattern --seconds 30   # a moving test pattern in
   stream, whether they offer PTP timing, and how they want the H.264 header to end.
   `mirror --probe` tries each, prints what the TV answered, and saves what worked in
   `%APPDATA%\MirrorBridge\mirroring.json`, which every `mirror` after it asks for first. If
-  screen mirroring fails, please send that output with `mirrorbridge.log`.
+  screen mirroring fails, please send that output with `mirrorbridge.log`. Before a probe, a
+  TV that drops the video at once gets one more try with the other H.264 header ending.
+* When the network or the TV cannot keep up, frames are dropped up to the next keyframe
+  instead of piling up, so the picture skips but stays current. A TV that takes no video for
+  5 seconds ends the session with an error; ending mirroring on the TV just stops it.
 * Every 5 seconds the log says where the frames' time went, from FFmpeg's pipe to the network,
-  as median and 95th percentile per stage.
+  as median and 95th percentile per stage, with the frame rate FFmpeg delivers (and a warning
+  when it falls short), what was waiting to go to the TV, and how often the TV asked for the
+  time.
 
 ## How it works
 

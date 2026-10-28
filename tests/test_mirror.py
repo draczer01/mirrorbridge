@@ -14,12 +14,12 @@ from pyatv.auth.hap_srp import hkdf_expand
 
 from mirrorbridge import ffmpeg
 from mirrorbridge.config import Settings
-from mirrorbridge.mirror import clock, flv, h264, packets, profiles, stats
+from mirrorbridge.mirror import clock, flv, h264, packets, profiles, source, stats
 from mirrorbridge.mirror.control import ReceiverInfo, Target, parse_features, sender_id
 from mirrorbridge.mirror.errors import no_timing, refused
 from mirrorbridge.mirror.negotiation import CONTROL_FIRST, MEDIA_FIRST, PTP, Plan
-from mirrorbridge.mirror.session import canvas_limit, choose_canvas, choose_fps
-from mirrorbridge.mirror.source import DESKTOP, TEST_PATTERN, build_command
+from mirrorbridge.mirror.session import canvas_limit, choose_canvas, choose_fps, send_buffer
+from mirrorbridge.mirror.source import DESKTOP, TEST_PATTERN, FrameQueue, Unit, build_command
 
 # What x264 wrote for a 640x360 test pattern (High, level 3.0), and the record the TV got for it.
 SPS_640x360 = bytes.fromhex("6764001eacb405017fcb8088000003000800000301e478b175")
@@ -205,9 +205,9 @@ def test_ntp_values():
 
 
 def test_ntp_reply_echoes_the_request():
-    request = struct.pack(">BBHI", 0x80, 0xD2, 7, 0) + bytes(16) + bytes.fromhex("0102030405060708")
+    request = struct.pack(">BBHI", 0x80, 0xD2, 0x1234, 0xA1B2C3D4) + bytes(16) + bytes.fromhex("0102030405060708")
     reply = clock.ntp_reply(request, 5 * clock.NS, 5 * clock.NS + 250_000_000)
-    assert reply[:4] == bytes.fromhex("80d30007") and len(reply) == 32
+    assert reply[:8] == bytes.fromhex("80d31234a1b2c3d4") and len(reply) == 32  # its sequence number comes back
     assert reply[8:16] == bytes.fromhex("0102030405060708")
     received, sent = struct.unpack(">QQ", reply[16:])
     assert received == (clock.NTP_EPOCH_SECONDS + 5) << 32
@@ -274,11 +274,51 @@ def test_pts_mapper_takes_the_fastest_frame_of_the_window():
     assert all(b > a for a, b in zip(mapped + later, (mapped + later)[1:]))
 
 
+def test_pts_mapper_sees_a_delay_that_stays():
+    mapper, ms = clock.PtsMapper(window_ns=2 * clock.NS), 1_000_000
+    for i in range(10):
+        mapper.map(i * 33, i * 33 * ms + 40 * ms)
+    assert mapper.behind(10 * 33, 10 * 33 * ms + 40 * ms) == 0
+    # FFmpeg starts holding frames back: 300 ms more, for good. The window takes it in as normal...
+    for i in range(10, 200):
+        taken = mapper.map(i * 33, i * 33 * ms + 340 * ms)
+    assert i * 33 * ms + 340 * ms - taken == 0
+    # ...but measured against the session's best, the frame is 300 ms behind.
+    assert mapper.behind(i * 33, i * 33 * ms + 340 * ms) == 300 * ms
+
+
 def test_pts_mapper_never_goes_backwards():
     mapper = clock.PtsMapper()
     first = mapper.map(100, 1_000_000_000)
     assert mapper.map(100, 1_000_000_000) == first + 1_000
     assert mapper.map(90, 990_000_000) > first
+
+
+# -- frames on their way -------------------------------------------------------------------------------
+
+
+def _unit(kind: str = flv.FRAME, keyframe: bool = False, n: int = 0) -> Unit:
+    return Unit(kind, n * 33, keyframe, bytes([n]), n)
+
+
+async def test_frame_queue_keeps_the_newest_frames_and_the_avcc():
+    queue = FrameQueue(limit=3)
+    queue.put(_unit(flv.CONFIG))
+    for n in range(1, 6):
+        queue.put(_unit(keyframe=n == 4, n=n))
+    queue.put(None)
+    # Frames 1 and 2 made way; the avcC and the end are kept.
+    assert queue.frames == 3 and queue.take_trimmed() == 2 and queue.take_trimmed() == 0
+    assert queue.keyframe_waiting() and queue.last_frame_ns == 5
+    got = [await queue.get() for _ in range(5)]
+    assert [u.kind if u else None for u in got] == [flv.CONFIG, flv.FRAME, flv.FRAME, flv.FRAME, None]
+    assert [u.pts_ms for u in got[1:4]] == [99, 132, 165] and queue.frames == 0 and not queue.keyframe_waiting()
+
+
+def test_video_send_buffers_hold_about_two_frames():
+    assert send_buffer(8000, 30) == 2 * 8000 * 1000 // 8 // 30
+    assert send_buffer(500, 60) == 16 * 1024  # never less
+    assert send_buffer(100000, 10) == 256 * 1024  # nor more
 
 
 # -- what is asked, and of whom ------------------------------------------------------------------------
@@ -366,18 +406,41 @@ def test_mirror_encoder_args_hold_nothing_back(encoder, expected):
     assert args[args.index("-maxrate") + 1] == "6000k"
 
 
-def test_mirror_command_test_pattern_and_desktop():
+def test_mirror_command_test_pattern_and_desktop(monkeypatch):
     settings = Settings(video_bitrate_kbps=4000)
+    monkeypatch.setattr(source, "_version", lambda ff: (7, 1))
     cmd = build_command("ffmpeg", settings, source=TEST_PATTERN, encoder="libx264", width=640, height=360, fps=30)
     assert "testsrc=size=640x360:rate=30" in cmd and cmd[-3:] == ["-f", "flv", "pipe:1"]
     assert cmd[cmd.index("-vf") + 1] == "format=yuv420p" and "-an" in cmd
+    # FFmpeg holds at most 2 captured frames, and paces the test pattern from its first frame.
+    assert cmd[cmd.index("-thread_queue_size") + 1] == "2"
+    assert cmd[cmd.index("-re"):cmd.index("-re") + 3] == ["-re", "-readrate_initial_burst", "0"]
+    monkeypatch.setattr(source, "_version", lambda ff: (6, 0))
+    cmd = build_command("ffmpeg", settings, source=TEST_PATTERN, encoder="libx264", width=640, height=360, fps=30)
+    assert "-readrate_initial_burst" not in cmd  # an FFmpeg that does not know it
     mon = ffmpeg.Monitor(1, 0, 0, 2560, 1440, dxgi_output=0)
     cmd = build_command("ffmpeg", settings, source=DESKTOP, encoder="h264_nvenc", width=1920, height=1080, fps=60,
                         backend="ddagrab", monitor=mon)
     assert "ddagrab=output_idx=0:framerate=60:draw_mouse=1" in cmd
     vf = cmd[cmd.index("-vf") + 1]
     assert "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease" in vf
-    assert vf.endswith("format=nv12")
+    assert "flags=bilinear" in vf and vf.endswith("format=nv12")
+
+
+def test_ffmpeg_versions_are_read_from_its_banner(monkeypatch):
+    for banner, version in (("ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023", (6, 1)),
+                            ("ffmpeg version 7.1-essentials_build-www.gyan.dev Copyright", (7, 1)),
+                            ("ffmpeg version n7.0.2 Copyright", (7, 0)),
+                            ("ffmpeg version N-117000-g1234abcd Copyright", (99, 0)),
+                            ("unknown", (0, 0))):
+        monkeypatch.setattr(ffmpeg, "ffmpeg_version", lambda ff, banner=banner: banner)
+        assert source._version("ffmpeg") == version  # pylint: disable=protected-access
+
+    def missing(ff):
+        raise FileNotFoundError(ff)
+
+    monkeypatch.setattr(ffmpeg, "ffmpeg_version", missing)
+    assert source._version("nowhere/ffmpeg") == (0, 0)  # pylint: disable=protected-access
 
 
 def test_mirror_encoder_args_run_with_libx264():
@@ -396,12 +459,41 @@ def test_stage_times_percentiles_and_summary(caplog):
     caplog.set_level("INFO")
     times = stats.StageTimes(kbps=8000, fps=30, lead_ms=100)
     for i in range(1, 101):
-        times.add(1000, keyframe=i == 1, pipe=i * 1_000_000, send=500_000)
+        times.add(1000, keyframe=i == 1, buffered=i * 1024, pipe=i * 1_000_000, send=500_000)
     times.add(400_000, keyframe=True, pipe=0, send=0)  # far over 8 frames' share of 8 Mbit/s
     times.drop()
     assert stats.percentile([float(i) for i in range(1, 101)], 0.5) == 51.0
-    times.log_window()
-    assert "pipe 50.0/95.0" in caplog.text and "dropped 1" in caplog.text
+    times.log_window(ntp_requests=4)
+    assert "pipe 50.0/95.0" in caplog.text and "dropped 1" in caplog.text and "up to 100 KB waiting" in caplog.text
     summary = times.summary()
     assert summary["frames"] == 101 and summary["keyframes"] == 2 and summary["send"] == (0.5, 0.5)
     assert times.big_keyframes == 1 and summary["largest_keyframe"] == 400_000
+    times.log_window(ntp_requests=9)
+    assert "the TV asked for the time 5 times" in caplog.text
+
+
+def test_stage_times_warn_when_ffmpeg_cannot_keep_up(caplog):
+    caplog.set_level("INFO")
+    times = stats.StageTimes(kbps=8000, fps=60, lead_ms=100)
+    start = clock.now_ns()
+    for i in range(50):  # 25 frames a second for 2 s, of the 60 asked for, more and more behind
+        times.add(1000, keyframe=False, behind=i * 10_000_000)
+    times.log_window(start + 2 * clock.NS)
+    assert "of the 60 asked for: the screen capture or the encoder cannot keep up" in caplog.text
+    assert times.summary()["slow_windows"] == 1 and "behind 240.0/470.0" in caplog.text
+
+
+def test_stage_times_count_what_ffmpeg_delivers_not_what_the_tv_takes(caplog, monkeypatch):
+    caplog.set_level("INFO")
+    now = [0]
+    monkeypatch.setattr(stats, "now_ns", lambda: now[0])
+    times = stats.StageTimes(fps=30)
+    for i in range(60):  # 30 frames a second for 2 s, of which a slow TV takes one in ten
+        now[0] = i * clock.NS // 30
+        times.arrived()
+        if i % 10 == 0:
+            times.add(1000, keyframe=True)
+    now[0] += 3 * clock.NS  # the session then takes its time to stop
+    times.log_last()
+    assert "Mirroring: 30.5 fps (of 30)" in caplog.text and "cannot keep up" not in caplog.text
+    assert times.frames == 6 and times.slow_windows == 0

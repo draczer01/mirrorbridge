@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..config import app_data_dir
-from .h264 import TRAILER_ISO, TRAILERS
+from .h264 import DEFAULT_TRAILER, TRAILERS
 from .negotiation import CONTROL_FIRST, DEFAULT_LEAD_MS, NTP, ORDERINGS, Plan
 
 _LOGGER = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ class MirrorProfile:
     ordering: str = CONTROL_FIRST
     audio: bool = True  # send the silent type-96 audio stream
     timing: str = NTP
-    trailer: str = TRAILER_ISO  # how the avcC record ends (h264.TRAILERS)
+    trailer: str = DEFAULT_TRAILER  # how the avcC record ends (h264.TRAILERS)
     lead_ms: int = DEFAULT_LEAD_MS
     checked: str = ""  # when it last worked (local time), "" for the defaults
 

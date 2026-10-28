@@ -6,11 +6,16 @@ pair-verify from the saved pairing. Pair-verify agrees on a secret that keys eve
 it: this connection (ChaCha20-Poly1305 in frames of at most 1024 bytes, pyatv's HAPSession), the
 TV's event channel and the video (packets.py).
 
-pyatv (MIT) does the cryptography. What it does not do is check the TV's last pair-verify
-answer (M4): a TV that has dropped the pairing says so there, and pyatv would then go on to send
-requests the TV cannot read, which it never answers. pair_verify() here checks it. pyatv's
-requests also time out after 4 to 10 s, and a TV can take longer than that to answer a mirroring
-SETUP, so each request here names its own timeout.
+pyatv (MIT) does the cryptography. What it does not do is check the TV's pair-verify answers
+for an error (M2, M4): a TV that has dropped the pairing says so there, and pyatv would then go
+on to send requests the TV cannot read, which it never answers. pair_verify() here checks them
+for a saved pairing. pyatv's requests also time out after 4 to 10 s, and a TV can take longer
+than that to answer a mirroring SETUP, so each request here names its own timeout.
+
+pyatv hands answers to requests in the order they come, not by CSeq: an answer that comes after
+its request timed out would be taken for the next request's. So a channel that has had a
+request go unanswered (or an answer with another request's CSeq) is `out_of_step`, and a
+session is set up on a new connection rather than on that one (negotiation.py).
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
+from cryptography.exceptions import InvalidTag
 from pyatv import exceptions
 from pyatv.auth.hap_pairing import AuthenticationType, HapCredentials, parse_credentials
 from pyatv.auth.hap_session import HAPSession
@@ -31,7 +37,7 @@ from pyatv.auth.hap_tlv8 import ErrorCode, TlvValue, read_tlv, write_tlv
 from pyatv.protocols.airplay.auth.hap_transient import AirPlayHapTransientPairVerifyProcedure
 from pyatv.protocols.airplay.channels import EventChannel
 from pyatv.support.http import HttpConnection, HttpResponse, http_connect, parse_request
-from pyatv.support.rtsp import BPLIST_CONTENT_TYPE, USER_AGENT
+from pyatv.support.rtsp import BPLIST_CONTENT_TYPE
 
 from ..text import Text
 from .errors import ChannelClosed, MirrorError, NoAnswer, answer_of
@@ -43,6 +49,13 @@ CONNECT_SECONDS = 10
 VERIFY_SECONDS = 15
 REQUEST_SECONDS = 10
 INFO_SECONDS = 10
+
+# Who is sending: the version of AirPlay MirrorBridge's requests say they come from, in the
+# User-Agent of every request on the control connection and as the SETUP's sourceVersion, the
+# same in both (a receiver may go by either). It is the version senders on HomeKit-paired
+# sessions give.
+SOURCE_VERSION = "980.71.1"
+USER_AGENT = f"AirPlay/{SOURCE_VERSION}"
 
 # Pair-verify goes out as pyatv's HomeKit pairing sends it ("X-Apple-HKP: 3"): TVs of other
 # brands want type 3 (type 5, Apple TV's screen-capture pairing, fails there).
@@ -224,12 +237,14 @@ async def _verify_hap(conn: HttpConnection, credentials: HapCredentials, target:
         raise _pair_verify_refused(target, f"HTTP {resp.code} to M1")
     m2 = _tlv(resp)
     if TlvValue.Error in m2:
-        raise _pair_verify_refused(target, f"M2 error {m2[TlvValue.Error][0]}")
+        raise _pair_verify_refused(target, f"M2 error {m2[TlvValue.Error][0] if m2[TlvValue.Error] else 0}")
     try:
         # Checks that the TV is the one that was paired (its Ed25519 signature) and signs ours.
         m3 = srp.verify1(credentials, m2[TlvValue.PublicKey], m2[TlvValue.EncryptedData])
     except KeyError as ex:
         raise _pair_verify_refused(target, "M2 without a key") from ex
+    except (InvalidTag, ValueError) as ex:  # sealed with another key, or not a key at all
+        raise _pair_verify_refused(target, "M2 could not be decrypted") from ex
     except exceptions.AuthenticationError as ex:
         raise _pair_verify_refused(target, f"the TV's signature: {ex}") from ex
     resp = await conn.post("/pair-verify", headers=_PAIR_HEADERS, allow_error=True,
@@ -256,8 +271,13 @@ async def pair_verify(conn: HttpConnection, target: Target) -> KeyDeriver:
     if credentials.type == AuthenticationType.HAP:
         return await _verify_hap(conn, credentials, target)
     if credentials.type == AuthenticationType.Transient:
+        # pyatv's own procedure, which checks neither answer for an error: a TV that says no
+        # shows up as an answer it cannot read, or one that does not decrypt.
         procedure = AirPlayHapTransientPairVerifyProcedure(conn, SRPAuthHandler())
-        await procedure.verify_credentials()
+        try:
+            await procedure.verify_credentials()
+        except (KeyError, InvalidTag, exceptions.InvalidResponseError) as ex:
+            raise _pair_verify_refused(target, f"transient pairing: {type(ex).__name__}") from ex
         return procedure.encryption_keys
     raise MirrorError(Text(
         "mirror_not_paired", "MirrorBridge is not paired with {device}. Use Device > Pair with PIN, then try again.",
@@ -274,6 +294,7 @@ class ControlChannel:
         self.conn = conn
         self.derive = derive
         self.cseq = 0
+        self.out_of_step = False  # a late answer may still come (see the module's docstring)
         self.dacp_id = f"{int.from_bytes(hashlib.sha256(target.address.encode()).digest()[:8], 'big'):X}"
         self.active_remote = int(time.time()) & 0xFFFFFFFF
         self._lock = asyncio.Lock()
@@ -293,8 +314,9 @@ class ControlChannel:
         except MirrorError:
             conn.close()
             raise
-        except (asyncio.TimeoutError, TimeoutError, OSError, RuntimeError, exceptions.ConnectionLostError,
-                exceptions.AuthenticationError, exceptions.HttpError, ValueError) as ex:
+        except (asyncio.TimeoutError, TimeoutError, OSError, RuntimeError, ValueError, KeyError, InvalidTag,
+                exceptions.ConnectionLostError, exceptions.AuthenticationError, exceptions.ProtocolError,
+                exceptions.InvalidResponseError) as ex:
             conn.close()
             _LOGGER.debug("Pair-verify with %s failed", target.name, exc_info=True)
             if isinstance(ex, (OSError, TimeoutError, asyncio.TimeoutError)):
@@ -302,6 +324,11 @@ class ControlChannel:
             else:
                 reason = str(ex) or type(ex).__name__
             raise _pair_verify_refused(target, reason) from ex
+        except BaseException:
+            # Cancelled (Stop, or a time limit around this): the TV is not left holding a
+            # half-done pair-verify, which some TVs count as the one sender they allow.
+            conn.close()
+            raise
         session = HAPSession()
         session.enable(*derive(CONTROL_SALT, CONTROL_WRITE, CONTROL_READ))
         conn.receive_processor = session.decrypt
@@ -332,8 +359,9 @@ class ControlChannel:
         async with self._lock:
             if self.closed:
                 raise ChannelClosed(f"{method} {uri}: not connected")
+            cseq = self.cseq
             hdrs: dict = {
-                "CSeq": self.cseq,
+                "CSeq": cseq,
                 "DACP-ID": self.dacp_id,
                 "Active-Remote": self.active_remote,
                 "Client-Instance": self.dacp_id,
@@ -345,19 +373,28 @@ class ControlChannel:
                 hdrs["Content-Type"] = BPLIST_CONTENT_TYPE
                 data = plistlib.dumps(body, fmt=plistlib.FMT_BINARY)  # pylint: disable=no-member
             try:
-                return await self.conn.send_and_receive(
+                resp = await self.conn.send_and_receive(
                     method, uri, protocol="RTSP/1.0", user_agent=USER_AGENT, content_type=content_type,
                     headers=hdrs, body=data, allow_error=True, timeout=timeout,
                 )
             except exceptions.AuthenticationError:  # a 403 raises even with allow_error
                 return HttpResponse("RTSP", "1.0", 403, "Forbidden", {}, b"")
             except TimeoutError as ex:
+                self.out_of_step = True
                 raise NoAnswer(f"no answer to {method} {uri} within {timeout:g} s") from ex
             except (RuntimeError, exceptions.ConnectionLostError) as ex:
                 raise ChannelClosed(f"{method} {uri}: {ex}") from ex
+            answered = str(resp.headers.get("CSeq", cseq)).strip()
+            if answered != str(cseq) and not self.out_of_step:
+                _LOGGER.debug("Answer with CSeq %s to %s %s (CSeq %d): the connection is out of step",
+                              answered, method, uri, cseq)
+                self.out_of_step = True
+            return resp
 
-    async def info(self, timeout: float = INFO_SECONDS) -> ReceiverInfo:
-        """GET /info over the encrypted connection; raises MirrorError if the TV does not give it."""
+    async def info(self, timeout: Optional[float] = None) -> ReceiverInfo:
+        """GET /info over the encrypted connection (within INFO_SECONDS unless `timeout` says
+        otherwise); raises MirrorError if the TV does not give it."""
+        timeout = INFO_SECONDS if timeout is None else timeout
         def no_info(answer: Any, code: Optional[int] = None) -> MirrorError:
             return MirrorError(Text(
                 "mirror_no_info", "{device} did not say what it can show (GET /info: {answer}).",
@@ -419,24 +456,31 @@ class _LoggingEventChannel(EventChannel):
         _LOGGER.debug("Event channel closed: %s", exc)
 
 
-async def open_event_channel(channel: ControlChannel, port: int, attempts: int = 5,
-                             seconds: float = 3) -> Optional[asyncio.BaseTransport]:
+async def open_event_channel(channel: ControlChannel, port: int, seconds: float = 3.0,
+                             attempt_seconds: float = 1.5) -> Optional[asyncio.BaseTransport]:
     """Connect to the TV's event channel (keys reversed: the TV writes with the read key).
 
     Some receivers open it a moment after naming its port, so a refused connection is tried
-    again. None if it never opens: the session goes on without it.
+    again every half second, for `seconds` in all (a connection that is not answered gets
+    `attempt_seconds`). The session is set up meanwhile, without waiting for this. None if it
+    never opens: the session goes on without it.
     """
     out_key, in_key = channel.derive(EVENTS_SALT, EVENTS_READ, EVENTS_WRITE)
     loop = asyncio.get_running_loop()
-    for attempt in range(1, attempts + 1):
+    deadline = loop.time() + seconds
+    attempt = 0
+    while True:
+        attempt += 1
         try:
             transport, _ = await asyncio.wait_for(loop.create_connection(
-                lambda: _LoggingEventChannel(out_key, in_key), channel.remote_ip, port), seconds)
+                lambda: _LoggingEventChannel(out_key, in_key), channel.remote_ip, port),
+                max(0.1, min(attempt_seconds, deadline - loop.time())))
             _LOGGER.info("Event channel open (port %d)", port)
             return transport
         except (OSError, asyncio.TimeoutError) as ex:
             _LOGGER.debug("Event channel, attempt %d: %s", attempt, ex)
-            if attempt < attempts:
-                await asyncio.sleep(0.5)
+        if loop.time() + 0.5 >= deadline:
+            break
+        await asyncio.sleep(0.5)
     _LOGGER.warning("Could not open the TV's event channel on port %d; going on without it", port)
     return None

@@ -13,16 +13,20 @@ plist:
 TVs differ in the order they take these in. Apple's receivers take the session alone first
 ("control-first", with updateSessionRequest and combinedGetInfoWithControlSetup), TVs of other
 brands may refuse that and want the session fields on the first stream's SETUP ("media-first").
-A refusal of the first shape (400, 405, 406, 415, 455, 501) is followed once by the other one.
+A refusal of the first shape (400, 405, 406, 415, 455, 501) is followed once by the other one,
+on a fresh pair-verify: a TV may close the connection right after saying no.
 
 PTP timing (timingPeerInfo) can be asked for too, to learn whether the TV would give a PTP clock.
 MirrorBridge has no PTP timeline yet, and some TVs advertise PTP but answer without a
 timingPeerInfo.ClockID, so a PTP session is always torn down and set up again over NTP, once,
 on a fresh pair-verify.
 
-After SETUP: the event channel, the video connection, RECORD (unless the TV said skipRecord),
-then POST /feedback every 2 seconds for as long as the session lasts (TVs end a session that
-hears nothing for about 15 s), and TEARDOWN at the end or when setting up fails half-way.
+Each answer is handed to `on_reply` as it comes, so that the TV's timing port is probed and its
+event channel opened at once, not only once every SETUP is done (a TV may wait for them before
+it answers the next one). After SETUP: the video connection, RECORD (unless the TV said
+skipRecord), then POST /feedback every 2 seconds for as long as the session lasts (TVs end a
+session that hears nothing for about 15 s), and TEARDOWN at the end or when setting up fails
+half-way.
 """
 
 from __future__ import annotations
@@ -34,11 +38,12 @@ import os
 import secrets
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from ..airplay_patch import format_steps
 from ..text import Text
-from .control import CONTROL_READ, CONTROL_SALT, CONTROL_WRITE, ControlChannel, Target, decode_plist, sender_id
+from .control import (CONTROL_READ, CONTROL_SALT, CONTROL_WRITE, SOURCE_VERSION, ControlChannel, Target,
+                      decode_plist, sender_id)
 from .errors import ChannelClosed, MirrorError, NoAnswer, answer_of, refused
 
 _LOGGER = logging.getLogger(__name__)
@@ -59,8 +64,7 @@ FEEDBACK_INTERVAL = 2.0
 FEEDBACK_SECONDS = 5
 DEFAULT_LEAD_MS = 100  # how long after capture the TV shows a frame (75 is enough on a cable)
 
-# Who is sending. sourceVersion is what senders on HomeKit-paired sessions send.
-SOURCE_VERSION = "980.71.1"
+# Who is sending (and SOURCE_VERSION, in control.py, as in the User-Agent).
 SENDER_MODEL = "Windows"
 SENDER_OS_BUILD = "10.0"
 
@@ -116,11 +120,13 @@ class _ShapeRefused(Exception):
 
 
 class _PtpTried(Exception):
-    """The TV answered a PTP SETUP (with or without a ClockID); the session was torn down."""
+    """The TV answered a PTP SETUP (with or without a ClockID); the session was torn down.
+    `ordering` is the one it answered in."""
 
-    def __init__(self, clock_id: Optional[int]) -> None:
+    def __init__(self, clock_id: Optional[int], ordering: str) -> None:
         super().__init__(f"ClockID {clock_id}")
         self.clock_id = clock_id
+        self.ordering = ordering
 
 
 def _stream_id() -> int:
@@ -164,8 +170,11 @@ class Negotiator:
         self.name = name
         self.setup_seconds = setup_seconds
         self.device_id = sender_id(target.credentials)
+        # For PTP's timingPeerInfo: an ID of its own for this PC, the same for one pairing.
+        self.clock_peer_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"mirrorbridge.{self.device_id}")).upper()
         self.steps: dict = steps if steps is not None else {}
         self.channel: Optional[ControlChannel] = None
+        self.on_reply: Optional[Callable[[dict], None]] = None  # each accepted SETUP's answer
 
     async def connect(self) -> ControlChannel:
         """A new control connection with a fresh pair-verify."""
@@ -182,8 +191,9 @@ class Negotiator:
         return self.channel
 
     async def establish(self, plan: Plan) -> Established:
-        """Set the session up as `plan` says (on the open connection, or a new one)."""
-        if self.channel is None or self.channel.closed:
+        """Set the session up as `plan` says: on the open connection, or a new one if it is
+        closed or out of step (a request on it went unanswered)."""
+        if self.channel is None or self.channel.closed or self.channel.out_of_step:
             await self.connect()
         try:
             return await self._set_up(plan)
@@ -198,7 +208,8 @@ class Negotiator:
                     "mirror_no_ptp", "The TV wants PTP timing, which MirrorBridge does not have yet."
                 ), step="setup", steps=self.steps) from tried
             await self.connect()
-            est = await self._set_up(dataclasses.replace(plan, timing=NTP))
+            # The ordering the TV answered PTP in, so that it is not refused first again.
+            est = await self._set_up(dataclasses.replace(plan, timing=NTP, ordering=tried.ordering))
             est.fallbacks.insert(0, note)
             est.ptp_answered = True
             est.ptp_clock_id = tried.clock_id
@@ -218,8 +229,7 @@ class Negotiator:
                 note = f"{ordering} SETUP refused with {ex.code}: trying {orderings[index + 1]}"
                 _LOGGER.info("%s", note)
                 fallbacks.append(note)
-                if self.channel is None or self.channel.closed:
-                    await self.connect()
+                await self.connect()
                 continue
             est.fallbacks = fallbacks + est.fallbacks
             return est
@@ -228,20 +238,23 @@ class Negotiator:
     # -- the requests ---------------------------------------------------------------------------
 
     def _session_fields(self, plan: Plan, session_uuid: str) -> dict:
+        """The session's own fields (in the order plistlib writes them: by name)."""
         assert self.channel is not None
         fields: dict = {
             "deviceID": self.device_id,
-            "macAddress": self.device_id,
-            "sessionUUID": session_uuid,
-            "sourceVersion": SOURCE_VERSION,
             "isScreenMirroringSession": True,
-            "timingProtocol": "PTP" if plan.timing == PTP else "NTP",
-            "osBuildVersion": SENDER_OS_BUILD,
+            "macAddress": self.device_id,
             "model": SENDER_MODEL,
             "name": self.name,
+            "osBuildVersion": SENDER_OS_BUILD,
+            "sessionUUID": session_uuid,
+            "sourceVersion": SOURCE_VERSION,
+            "timingProtocol": "PTP" if plan.timing == PTP else "NTP",
         }
         if plan.timing == PTP:
-            peer = {"ID": self.channel.local_ip, "Addresses": [self.channel.local_ip]}
+            # This PC as a PTP clock peer, as a sender that has one describes itself.
+            peer = {"Addresses": [self.channel.local_ip], "DeviceType": 0, "ID": self.clock_peer_id,
+                    "SupportsClockPortMatchingOverride": True}
             fields["timingPeerInfo"] = peer
             fields["timingPeerList"] = [peer]
         else:
@@ -249,33 +262,34 @@ class Negotiator:
         return fields
 
     def _audio_stream(self, stream_id: int, plan: Plan) -> dict:
+        """The silent screen-audio stream: ALAC with a key of its own, which nothing uses yet."""
         return {
-            "type": AUDIO_STREAM,
-            "streamConnectionID": stream_id,
-            "ct": ALAC,
-            "spf": SAMPLES_PER_PACKET,
-            "sr": SAMPLE_RATE,
             "audioFormat": ALAC_FORMAT,
             "audioMode": "default",
-            "usingScreen": True,
-            "latencyMin": 0,
-            "latencyMax": plan.lead_ms * SAMPLE_RATE // 1000,
             "controlPort": self.audio_port,
-            "shk": os.urandom(32),  # nothing is sent with it yet
+            "ct": ALAC,
+            "latencyMax": plan.lead_ms * SAMPLE_RATE // 1000,
+            "latencyMin": 0,
+            "shk": os.urandom(32),
+            "spf": SAMPLES_PER_PACKET,
+            "sr": SAMPLE_RATE,
+            "streamConnectionID": stream_id,
+            "type": AUDIO_STREAM,
+            "usingScreen": True,
         }
 
     def _video_stream(self, stream_id: int, plan: Plan) -> dict:
         assert self.channel is not None
         write_key, read_key = self.channel.derive(CONTROL_SALT, CONTROL_WRITE, CONTROL_READ)
         return {
-            "type": VIDEO_STREAM,
-            "streamConnectionID": stream_id,
             "latencyMs": plan.lead_ms,
-            "timestampInfo": [{"name": name} for name in TIMESTAMP_INFO],
             # The video key comes from pair-verify (packets.video_key); TVs paired the HomeKit way
             # get these as well, as other senders send them.
-            "shk": write_key[:16],
             "shiv": read_key[:16],
+            "shk": write_key[:16],
+            "streamConnectionID": stream_id,
+            "timestampInfo": [{"name": name} for name in TIMESTAMP_INFO],
+            "type": VIDEO_STREAM,
         }
 
     async def _setup(self, step: str, uri: str, body: dict, first: bool = False) -> dict:
@@ -317,11 +331,14 @@ class Negotiator:
                 clock = _clock_id(replies[0])
                 self.steps["ptp clock"] = f"{clock:#x}" if clock is not None else "none"
                 await self.teardown(uri)
-                raise _PtpTried(clock)
+                raise _PtpTried(clock, plan.ordering)
+            self._answered(replies[-1])
             if audio and plan.ordering == CONTROL_FIRST:
                 replies.append(await self._setup("setup audio", uri, {"streams": [audio]}))
+                self._answered(replies[-1])
             if audio or plan.ordering == CONTROL_FIRST:
                 replies.append(await self._setup("setup video", video_uri, {"streams": [video]}))
+                self._answered(replies[-1])
             data_port = None
             for reply in replies:
                 for stream in reply.get("streams") or []:
@@ -346,6 +363,13 @@ class Negotiator:
             receiver_timing_port=int(timing_port) if isinstance(timing_port, int) else None,
             skip_record=bool(_first(replies, "skipRecord")), replies=replies,
         )
+
+    def _answered(self, reply: dict) -> None:
+        if self.on_reply is not None:
+            try:
+                self.on_reply(reply)
+            except Exception:  # pylint: disable=broad-except
+                _LOGGER.exception("SETUP answer callback failed")
 
     async def record(self, est: Established) -> None:
         """RECORD: the session starts (unless the TV said it starts without)."""

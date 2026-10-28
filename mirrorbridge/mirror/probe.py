@@ -9,7 +9,9 @@ limit of its own and each SETUP on a fresh pair-verified connection:
    stream, and PTP timing, to learn whether the TV gives a ClockID), each torn down at once;
 4. a few seconds of the test pattern with the shape that worked, through a whole session: the
    video connection, RECORD, /feedback, the TV asking for the time, frames; if the TV drops the
-   video connection, again with the other way of ending the avcC record ("trailer").
+   video connection, again with the other way of ending the avcC record ("trailer"). Without
+   the test pattern, the video connection is only held open for a moment, and the TV must
+   still ask for the time.
 
 What worked is saved for the device (profiles.py), so the next session asks for it at once.
 Whatever happens, every session the probe set up is torn down.
@@ -30,9 +32,9 @@ from ..config import Settings
 from ..text import Text
 from . import profiles
 from .clock import NtpResponder, bind_udp
-from .control import ReceiverInfo, Target, connect_failed
+from .control import SOURCE_VERSION, USER_AGENT, ReceiverInfo, Target, connect_failed
 from .datachannel import DataChannel
-from .errors import MirrorError, answer_of, message_of, needs_fairplay, no_timing
+from .errors import MirrorError, answer_of, data_closed, data_refused, message_of, needs_fairplay, no_timing, refused
 from .h264 import TRAILERS
 from .negotiation import CONTROL_FIRST, MEDIA_FIRST, NTP, PTP, Established, Negotiator, Plan
 from .session import MirrorSession, SessionReport
@@ -50,6 +52,7 @@ INFO_STEP_SECONDS = 40  # connect, pair-verify and GET /info
 SETUP_STEP_SECONDS = 90  # one SETUP shape, PTP and its NTP retry included
 STREAM_SETUP_SECONDS = 75  # a stream check's time on top of the seconds it streams
 DATA_HOLD_SECONDS = 2.0  # without the test pattern: how long the video connection is held open
+TIMING_WAIT_SECONDS = 5.0  # and then how much longer the TV may take to ask for the time
 MAX_STREAM_CHECKS = 3
 
 
@@ -61,7 +64,7 @@ class SetupAttempt:
     worked: bool = False
     steps: dict = field(default_factory=dict)  # each request -> the TV's status code (or "no answer"...)
     established: Optional[Established] = None
-    note: str = ""  # the fallbacks taken, or in short why it failed
+    note: str = ""  # the fallbacks taken, or in short why it failed (English, for lines())
     error: Optional[str] = None  # why it failed, a Text
 
     def line(self) -> str:
@@ -90,8 +93,8 @@ class StreamCheck:
     trailer: str
     worked: bool = False
     report: Optional[SessionReport] = None
-    note: str = ""
-    error: Optional[str] = None  # the session's error message (a Text)
+    note: str = ""  # in short why it failed (English, for lines())
+    error: Optional[str] = None  # why it failed, a Text
 
     def line(self) -> str:
         report = self.report
@@ -125,6 +128,7 @@ class ProbeResult:
     fairplay: bool = False
     features: Optional[int] = None
     srcvers: str = ""
+    sender: str = f"User-Agent {USER_AGENT}, sourceVersion {SOURCE_VERSION}"  # who MirrorBridge says it is
     pair_verify: str = "not tried"
     info: Optional[ReceiverInfo] = None
     setups: list[SetupAttempt] = field(default_factory=list)
@@ -133,7 +137,7 @@ class ProbeResult:
     streams: list[StreamCheck] = field(default_factory=list)
     profile: Optional[profiles.MirrorProfile] = None
     saved: Optional[Path] = None
-    error: Optional[str] = None  # why it stopped early, a Text
+    error: Optional[str] = None  # why it did not work, a Text
     seconds: float = 0.0
 
     @property
@@ -150,7 +154,7 @@ class ProbeResult:
         """The TV kept the video connection open while frames went (or while it was held open)."""
         return any(s.worked for s in self.streams)
 
-    def conclusion(self) -> str:
+    def conclusion(self) -> Text:
         if self.profile is not None:
             return Text("mirror_probe_works", "Screen mirroring works with {device}: {how}.",
                         device=self.target, how=self.profile.describe())
@@ -165,6 +169,7 @@ class ProbeResult:
         if self.features is not None:
             out.append(f"Features: {self.features:#x}" + (f", srcvers {self.srcvers}" if self.srcvers else "")
                        + (" - FairPlay needed" if self.fairplay else " - no FairPlay needed"))
+        out.append(f"Sent as: {self.sender}")
         out.append(f"Pair-verify: {self.pair_verify}")
         if self.info is not None:
             out.append(f"GET /info: {self.info.summary()}")
@@ -203,6 +208,7 @@ class _Probe:
                                   features=target.features, srcvers=target.srcvers)
         self.negotiator = Negotiator(target, timing_port=0, audio_port=0)
         self.transports: list[asyncio.BaseTransport] = []
+        self.responder: Optional[NtpResponder] = None  # the timing port the SETUPs name (without the test pattern)
 
     def say(self, line: str) -> None:
         _LOGGER.info("Probe: %s", line)
@@ -240,6 +246,7 @@ class _Probe:
         for transport in self.transports:
             transport.close()
         self.transports.clear()
+        self.responder = None
 
     # -- 2. pair-verify and /info -----------------------------------------------------------------
 
@@ -250,6 +257,7 @@ class _Probe:
             self.result.pair_verify = "ok"
             transport, responder = await bind_udp(NtpResponder, channel.local_ip)
             self.transports.append(transport)
+            self.responder = responder
             self.negotiator.timing_port = responder.port
             transport, _ = await bind_udp(asyncio.DatagramProtocol, channel.local_ip, taken=(responder.port,))
             self.transports.append(transport)
@@ -295,7 +303,8 @@ class _Probe:
             attempt.note = _short(ex)
             attempt.error = message_of(ex)
         except asyncio.TimeoutError:
-            attempt.note = attempt.error = f"no answer within {SETUP_STEP_SECONDS} s"
+            attempt.note = f"no answer within {SETUP_STEP_SECONDS} s"
+            attempt.error = message_of(refused(None, attempt.steps, "setup"))
         else:
             attempt.worked = True
             attempt.established = established
@@ -369,10 +378,10 @@ class _Probe:
             dropped = report is not None and (report.data_closed_after is not None or report.data_channel != "open")
             if not dropped:
                 # Not something another avcC ending or ordering changes (the time, the encoder...).
-                self.result.error = check.error or check.note
+                self.result.error = check.error
                 return
         last = self.result.streams[-1] if self.result.streams else None
-        self.result.error = (last.error or last.note) if last is not None else None
+        self.result.error = last.error if last is not None else None
 
     async def _stream(self, plan: Plan, trailer: str) -> StreamCheck:
         """A whole session of the test pattern, `self.seconds` long."""
@@ -385,15 +394,18 @@ class _Probe:
         try:
             await asyncio.wait_for(session.run(), self.seconds + STREAM_SETUP_SECONDS)
         except asyncio.TimeoutError:
-            check.error = f"no end within {self.seconds + STREAM_SETUP_SECONDS:g} s"
+            check.note = f"no end within {self.seconds + STREAM_SETUP_SECONDS:g} s"
+            check.error = message_of(refused(None, session.report.steps, "video"))
         except Exception as ex:  # pylint: disable=broad-except
             _LOGGER.debug("Probe stream failed", exc_info=True)
             check.error = message_of(ex)
-        report = session.report
+        report = check.report = session.report  # a new one if the session was set up again
         if check.error is not None:
             return check
         if not report.frames_sent:
             check.note = "no frames went to the TV"
+            check.error = Text("mirror_no_frames", "No video went to {device}: FFmpeg made no frame in {seconds} s.",
+                               device=self.target.name, seconds=f"{self.seconds:g}")
         elif report.ntp_requests == 0 and report.established is not None and report.established.plan.timing == NTP:
             check.note = "the TV never asked for the time"
             check.error = message_of(no_timing(report.timing_port, report.steps))
@@ -402,11 +414,14 @@ class _Probe:
         return check
 
     async def _hold(self, plan: Plan, trailer: str) -> StreamCheck:
-        """Without the test pattern: set up, open the video connection, hold it, tear down."""
+        """Without the test pattern: set up, open the video connection, hold it while the TV
+        asks for the time, tear down."""
         check = StreamCheck(plan, trailer, report=SessionReport(trailer=trailer))
         report = check.report
         assert report is not None
         self.negotiator.steps = report.steps
+        responder = self.responder
+        asked = responder.requests if responder is not None else 0
         established = None
         try:
             established = report.established = await asyncio.wait_for(self._establish(plan), SETUP_STEP_SECONDS)
@@ -417,6 +432,7 @@ class _Probe:
             except (OSError, asyncio.TimeoutError) as ex:
                 report.data_channel = f"refused ({answer_of(ex)})"
                 check.note = f"the TV did not take the video connection ({answer_of(ex)})"
+                check.error = message_of(data_refused(established.data_port, answer_of(ex), report.steps))
                 return check
             report.data_channel = "open"
             try:
@@ -424,22 +440,42 @@ class _Probe:
                 try:
                     await asyncio.wait_for(data.closed.wait(), DATA_HOLD_SECONDS)
                 except asyncio.TimeoutError:
-                    check.worked = True
+                    check.worked = await self._timing_seen(check, asked)
                 else:
                     report.data_channel = data.close_reason or "closed by the TV"
                     report.data_closed_after = 0
                     check.note = f"the TV closed the video connection before any frame ({report.data_channel})"
+                    check.error = message_of(data_closed(0, report.steps))
             finally:
                 await data.close()
         except MirrorError as ex:
             check.error = message_of(ex)
         except asyncio.TimeoutError:
-            check.error = f"no answer within {SETUP_STEP_SECONDS} s"
+            check.note = f"no answer within {SETUP_STEP_SECONDS} s"
+            check.error = message_of(refused(None, report.steps, "setup"))
         finally:
             if established is not None:
                 await self.negotiator.teardown(established.uri)
             self.negotiator.close()
         return check
+
+    async def _timing_seen(self, check: StreamCheck, asked: int) -> bool:
+        """Whether the TV asked for the time during this check (waiting a little for it)."""
+        responder, report = self.responder, check.report
+        if (responder is None or report is None or report.established is None
+                or report.established.plan.timing != NTP):
+            return True
+        report.timing_port = responder.port
+        waited = 0.0
+        while responder.requests == asked and waited < TIMING_WAIT_SECONDS:
+            await asyncio.sleep(0.1)
+            waited += 0.1
+        report.ntp_requests = responder.requests - asked
+        if report.ntp_requests:
+            return True
+        check.note = "the TV never asked for the time"
+        check.error = message_of(no_timing(responder.port, report.steps))
+        return False
 
 
 async def probe_mirroring(

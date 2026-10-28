@@ -125,7 +125,13 @@ todavía no se probó con una TV real, así que por ahora solo está en la conso
   7880-7889, en el Firewall de Windows para redes privadas, o la TV no mostrará nada.
 * `mirror --probe` prueba las formas en que las TVs difieren, muestra qué contestó la TV y
   guarda lo que funcionó en `%APPDATA%\MirrorBridge\mirroring.json` para la próxima vez. Si
-  no funciona, manda lo que muestra junto con `mirrorbridge.log`.
+  no funciona, manda lo que muestra junto con `mirrorbridge.log`. Antes de un `--probe`, si la
+  TV corta el video apenas empieza, se intenta una vez más con el otro final del encabezado
+  H.264.
+* Si la red o la TV no dan abasto, se descartan cuadros hasta el siguiente cuadro clave en
+  lugar de acumularlos: la imagen salta, pero no se atrasa. Si la TV no recibe video durante
+  5 segundos, la sesión termina con un error; si terminas la duplicación desde la TV, la
+  sesión simplemente se detiene.
 
 ## Diagnóstico
 

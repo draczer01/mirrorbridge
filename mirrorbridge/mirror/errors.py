@@ -70,6 +70,22 @@ def no_timing(port: int, steps: dict) -> MirrorError:
     ), step="timing", steps=steps)
 
 
+def data_refused(port: int, answer: str, steps: dict) -> MirrorError:
+    """The TV did not take the video connection it named."""
+    return MirrorError(Text(
+        "mirror_data_refused", "The TV did not take the video connection (TCP port {port}: {answer}).",
+        port=port, answer=answer,
+    ), step="video connection", steps=steps)
+
+
+def data_closed(frames: int, steps: dict) -> MirrorError:
+    """The TV closed the video connection while the session went on."""
+    return MirrorError(Text(
+        "mirror_data_closed", "The TV closed the video connection after {frames} frames. It may not take "
+        "this video: please report this TV, with mirrorbridge.log.", frames=frames,
+    ), step="video", steps=steps)
+
+
 def refused(code: Optional[int], steps: dict, step: str) -> MirrorError:
     """The TV said no to a step of setting up the session (or never answered it)."""
     if code == 401:

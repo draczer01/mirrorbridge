@@ -62,14 +62,15 @@ def from_ntp(value: int, epoch: bool = False) -> int:
 def ntp_reply(request: bytes, received_ns: int, sent_ns: Optional[int] = None) -> Optional[bytes]:
     """The 0xd3 answer to a 0xd2 timing request, or None if `request` is not one.
 
-    The request's transmit time [24:32] comes back as the origin time [8:16]; [16:24] is when it
+    [2:8] (the request's sequence number and what follows it) come back as they were; the
+    request's transmit time [24:32] comes back as the origin time [8:16]; [16:24] is when it
     was received and [24:32] when the answer leaves, both on the session clock, 1900 epoch.
     """
     if len(request) < NTP_PACKET or request[1] != NTP_REQUEST:
         return None
     sent_ns = received_ns if sent_ns is None else sent_ns
-    return struct.pack(
-        ">BBHI8sQQ", 0x80, NTP_REPLY, 7, 0, request[24:32], to_ntp(received_ns, True), to_ntp(sent_ns, True)
+    return bytes([0x80, NTP_REPLY]) + bytes(request[2:8]) + struct.pack(
+        ">8sQQ", request[24:32], to_ntp(received_ns, True), to_ntp(sent_ns, True)
     )
 
 
@@ -115,17 +116,23 @@ class NtpResponder(asyncio.DatagramProtocol):
         self.peers.add(addr[0])
         self.arrived.set()
 
-    def probe_receiver(self, address: str, port: int, count: int = 3) -> None:
-        """Send `count` timing requests to the timing port the receiver named, from this
-        responder's port: a stateful firewall then takes the receiver's requests from there as
-        answers and lets them in. What the receiver answers is ignored."""
-        if self.transport is None:
-            return
-        for _ in range(count):
+    def probe_receiver(self, address: str, port: int, count: int = 3, spacing: float = 0.1) -> None:
+        """Send `count` timing requests, `spacing` seconds apart, to the timing port the receiver
+        named, from this responder's port: a stateful firewall then takes the receiver's
+        requests from there as answers and lets them in. What the receiver answers is ignored."""
+        loop = asyncio.get_running_loop()
+
+        def send(left: int) -> None:
+            if self.transport is None or left <= 0:
+                return
             self.transport.sendto(ntp_request(now_ns()), (address, port))
+            loop.call_later(spacing, send, left - 1)
+
+        send(count)
 
     def error_received(self, exc) -> None:
-        _LOGGER.debug("Timing port: %s", exc)
+        # Worth seeing: on Windows a socket error can leave the port deaf to the TV's requests.
+        _LOGGER.warning("Timing port %s: %s", self.port if self.transport else "?", exc)
 
     def close(self) -> None:
         if self.transport is not None:
@@ -161,16 +168,28 @@ class PtsMapper:
     offset of the last `window_ns` is the delay without the jitter, so pts + that offset is
     when the frame was really taken, as steady as the capture itself. The result never goes
     backwards, even when a new smallest offset turns up.
+
+    A delay that grows for good (FFmpeg holding frames back) becomes the window's new smallest
+    offset within `window_ns`; `behind()` measures a frame against the smallest of the whole
+    session instead, so that it still shows.
     """
 
     def __init__(self, window_ns: int = 2 * NS) -> None:
         self.window_ns = window_ns
         self._offsets: deque[tuple[int, int]] = deque()  # (arrival, offset), offsets increasing
         self._last: Optional[int] = None
+        self.lowest: Optional[int] = None  # the smallest offset of the session
+
+    def behind(self, pts_ms: int, arrival_ns: int) -> int:
+        """How much later than at best (the session's smallest offset) this frame came, in ns."""
+        offset = arrival_ns - pts_ms * 1_000_000
+        return max(0, offset - self.lowest) if self.lowest is not None else 0
 
     def map(self, pts_ms: int, arrival_ns: int) -> int:
         """When the frame with this pts was taken, on the session clock (ns)."""
         offset = arrival_ns - pts_ms * 1_000_000
+        if self.lowest is None or offset < self.lowest:
+            self.lowest = offset
         while self._offsets and self._offsets[-1][1] >= offset:
             self._offsets.pop()
         self._offsets.append((arrival_ns, offset))

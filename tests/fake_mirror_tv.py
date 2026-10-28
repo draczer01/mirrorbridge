@@ -4,7 +4,8 @@ It pairs and verifies with pyatv's own server side (MIT: the PIN is pyatv's 1111
 pyatv.auth.server_auth.CLIENT_CREDENTIALS verifies without pairing), then plays a TV of
 another brand: GET /info, SETUP in the shapes its TvProfile takes, the event channel, its own
 NTP requests to the sender's timing port, RECORD, /feedback, TEARDOWN, and a video connection
-whose frames it decrypts and turns back into an H.264 stream FFmpeg can decode.
+whose frames it decrypts and turns back into an H.264 stream FFmpeg can decode. Its TvProfile
+also makes it slow, forgetful or stubborn in the ways real TVs can be.
 
 It reads the wire on its own (struct offsets, HKDF with pyatv's hkdf_expand), not with
 mirrorbridge.mirror.packets, so that the two sides check each other.
@@ -16,15 +17,17 @@ import asyncio
 import dataclasses
 import logging
 import plistlib
+import socket
 import struct
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
 from pyatv.auth.hap_channel import AbstractHAPChannel
 from pyatv.auth.hap_session import HAPSession
 from pyatv.auth.hap_srp import hkdf_expand
-from pyatv.auth.hap_tlv8 import ErrorCode, TlvValue, write_tlv
+from pyatv.auth.hap_tlv8 import ErrorCode, TlvValue, read_tlv, write_tlv
 from pyatv.auth.server_auth import CLIENT_CREDENTIALS, PIN_CODE
 from pyatv.protocols.airplay.server_auth import AirPlayServerAuth
 from pyatv.support.chacha20 import Chacha20Cipher8byteNonce
@@ -60,7 +63,19 @@ class TvProfile:
     drop_video_after: Optional[int] = None  # close the video connection after this many frames
     want_trailer: Optional[bytes] = None  # close it at a codec packet whose avcC does not end so
     refuse_video_connection: bool = False
+    m2_error: bool = False  # pair-verify M2 carries an error
+    m2_garbage: bool = False  # pair-verify M2 does not decrypt
     m4_error: bool = False  # pair-verify M4 carries an error (a TV that dropped the pairing)
+    verify_delay: float = 0.0  # before answering pair-verify M1
+    info_delay: float = 0.0  # before answering GET /info
+    displays_before_setup: bool = True  # False: GET /info names no displays until a session exists
+    setup_delay: float = 0.0  # before answering each SETUP
+    close_after_refusal: bool = False  # close the connection right after refusing a SETUP ordering
+    skip_record: bool = False  # say skipRecord in the SETUP answer
+    event_port_delay: float = 0.0  # name the event port this long before listening on it
+    video_buffer: Optional[int] = None  # SO_RCVBUF of the video connection (None: the system's)
+    read_kbps: Optional[float] = None  # read the video no faster than this
+    stall_after: Optional[int] = None  # stop reading the video after this many frames, keeping it open
 
 
 TCL = TvProfile()
@@ -174,6 +189,32 @@ class _Handler(AirPlayServerAuth):
     def enable_encryption(self, output_key: bytes, input_key: bytes) -> None:
         self.conn.pending_keys = (output_key, input_key)  # after the M4 answer has gone out
 
+    def handle_pair_verify(self, request: HttpRequest):
+        body = request.body if isinstance(request.body, bytes) else str(request.body).encode()
+        if self.tv.profile.verify_delay and read_tlv(body).get(TlvValue.SeqNo) == b"\x01":
+            return asyncio.ensure_future(self._late(self.tv.profile.verify_delay, super().handle_pair_verify, request))
+        return super().handle_pair_verify(request)
+
+    def handle_info(self, request: HttpRequest):
+        if self.tv.profile.info_delay:
+            return asyncio.ensure_future(self._late(self.tv.profile.info_delay, self._info, request))
+        return self._info(request)
+
+    @staticmethod
+    async def _late(seconds: float, handler, request: HttpRequest) -> HttpResponse:
+        await asyncio.sleep(seconds)
+        return handler(request)
+
+    def _m1_verify(self, pairing_data):
+        if self.tv.profile.m2_error:
+            return write_tlv({TlvValue.SeqNo: b"\x02", TlvValue.Error: bytes([ErrorCode.Authentication])})
+        answer = super()._m1_verify(pairing_data)
+        if self.tv.profile.m2_garbage:
+            tlv = read_tlv(answer)
+            tlv[TlvValue.EncryptedData] = bytes(b ^ 0x55 for b in tlv[TlvValue.EncryptedData])
+            answer = write_tlv(tlv)
+        return answer
+
     def _m3_verify(self, pairing_data):
         if self.tv.profile.m4_error:
             return write_tlv({TlvValue.SeqNo: b"\x04", TlvValue.Error: bytes([ErrorCode.Authentication])})
@@ -188,29 +229,35 @@ class _Handler(AirPlayServerAuth):
             hdrs["Content-Type"] = "application/x-apple-binary-plist"
         return HttpResponse("RTSP", "1.0", code, "OK" if code == 200 else "Bad Request", hdrs, data)
 
-    def handle_info(self, request: HttpRequest):
+    def _info(self, request: HttpRequest) -> HttpResponse:
         p = self.tv.profile
         self.tv.info_encrypted = self.conn.hap.chacha20 is not None
-        return self._answer(request, 200, {
+        self.tv.info_requests += 1
+        info = {
             "name": p.name,
             "model": p.model,
             "sourceVersion": p.srcvers,
             "features": p.features,
-            "displays": [{"uuid": "e0ff8a27-6738-3d56-8a16-cc53aacee925", "widthPixels": p.width,
-                          "heightPixels": p.height, "width": p.width, "height": p.height,
-                          "maxFPS": p.max_fps, "features": 30, "rotation": False}],
             "supportedFormats": {"screenStream": 0x1C0000, "audioStream": 0x1FFFFFC},
             "statusFlags": 4,
             "deviceID": "AA:BB:CC:DD:EE:FF",
-        })
+        }
+        if p.displays_before_setup or self.mirror:
+            info["displays"] = [{"uuid": self.tv.display_id, "widthPixels": p.width, "heightPixels": p.height,
+                                 "width": p.width, "height": p.height, "maxFPS": p.max_fps, "features": 30,
+                                 "rotation": False}]
+        return self._answer(request, 200, info)
 
     def handle_setup(self, request: HttpRequest):
         return asyncio.ensure_future(self._setup(request))
 
     async def _setup(self, request: HttpRequest) -> HttpResponse:
         p = self.tv.profile
+        if p.setup_delay:
+            await asyncio.sleep(p.setup_delay)
         body = plistlib.loads(request.body)
         self.tv.setups.append(body)
+        self.tv.user_agents.add(request.headers.get("User-Agent", ""))
         streams = body.get("streams") or []
         reply: dict = {}
         types = [stream.get("type") for stream in streams]
@@ -221,6 +268,8 @@ class _Handler(AirPlayServerAuth):
         if "sessionUUID" in body:
             ordering = "media-first" if streams else "control-first"
             if ordering in p.refuse or not body.get("isScreenMirroringSession"):
+                if p.close_after_refusal:  # a moment after the answer has gone
+                    asyncio.get_running_loop().call_later(0.05, self.conn.transport.close)
                 return self._answer(request, 400)
             self.mirror = body
             self.tv.orderings.append(ordering)
@@ -237,20 +286,28 @@ class _Handler(AirPlayServerAuth):
                     reply["timingPort"] = self.ntp.transport.get_extra_info("sockname")[1]
                 if p.send_ntp:
                     self.tasks.append(asyncio.ensure_future(self._ask_time(body["timingPort"])))
+            if p.skip_record:
+                reply["skipRecord"] = True
             if p.event_port:
-                server = await asyncio.get_running_loop().create_server(
-                    lambda: _EventSender(self.tv, *self._keys("Events-Salt", "Events-Write-Encryption-Key",
-                                                              "Events-Read-Encryption-Key")), "127.0.0.1", 0)
-                self.servers.append(server)
-                reply["eventPort"] = server.sockets[0].getsockname()[1]
+                port = _free_port()
+                reply["eventPort"] = port
+                if p.event_port_delay:
+                    self.tasks.append(asyncio.ensure_future(self._events_later(port, p.event_port_delay)))
+                else:
+                    await self._events(port)
         answered = []
         for stream in streams:
             if stream.get("type") == 96:
                 self.audio = True
                 answered.append({"type": 96, "dataPort": 7001, "controlPort": 7002, "streamID": 1})
             elif stream.get("type") == 110:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                if p.video_buffer:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, p.video_buffer)
+                sock.bind(("127.0.0.1", 0))
                 server = await asyncio.start_server(
-                    lambda r, w, sid=stream["streamConnectionID"]: self._video(r, w, sid), "127.0.0.1", 0)
+                    lambda r, w, sid=stream["streamConnectionID"]: self._video(r, w, sid), sock=sock,
+                    limit=p.video_buffer or 2 ** 16)  # what the reader holds besides the socket's buffer
                 if p.refuse_video_connection:
                     port = server.sockets[0].getsockname()[1]
                     server.close()
@@ -262,6 +319,16 @@ class _Handler(AirPlayServerAuth):
         if answered:
             reply["streams"] = answered
         return self._answer(request, 200, reply)
+
+    async def _events(self, port: int) -> None:
+        server = await asyncio.get_running_loop().create_server(
+            lambda: _EventSender(self.tv, *self._keys("Events-Salt", "Events-Write-Encryption-Key",
+                                                      "Events-Read-Encryption-Key")), "127.0.0.1", port)
+        self.servers.append(server)
+
+    async def _events_later(self, port: int, seconds: float) -> None:
+        await asyncio.sleep(seconds)
+        await self._events(port)
 
     def _keys(self, salt: str, output_info: str, input_info: str) -> tuple[bytes, bytes]:
         return hkdf_expand(salt, output_info, self.shared_key), hkdf_expand(salt, input_info, self.shared_key)
@@ -278,13 +345,22 @@ class _Handler(AirPlayServerAuth):
         key = hkdf_expand(f"DataStream-Salt{stream_id}", "DataStream-Output-Encryption-Key", self.shared_key)
         cipher = Chacha20Cipher8byteNonce(key, key)
         params = b""
+        self.tv.video_writers.append(writer)
+        p = self.tv.profile
+        began = time.perf_counter()
+        read = 0
         try:
             while True:
+                if p.stall_after is not None and len(received.frames) >= p.stall_after:
+                    await asyncio.sleep(3600)  # stuck, with the connection open
                 header = await reader.readexactly(128)
                 size, kind, flags = struct.unpack_from("<IBB", header)
                 timestamp = struct.unpack_from("<Q", header, 8)[0]
                 payload = await reader.readexactly(size) if size else b""
                 arrived = time.perf_counter_ns()
+                read += 128 + size
+                if p.read_kbps:  # no faster than that
+                    await asyncio.sleep(max(0.0, began + read * 8 / (p.read_kbps * 1000) - time.perf_counter()))
                 if kind == 1:
                     width, height = struct.unpack_from("<ff", header, 16)
                     if header[6:8] != b"\x16\x01" or struct.unpack_from("<ff", header, 40) != (width, height):
@@ -323,7 +399,7 @@ class _Handler(AirPlayServerAuth):
                     received.heartbeats += 1
                 else:
                     received.errors.append(f"packet type {kind}")
-        except (asyncio.IncompleteReadError, ConnectionError):
+        except (asyncio.IncompleteReadError, ConnectionError, asyncio.CancelledError):
             pass
         except Exception as ex:  # pylint: disable=broad-except
             received.errors.append(repr(ex))
@@ -356,6 +432,12 @@ class _Handler(AirPlayServerAuth):
         if self.ntp is not None:
             self.ntp.transport.close()
             self.ntp = None
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
 
 
 class _Connection(BasicHttpServer):
@@ -407,6 +489,10 @@ class FakeMirrorTV:
         self.records = 0
         self.teardowns = 0
         self.info_encrypted: Optional[bool] = None
+        self.info_requests = 0
+        self.user_agents: set[str] = set()
+        self.video_writers: list[asyncio.StreamWriter] = []
+        self.display_id = str(uuid.uuid4()).upper()  # a display's own UUID, as each TV makes one up
 
     async def start(self) -> "FakeMirrorTV":
         self.server, self.port = await http_server(lambda: _Connection(self), "127.0.0.1")
@@ -419,6 +505,14 @@ class FakeMirrorTV:
                 conn.transport.close()
         if self.server is not None:
             self.server.close()
+
+    def end_mirroring(self) -> None:
+        """Someone ends mirroring on the TV: it closes its control and video connections at once."""
+        for conn in self.connections:
+            if conn.transport is not None:
+                conn.transport.close()
+        for writer in self.video_writers:
+            writer.close()
 
     def reconfigure(self, **changes) -> None:
         self.profile = dataclasses.replace(self.profile, **changes)

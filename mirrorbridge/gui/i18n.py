@@ -388,6 +388,25 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "La TV cerró la conexión del video después de {frames} fotogramas. Puede que no acepte este "
               "video: avisa de esta TV y manda mirrorbridge.log.",
     },
+    "mirror_video_stalled": {
+        "en": "The TV took none of the video for {seconds} s. Check the network between this PC and the TV (the "
+              "Wi-Fi signal, or use a cable), then try again.",
+        "es": "La TV no tomó nada del video durante {seconds} s. Revisa la red entre este equipo y la TV (la señal "
+              "Wi-Fi, o usa un cable) y vuelve a intentarlo.",
+    },
+    "mirror_no_picture": {
+        "en": "No picture came from the screen capture or the encoder ({encoder}) for {seconds} s.{errors}",
+        "es": "No llegó ninguna imagen de la captura de pantalla ni del codificador ({encoder}) durante {seconds} s."
+              "{errors}",
+    },
+    "mirror_no_frames": {
+        "en": "No video went to {device}: FFmpeg made no frame in {seconds} s.",
+        "es": "No se mandó video a {device}: FFmpeg no hizo ningún fotograma en {seconds} s.",
+    },
+    "mirror_retry_trailer": {
+        "en": "The TV dropped the video at once: trying again with the other ending of the H.264 header",
+        "es": "La TV cortó el video enseguida: se vuelve a intentar con el otro final de la cabecera H.264",
+    },
     "mirror_tv_ended": {"en": "The TV ended screen mirroring", "es": "La TV terminó la duplicación de pantalla"},
     "mirror_time_up": {
         "en": "Mirrored for {seconds} s, as asked",
