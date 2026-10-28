@@ -551,10 +551,18 @@ async def test_an_encoder_that_gives_nothing_ends_the_session(tv, monkeypatch):
 
 
 async def test_a_gpu_encoder_that_will_not_start_gives_way_to_x264(tv, monkeypatch, caplog):
-    """As a cast does when NVENC is out of sessions (here there is no NVIDIA GPU at all): the
-    session the TV set up goes on, with the CPU encoder."""
+    """As a cast does when NVENC is out of sessions: the session the TV set up goes on, with the
+    CPU encoder. (NVENC is made to fail here: on a PC with an NVIDIA GPU it would start.)"""
     _ffmpeg()
+    real_build_command = mirror_session.build_command
+
+    def nvenc_fails(ff, settings, **kw):
+        if kw["encoder"] == "h264_nvenc":
+            return [sys.executable, "-c", "import sys; sys.exit(1)"]
+        return real_build_command(ff, settings, **kw)
+
     monkeypatch.setattr(ffmpeg, "pick_encoder", lambda *args: "h264_nvenc")
+    monkeypatch.setattr(mirror_session, "build_command", nvenc_fails)
     states = []
     session = MirrorSession(tv.target(), SETTINGS, lambda s, m: states.append((s, str(m))), source=TEST_PATTERN,
                             seconds=1)
