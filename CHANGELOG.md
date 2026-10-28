@@ -55,6 +55,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   encryption, the network), as median and 95th percentile, with the frame rate FFmpeg delivers
   (and a warning when it falls short), what waits to be sent, and how often the TV asked for
   the time.
+- *More options* > *Debug* > *Latency meter*: a big clock (seconds and milliseconds, with the
+  tenths of a second as a row of cells) full screen on every screen, the virtual screen of
+  *Extend screen* too, all on one timer. Photograph the PC's screen and the TV together while
+  mirroring: the difference between the two clocks is the whole delay from screen to TV, which
+  the log cannot see. The last "Mirroring:" line of the log (frame rate, age of the frames,
+  lead) shows below the clock. Esc or a click closes every window.
 
 ### Changed
 

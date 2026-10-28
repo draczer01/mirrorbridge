@@ -203,9 +203,12 @@ out until it stops. The full window has the same *Mirror screen* button, under *
   appeared on the TV during its last test, and moved smoothly;
 * `mirrorbridge.log` after a few minutes of Mirror screen (*More options > Open log folder*):
   every 5 seconds it notes where the frames' time went;
-* how far behind the TV is: show a stopwatch on the PC's screen (one in a browser tab will
-  do), mirror it, and take one phone photo with the PC's screen and the TV in it. The
-  difference between the two times is the delay;
+* how far behind the TV is: while it mirrors, choose **More options > Debug > Latency meter**.
+  It shows a big clock (seconds and milliseconds, with the tenths as a row of cells) on every
+  screen, the virtual one of *Extend screen* too. Take a few phone photos with the PC's screen
+  and the TV in them: the difference between the two clocks is the delay. On the fastest
+  screen the clock is the most precise (a 200 Hz screen shows a new time every 5 ms). Esc or a
+  click closes it;
 * `%APPDATA%\MirrorBridge\mirroring.json`, which holds what worked for the TV.
 
 ### From the command line

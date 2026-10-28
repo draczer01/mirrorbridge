@@ -145,9 +145,12 @@ La ventana completa tiene el mismo botón, debajo de **Transmitir**.
   apareció en la TV la imagen de prueba en movimiento, y si se movía con fluidez;
 * `mirrorbridge.log` después de unos minutos de *Duplicar pantalla* (*Más opciones* > *Abrir
   carpeta de registros*): cada 5 segundos anota en qué se fue el tiempo de los cuadros;
-* cuánto se atrasa la TV: pon un cronómetro en la pantalla del equipo (uno en una pestaña del
-  navegador sirve), duplícala y saca una sola foto con el teléfono donde se vean la pantalla
-  del equipo y la TV. La diferencia entre los dos tiempos es el retardo;
+* cuánto se atrasa la TV: mientras duplica, elige **Más opciones** > **Depuración** >
+  **Medidor de latencia**. Muestra un reloj grande (segundos y milisegundos, con las décimas
+  como una fila de casillas) en cada pantalla, también en la virtual de *Extender pantalla*.
+  Saca unas fotos con el teléfono donde se vean la pantalla del equipo y la TV: la diferencia
+  entre los dos relojes es el retardo. En la pantalla más rápida el reloj es más preciso (una
+  de 200 Hz muestra una hora nueva cada 5 ms). Esc o un clic lo cierra;
 * `%APPDATA%\MirrorBridge\mirroring.json`, donde queda lo que funcionó con la TV.
 
 ### Desde la consola

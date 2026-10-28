@@ -95,6 +95,18 @@ _STRINGS: dict[str, dict[str, str]] = {
     "more": {"en": "More options", "es": "Más opciones"},
     "log_folder": {"en": "Open log folder", "es": "Abrir carpeta de registros"},
     "probe": {"en": "Test this TV…", "es": "Probar esta TV…"},
+    "debug_menu": {"en": "Debug", "es": "Depuración"},
+    "latency_meter": {"en": "Latency meter", "es": "Medidor de latencia"},
+    "latency_meter_hint": {
+        "en": "Mirror this screen, then take a photo with this screen and the TV in it: the difference between the "
+              "two clocks is the delay. Esc or a click closes it.",
+        "es": "Duplica esta pantalla y toma una foto donde salgan esta pantalla y la TV: la diferencia entre los dos "
+              "relojes es el retraso. Esc o un clic lo cierra.",
+    },
+    "latency_meter_no_stats": {
+        "en": "Not mirroring: this PC's own measurements show here while it mirrors.",
+        "es": "Sin duplicar: aquí aparecen las mediciones de este equipo mientras duplica la pantalla.",
+    },
     "language_menu": {"en": "Language", "es": "Idioma"},
     "quit": {"en": "Quit", "es": "Salir"},
     # Notifications
