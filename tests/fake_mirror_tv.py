@@ -81,8 +81,10 @@ class TvProfile:
     video_buffer: Optional[int] = None  # SO_RCVBUF of the video connection (None: the system's)
     read_kbps: Optional[float] = None  # read the video no faster than this
     stall_after: Optional[int] = None  # stop reading the video after this many frames, keeping it open
-    ptp: Optional[str] = None  # the PTP clock SETPEERS starts: "slave", "grandmaster", "silent" (fake_ptp.py)
+    ptp: Optional[str] = None  # the PTP clock SETPEERS starts: "slave", "grandmaster", "both", "silent" (fake_ptp.py)
     setpeers_status: int = 200  # what a SETPEERS the SDK would take is answered with (400: SetPeers failed)
+    ptp_video_status: Optional[int] = None  # the video stream's SETUP in a PTP session is answered with this
+    ptp_info: Optional[dict] = None  # GET /info's PTPInfo
 
 
 TCL = TvProfile()
@@ -132,6 +134,7 @@ class _EventSender(AbstractHAPChannel):
 
     def connection_made(self, transport) -> None:
         super().connection_made(transport)
+        self.tv.event_ports.append(transport.get_extra_info("sockname")[1])
         body = plistlib.dumps({"type": "updateInfo", "value": {"screenStreamState": "ready"}},
                               fmt=plistlib.FMT_BINARY)
         self.send(b"POST /command RTSP/1.0\r\nCSeq: 1\r\nContent-Type: application/x-apple-binary-plist\r\n"
@@ -252,6 +255,8 @@ class _Handler(AirPlayServerAuth):
             "statusFlags": 4,
             "deviceID": "AA:BB:CC:DD:EE:FF",
         }
+        if p.ptp_info is not None:
+            info["PTPInfo"] = p.ptp_info
         if p.displays_before_setup or self.mirror:
             info["displays"] = [{"uuid": self.tv.display_id, "widthPixels": p.width, "heightPixels": p.height,
                                  "width": p.width, "height": p.height, "maxFPS": p.max_fps, "features": 30,
@@ -276,6 +281,9 @@ class _Handler(AirPlayServerAuth):
             return self._answer(request, 455)
         if p.audio_first and 110 in types and not self.audio and 96 not in types[:types.index(110)]:
             return self._answer(request, 400)
+        if p.ptp_video_status and 110 in types and (body if "sessionUUID" in body else self.mirror).get(
+                "timingProtocol") == "PTP":
+            return self._answer(request, p.ptp_video_status)
         if "sessionUUID" in body:
             ordering = "media-first" if streams else "control-first"
             if ordering in p.refuse or not body.get("isScreenMirroringSession"):
@@ -535,6 +543,7 @@ class FakeMirrorTV:
         self.setpeers: list[tuple[str, bytes]] = []  # (Content-Type, body) of each SETPEERS
         self.peers: list = []  # what the last SETPEERS it took named
         self.ptp: Optional[FakePtp] = None  # its PTP clock, once ptp_ports() opened it
+        self.event_ports: list[int] = []  # the port of each event channel the sender opened
 
     def ptp_ports(self) -> tuple[int, int]:
         """The UDP ports of its PTP clock (event, general), opened at the first call."""

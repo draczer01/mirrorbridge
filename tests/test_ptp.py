@@ -13,6 +13,8 @@ import socket
 import struct
 import sys
 import threading
+import types
+from collections import Counter
 
 import pytest
 
@@ -23,7 +25,8 @@ from mirrorbridge import ffmpeg
 from mirrorbridge.config import Settings
 from mirrorbridge.mirror import TEST_PATTERN, MirrorSession, clock, negotiation, profiles, ptp
 from mirrorbridge.mirror.negotiation import MEDIA_FIRST, NTP, PTP, Negotiator, Plan
-from mirrorbridge.mirror.ptp import ANNOUNCE, DELAY_REQ, DELAY_RESP, FOLLOW_UP, SIGNALING, SYNC, PtpNode
+from mirrorbridge.mirror.ptp import (ANNOUNCE, DELAY_REQ, DELAY_RESP, FOLLOW_UP, PDELAY_RESP, PDELAY_RESP_FOLLOW_UP,
+                                     SIGNALING, SYNC, PtpNode)
 
 SETTINGS = Settings(encoder="libx264", framerate=30, video_bitrate_kbps=1500, output_height=360)
 IDENTITY = ptp.ClockIdentity(0x7EDC_BA98_7654_3210)
@@ -134,6 +137,15 @@ def test_delay_resp_says_when_the_request_came_and_whose_it_was():
     assert ptp.read_timestamp(answer, 34) == 1_234_567_890_123
 
 
+def test_the_log_gives_corrections_in_ns_and_names_each_type_apart():
+    # An Apple Follow_Up's correctionField: 2^-16 ns, so 24.990916 ms.
+    message = bytearray(ptp.follow_up(IDENTITY, 1, clock.NS))
+    struct.pack_into(">q", message, 8, 0x17D54C40000)
+    assert "correction 24990916 ns" in ptp.describe(bytes(message))
+    assert ptp._per_type(Counter({ptp.UNREADABLE: 1, 4: 2, 15: 3, SYNC: 4})) == (  # pylint: disable=protected-access
+        "unreadable 1, Sync 4, type 4 2, type 15 3")
+
+
 @pytest.mark.parametrize("ns", [0, 1, 999_999_999, 123 * clock.NS + 456_789, 4_000_000 * clock.NS + 1,
                                 (2 ** 32 - 1) * clock.NS + 999_999_999])
 def test_ptp_time_is_the_instant_video_headers_carry(ns):
@@ -217,11 +229,17 @@ async def test_cadence_sync_8_a_second_announce_and_signaling_as_set(peer, monke
         assert _fields(peer.of_type(ANNOUNCE)[0][4])[12] == -2  # logMessageInterval: 250 ms
     else:
         assert 2 <= announces <= 4 and 2 <= peer.rate(SIGNALING, 3.0) * 3 <= 4
+    # The second Announce and Signaling a whole interval after the first, not half of one.
+    for kind, interval in ((ANNOUNCE, int(announce_ms or 1000)), (SIGNALING, 1000)):
+        times = [when for _, _, _, when, _ in peer.of_type(kind)]
+        if kind == ANNOUNCE or not signaling:
+            assert times[1] - times[0] > 0.7 * interval * 1_000_000, ptp.NAMES[kind]
     # Follow_Up says when the Sync of the same number left: just before it came.
     ((_, _, _, came, _),) = [entry for entry in peer.of_type(SYNC) if _fields(entry[4])[10] == 5]
     (follow_up,) = [entry[4] for entry in peer.of_type(FOLLOW_UP) if _fields(entry[4])[10] == 5]
     assert 0 < came - ptp.read_timestamp(follow_up, 34) < 50_000_000
-    assert "PTP a second: sent Sync" in summary and "Sync every ms p50/p95/max 12" in summary
+    assert "PTP a second (over " in summary and "s): sent Sync" in summary
+    assert "Sync every ms p50/p95/max 12" in summary
 
 
 @pytest.mark.parametrize("load", [False, True])
@@ -239,7 +257,7 @@ async def test_a_slave_finds_our_clock_within_a_millisecond_on_loopback(node, pe
     try:
         peer.begin("slave")
         node.add_peer("127.0.0.1", peer.ports)
-        assert await node.wait_ready("127.0.0.1", 3.0) == ""
+        assert await node.wait_ready("127.0.0.1", 1.0) == ""
         await _until(peer, lambda f: len(f.offsets) >= 16)
     finally:
         stop.set()
@@ -251,7 +269,7 @@ async def test_a_slave_finds_our_clock_within_a_millisecond_on_loopback(node, pe
     else:
         assert abs(peer.median_offset_ms) < 1.0
     summary = node.summary()
-    assert "Delay_Req after our Sync ms p50/p95/max none" not in node.totals()
+    assert "Delay_Req after our latest Sync ms p50/p95/max none" not in node.totals()
     assert "127.0.0.1 follows our clock since" in summary and f"Delay_Req from port {peer.ports[0]}" in summary
     assert "it announces grandmaster 1122334455660008, priority1 248" in summary and "should follow our clock" in summary
 
@@ -277,6 +295,37 @@ async def test_sessions_share_one_node_and_the_last_one_closes_it():
     for port in ports:  # free again
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.bind(("127.0.0.1", port))
+
+
+async def test_a_port_another_program_has_on_all_addresses_is_in_use_too():
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as taken:
+        taken.bind(("0.0.0.0", 0))  # as Dante or a PTP tool takes 319
+        port = taken.getsockname()[1]
+        with pytest.raises(ptp.PtpUnavailable) as caught:
+            PtpNode.acquire("127.0.0.1", (port, 0))
+    assert caught.value.kind == ptp.IN_USE and caught.value.port == port
+
+
+def test_exclusive_use_is_asked_for_before_binding_and_never_reuse(monkeypatch):
+    calls = []
+
+    class Sock:
+        def __init__(self, *args) -> None:
+            calls.append(("socket", *args))
+
+        def __getattr__(self, name):
+            return lambda *args: calls.append((name, *args))
+
+    fake = types.SimpleNamespace(socket=Sock, AF_INET=2, SOCK_DGRAM=2, SOL_SOCKET=0xFFFF, SO_EXCLUSIVEADDRUSE=-5,
+                                 SO_REUSEADDR=4)
+    monkeypatch.setattr(ptp, "socket", fake)
+    ptp._udp_socket("127.0.0.1", 319)  # pylint: disable=protected-access
+    assert [call[0] for call in calls] == ["socket", "setsockopt", "bind", "settimeout"]
+    assert calls[1] == ("setsockopt", 0xFFFF, -5, 1) and calls[2] == ("bind", ("127.0.0.1", 319))
+    del fake.SO_EXCLUSIVEADDRUSE  # not Windows
+    calls.clear()
+    ptp._udp_socket("127.0.0.1", 319)  # pylint: disable=protected-access
+    assert [call[0] for call in calls] == ["socket", "bind", "settimeout"]
 
 
 async def test_a_port_in_use_or_not_allowed_is_said_so(monkeypatch):
@@ -343,12 +392,101 @@ async def test_a_better_grandmaster_is_told_apart_and_not_followed(node, peer, c
     assert "(the first time): better than ours: it wants to be the grandmaster" in caplog.text
 
 
-async def test_a_silent_peer_is_not_followed(node, peer):
+async def test_a_silent_peer_is_not_followed(node, peer, monkeypatch):
+    original_recv = node._recvfrom  # pylint: disable=protected-access
+    resets = []
+
+    def unreachable(sock):  # Windows: our Syncs to a port of the TV's that nothing listens on
+        if sock is node._event and len(resets) < 3:  # pylint: disable=protected-access
+            resets.append(sock)
+            raise ConnectionResetError(10054, "An existing connection was forcibly closed by the remote host")
+        return original_recv(sock)
+
+    monkeypatch.setattr(node, "_recvfrom", unreachable)
     peer.begin("silent")
     node.add_peer("127.0.0.1", peer.ports)
-    assert await node.wait_ready("127.0.0.1", 0.5) == (
-        "no Delay_Req or Pdelay_Req from the TV within 0.5 s (it sent nothing on UDP 319-320)")
+    why = await node.wait_ready("127.0.0.1", 0.5)
+    assert why.startswith("no Delay_Req or Pdelay_Req from the TV within 0.5 s (it sent nothing on UDP 319-320; "
+                          "3 ICMP port unreachable (ConnectionResetError) came back for what we sent it")
+    assert "a firewall may keep its packets out" in why and why.endswith("or from 320 to 320)")
     assert node.better_for_ns("127.0.0.1") is None
+    # Each kind of error on its own, a second and in all.
+    label = f"receiving on our UDP {node.ports[0]}: ICMP port unreachable (ConnectionResetError)"
+    summary = node.summary()
+    assert f"errors a second {label} " in summary and f"errors {label} 3" in summary
+    assert f"errors {label} 3" in node.totals()
+
+
+async def test_a_tv_that_follows_us_and_announces_a_better_clock_is_not_kept(node, peer, caplog):
+    caplog.set_level(logging.INFO, "mirrorbridge")
+    peer.begin("both")
+    node.add_peer("127.0.0.1", peer.ports)
+    why = await node.wait_ready("127.0.0.1", 1.0)
+    assert why.startswith("the TV announces a better clock than ours (grandmaster 1122334455660008, priority1 64")
+    assert why.endswith("for 1 s, although it sent Delay_Req") and node.locked("127.0.0.1")
+    (record,) = [r for r in caplog.records if "announces grandmaster" in r.getMessage()]
+    assert record.levelno == logging.WARNING and record.getMessage().endswith(", although it follows our clock")
+
+
+async def test_one_that_follows_is_watched_to_the_end_of_the_wait(node, peer):
+    peer.begin("slave")
+    node.add_peer("127.0.0.1", peer.ports)
+    started = clock.now_ns()
+    assert await node.wait_ready("127.0.0.1", 1.0) == ""
+    assert clock.now_ns() - started >= clock.NS and node.locked("127.0.0.1")
+
+
+async def test_delay_resp_goes_to_the_general_port_whatever_port_the_request_came_from(node, caplog):
+    caplog.set_level(logging.INFO, "mirrorbridge")
+    peer = FakePtp(requests_from="other")
+    try:
+        peer.begin("slave")
+        node.add_peer("127.0.0.1", peer.ports)
+        assert await node.wait_ready("127.0.0.1", 0.5) == ""
+        await _until(peer, lambda f: len(f.offsets) >= 4)
+    finally:
+        peer.stop()
+    answers = peer.of_type(DELAY_RESP)
+    assert answers and {(port, source) for _, port, source, _, _ in answers} == {
+        (peer.ports[1], ("127.0.0.1", node.ports[1]))}
+    assert not [entry for entry in peer.received if entry[1] == peer.other_port] and peer.errors == []
+    text = caplog.text
+    assert f"PTP: first Delay_Req from 127.0.0.1:{peer.other_port} (on our UDP {node.ports[0]})" in text
+    assert "its first Delay_Req came" in text and f"after it was added, from port {peer.other_port}" in text
+    assert f"Delay_Req from port {peer.other_port} (" in node.summary()
+
+
+async def test_a_pdelay_req_is_answered_and_counted_on_its_own(node, peer):
+    peer.begin("silent")
+    node.add_peer("127.0.0.1", peer.ports)
+    sent = peer.pdelay_req(77, ("127.0.0.1", node.ports[0]))
+    assert await node.wait_locked("127.0.0.1", 3.0)
+    await _until(peer, lambda f: f.of_type(PDELAY_RESP) and f.of_type(PDELAY_RESP_FOLLOW_UP))
+    ((_, port, source, came, answer),) = peer.of_type(PDELAY_RESP)
+    ((_, follow_port, follow_source, _, follow_up),) = peer.of_type(PDELAY_RESP_FOLLOW_UP)
+    assert (port, source) == (peer.ports[0], ("127.0.0.1", node.ports[0]))  # event to event
+    assert (follow_port, follow_source) == (peer.ports[1], ("127.0.0.1", node.ports[1]))  # general to general
+    whose = fake_ptp.CLOCK_ID.to_bytes(8, "big") + struct.pack(">H", fake_ptp.PORT_NUMBER)
+    for message, length in ((answer, 54), (follow_up, 54)):
+        assert len(message) == length and _fields(message)[10] == 77 and message[44:54] == whose
+    assert sent <= ptp.read_timestamp(answer, 34) <= ptp.read_timestamp(follow_up, 34) <= came
+    summary = node.summary()
+    assert "sent no Delay_Req, only Pdelay_Req" in summary and f"Pdelay_Req from port {peer.ports[0]} (1)" in summary
+    assert "follows our clock since" not in summary
+    assert "Delay_Req after our latest Sync ms p50/p95/max none" in node.totals()  # peer delay: no Sync's lag
+
+
+def test_delay_req_lag_is_measured_to_the_latest_sync_before_it():
+    peer = ptp._Peer("192.0.2.1", 319, 320)  # pylint: disable=protected-access
+    assert peer.since_sync(1000) is None
+    peer.syncs.extend([100, 225, 350])
+    assert (peer.since_sync(50), peer.since_sync(300), peer.since_sync(480)) == (None, 75, 130)
+
+
+async def test_the_first_window_counts_from_start_window(node):
+    node._counts.sent[SYNC] += 400  # pylint: disable=protected-access
+    node.start_window()
+    assert node.summary().startswith("PTP a second (over 0.0 s): sent nothing; received nothing")
 
 
 # -- SETUP and SETPEERS ---------------------------------------------------------------------------------------
@@ -458,9 +596,15 @@ async def test_a_ptp_session_end_to_end(tv, tmp_path, monkeypatch, caplog, timel
     assert profiles.load("fake-tv") is None
     text = caplog.text
     assert "SETPEERS ['127.0.0.1', '127.0.0.1']: 200" in text and "127.0.0.1 follows our clock: its first Delay_Req" in text
-    assert "PTP SETUP answered without a ClockID, kept" in text and "PTP a second: sent Sync" in text
+    assert "PTP SETUP answered without a ClockID, kept" in text and "s): sent Sync" in text
     assert "; PTP: sent Sync" in text and report.ptp.startswith("sent Sync")
-    assert "PTP timing (mirror --timing, MIRRORBRIDGE_TIMING): the TV must follow our clock within 3 s" in text
+    assert "thread switch interval 1 ms (MIRRORBRIDGE_SWITCH_INTERVAL_MS), PTP timing (mirror --timing, " \
+           "MIRRORBRIDGE_TIMING): the TV must follow our clock within 3 s" in text
+    assert "The TV's GET /info has no PTPInfo" in text
+    # The first window's figures a second count from the session's start (FFmpeg's included), not
+    # from before SETUP: the lock wait alone takes 3 s.
+    first = next(line for line in text.splitlines() if "PTP a second (over " in line)
+    assert float(first.split("PTP a second (over ")[1].split(" s)")[0]) < 2 + ptp.lock_seconds_from_env()
 
 
 def _decode(ff, stream, tmp_path):
@@ -489,14 +633,21 @@ async def test_the_default_ntp_session_is_as_it_was(tv, monkeypatch):
     assert profiles.load("fake-tv") is not None
 
 
-async def test_the_environment_asks_for_ptp_and_the_command_line_for_ntp(tv, monkeypatch):
-    tv.reconfigure(ptp="slave")
+async def test_the_environment_asks_for_ptp_and_the_command_line_for_ntp(tv, monkeypatch, caplog):
+    caplog.set_level(logging.INFO, "mirrorbridge")
+    tv.reconfigure(ptp="slave", ptp_info={"ClockID": 1, "Peers": []})
     monkeypatch.setenv("MIRRORBRIDGE_TIMING", "ptp")
+    monkeypatch.setenv("MIRRORBRIDGE_PTP_LOCK_S", "0.5")
     session = await _mirror(tv, seconds=0.5)
     assert session.report.established.plan.timing == PTP
+    assert "The TV's GET /info has PTPInfo: {'ClockID': 1, 'Peers': []}" in caplog.text
     tv.setups.clear()
+    caplog.clear()
+    monkeypatch.setenv("MIRRORBRIDGE_SWITCH_INTERVAL_MS", "2")
     session = await _mirror(tv, seconds=0.5, timing="ntp")
     assert session.report.established.plan.timing == NTP and tv.setups[-2]["timingProtocol"] == "NTP"
+    # The switch interval applies to NTP sessions too, and the log says so.
+    assert "thread switch interval 2 ms (MIRRORBRIDGE_SWITCH_INTERVAL_MS), NTP timing" in caplog.text
 
 
 async def test_udp_319_in_use_means_ntp_and_no_ptp_setup(tv, monkeypatch, caplog):
@@ -513,18 +664,33 @@ async def test_udp_319_in_use_means_ntp_and_no_ptp_setup(tv, monkeypatch, caplog
     assert caplog.text.count("PTP timing not possible") == 1 and session.report.steps["ptp"] == ptp.IN_USE
 
 
-@pytest.mark.parametrize("mode, why", [
-    ("silent", "no Delay_Req or Pdelay_Req from the TV within 1 s"),
-    ("grandmaster", "the TV announces a better clock than ours (grandmaster 1122334455660008, priority1 64"),
+@pytest.mark.parametrize("mode, why, then", [
+    ("silent", "no Delay_Req or Pdelay_Req from the TV within 1 s", "or from 320 to 320)"),
+    ("grandmaster", "the TV announces a better clock than ours (grandmaster 1122334455660008, priority1 64",
+     "and sent no Delay_Req within 1 s"),
+    ("both", "the TV announces a better clock than ours (grandmaster 1122334455660008, priority1 64",
+     "for 1 s, although it sent Delay_Req"),
 ])
-async def test_a_tv_that_does_not_follow_gets_ntp_on_a_fresh_pair_verify(tv, monkeypatch, caplog, mode, why):
+async def test_a_tv_that_does_not_follow_gets_ntp_on_a_fresh_pair_verify(tv, monkeypatch, caplog, mode, why, then):
     caplog.set_level(logging.INFO, "mirrorbridge")
     monkeypatch.setenv("MIRRORBRIDGE_PTP_LOCK_S", "1")
     tv.reconfigure(ptp=mode)
     session = await _mirror(tv, seconds=1, timing="ptp")
     est = session.report.established
     assert session.error is None and est.plan.timing == NTP and est.ptp_answered and est.timeline_id == 0
-    assert any(note.startswith(f"PTP timing did not work ({why}") for note in est.fallbacks)
+    assert [note for note in est.fallbacks if note.startswith(f"PTP timing did not work ({why}")
+            and note.endswith(f"{then}): NTP on a fresh pair-verify")]
+    _fell_back(tv, session)
+
+
+async def test_a_stream_setup_refused_under_ptp_means_ntp_too(tv, caplog):
+    caplog.set_level(logging.INFO, "mirrorbridge")
+    tv.reconfigure(ptp="slave", ptp_video_status=500)
+    session = await _mirror(tv, seconds=1, timing="ptp")
+    est = session.report.established
+    assert session.error is None and est.plan.timing == NTP and est.ptp_answered and est.timeline_id == 0
+    assert est.fallbacks[0] == "PTP timing did not work (setup video answered 500): NTP on a fresh pair-verify"
+    assert tv.setpeers == [] and tv.ptp.mode == ""  # SETPEERS never came
     _fell_back(tv, session)
 
 
@@ -546,6 +712,7 @@ def _fell_back(tv, session) -> None:
     assert len(tv.connections) == 3 and tv.connections[1].closed and tv.setups[-2]["timingProtocol"] == "NTP"
     assert [s["timingProtocol"] for s in tv.setups if "timingProtocol" in s] == ["PTP", "PTP", "NTP"] and tv.records == 1
     assert tv.ntp_answers and set(tv.videos[-1].timelines) == {0} and session.report.ptp
+    assert session.report.established.event_port in tv.event_ports  # the NTP session's event channel opened
     assert profiles.load("fake-tv").timing == NTP  # what worked is saved, as ever: NTP
 
 

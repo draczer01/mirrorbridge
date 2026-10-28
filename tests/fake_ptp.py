@@ -9,12 +9,16 @@ Once begun (as a TV's clock starts on SETPEERS), it is one of:
   offset it finds is pure error.
 * "grandmaster": a clock that insists on being the best: it announces priority1 64 every 250 ms
   to where the sender's general messages come from, and never asks for the time.
+* "both": a slave that, once it has sent its first Delay_Req, also announces priority1 64 as
+  the grandmaster does: it follows, and says its own clock is the better one.
 * "silent": it hears everything and says nothing.
 
-It records what came, from where, and when, either way. Like fake_mirror_tv.py it reads and
-writes the wire on its own (struct offsets), not with mirrorbridge.mirror.ptp, so that the two
-sides check each other. Its sockets are on ephemeral ports of 127.0.0.1: tests never bind 319
-or 320.
+A slave sends its Delay_Req from its event socket, as a Mac does, or (requests_from="other")
+from a third socket on a port of its own, as an iPhone was seen to; pdelay_req() sends a
+Pdelay_Req. It records what came, on which of its sockets, from where, and when, either way.
+Like fake_mirror_tv.py it reads and writes the wire on its own (struct offsets), not with
+mirrorbridge.mirror.ptp, so that the two sides check each other. Its sockets are on ephemeral
+ports of 127.0.0.1: tests never bind 319 or 320.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ import time
 from typing import Callable, Optional
 
 SYNC, DELAY_REQ, FOLLOW_UP, DELAY_RESP, ANNOUNCE, SIGNALING = 0x0, 0x1, 0x8, 0x9, 0xB, 0xC
+PDELAY_REQ, PDELAY_RESP, PDELAY_RESP_FOLLOW_UP = 0x2, 0x3, 0xA
 HEADER = struct.Struct(">BBHBBHqI8sHHBb")
 NS = 1_000_000_000
 CLOCK_ID = 0x1122334455660008
@@ -58,14 +63,18 @@ def announce(sequence: int, priority1: int, priority2: int, log_interval: int) -
 class FakePtp:
     """Two sockets (event, general) and a thread that reads both; see the module's docstring."""
 
-    def __init__(self, ip: str = "127.0.0.1") -> None:
+    def __init__(self, ip: str = "127.0.0.1", requests_from: str = "event") -> None:
         self.ip = ip
         self.mode = ""  # "" until begin()
         self.event = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.event.bind((ip, 0))
         self.general = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.general.bind((ip, 0))
+        self.other = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # neither: where Delay_Req may come from
+        self.other.bind((ip, 0))
         self.ports = (self.event.getsockname()[1], self.general.getsockname()[1])
+        self.other_port = self.other.getsockname()[1]
+        self.requests_from = self.other if requests_from == "other" else self.event
         self.received: list[tuple[int, int, tuple, int, bytes]] = []  # (type, our port, from, when, message)
         self.sent_delay_reqs: dict[int, int] = {}  # sequenceId -> t3
         self.syncs: dict[int, tuple[int, tuple]] = {}  # sequenceId -> (t2, from)
@@ -84,13 +93,14 @@ class FakePtp:
     # -- control ------------------------------------------------------------------------------------
 
     def begin(self, mode: str) -> None:
-        """The TV's clock starts (SETPEERS named the sender): `mode` is slave, grandmaster or silent."""
+        """The TV's clock starts (SETPEERS named the sender): `mode` is slave, grandmaster, both
+        or silent."""
         if self.mode:
             return
         self.mode = mode
         if mode == "slave":
             self._threads.append(threading.Thread(target=self._announce, args=(248, 248, 0, 1), daemon=True))
-        elif mode == "grandmaster":
+        elif mode in ("grandmaster", "both"):
             self._threads.append(threading.Thread(target=self._announce, args=(64, 64, -2, None), daemon=True))
         for thread in self._threads[1:]:
             thread.start()
@@ -102,6 +112,14 @@ class FakePtp:
                 thread.join(2)
         self.event.close()
         self.general.close()
+        self.other.close()
+
+    def pdelay_req(self, sequence: int, to: tuple) -> int:
+        """A Pdelay_Req (as an 802.1AS clock measures the way to its neighbour) from the event
+        socket to `to`; when it left."""
+        sent = time.perf_counter_ns()
+        self.event.sendto(header(PDELAY_REQ, 54, sequence, 5, 0) + stamp(sent) + bytes(10), to)
+        return sent
 
     def wait_for(self, done: Callable[["FakePtp"], bool], timeout: float) -> bool:
         """Block until done(self) (checked after each message), `timeout` s at most."""
@@ -140,7 +158,7 @@ class FakePtp:
     def _receive(self) -> None:
         while not self._stop.is_set():
             try:
-                readable, _, _ = select.select([self.event, self.general], [], [], 0.05)
+                readable, _, _ = select.select([self.event, self.general, self.other], [], [], 0.05)
             except (OSError, ValueError):
                 return
             for sock in readable:
@@ -165,7 +183,7 @@ class FakePtp:
         self.received.append((kind, sock.getsockname()[1], addr, now, data))
         if sock is self.general and kind in (ANNOUNCE, FOLLOW_UP, SIGNALING):
             self.master_general = addr
-        if self.mode != "slave":
+        if self.mode not in ("slave", "both"):
             return
         if kind == SYNC:
             self.syncs[sequence] = (now, addr)
@@ -178,7 +196,7 @@ class FakePtp:
 
     def _delay_req(self, sequence: int, master_event: tuple) -> None:
         sent = time.perf_counter_ns()  # t3, just before it leaves
-        self.event.sendto(header(DELAY_REQ, 44, sequence, 1, 0x7F) + stamp(sent), master_event)
+        self.requests_from.sendto(header(DELAY_REQ, 44, sequence, 1, 0x7F) + stamp(sent), master_event)
         self.sent_delay_reqs[sequence] = sent
         if self.locked_ns is None:
             self.locked_ns = sent
@@ -199,10 +217,10 @@ class FakePtp:
 
     def _announce(self, priority1: int, priority2: int, log_interval: int, count: Optional[int]) -> None:
         """Announce to where the sender's general messages come from, every 2^log_interval s,
-        `count` times (None: until stopped)."""
+        `count` times (None: until stopped); in "both" mode only once it has sent a Delay_Req."""
         sent = 0
         while not self._stop.is_set() and (count is None or sent < count):
-            target = self.master_general
+            target = self.master_general if self.mode != "both" or self.locked_ns is not None else None
             if target is not None:
                 self.general.sendto(announce(self._sequence, priority1, priority2, log_interval), target)
                 self._sequence = (self._sequence + 1) & 0xFFFF

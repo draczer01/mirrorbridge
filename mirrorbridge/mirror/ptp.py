@@ -87,6 +87,11 @@ KEEP = 20000  # samples kept for the totals (40 minutes of Delay_Req at 8 a seco
 IN_USE, BLOCKED, FAILED = "in use", "blocked", "failed"
 
 
+def name_of(kind: int) -> str:
+    """A message type's name for the log: "type 5" for a type PTP does not use."""
+    return NAMES.get(kind) or ("unreadable" if kind == UNREADABLE else f"type {kind}")
+
+
 def announce_ms_from_env() -> int:
     """MIRRORBRIDGE_PTP_ANNOUNCE_MS, for an experiment: how often to Announce (125-8000 ms).
     1000 unless set, as OwnTone and nqptp; Apple TVs and HomePods announce every 250."""
@@ -328,8 +333,8 @@ def describe(data: bytes) -> str:
              f"sequence {head.sequence}", f"interval {head.log_interval}", f"control {head.control}"]
     if (head.transport, head.version, head.domain) != (TRANSPORT_SPECIFIC, VERSION, DOMAIN):
         parts.append(f"transportSpecific {head.transport}, version {head.version}, domain {head.domain}")
-    if head.correction:
-        parts.append(f"correction {head.correction}")
+    if head.correction:  # in 2^-16 ns
+        parts.append(f"correction {head.correction / 65536:.0f} ns")
     try:
         if head.kind == ANNOUNCE:
             parts.append(parse_announce(data).describe())
@@ -408,34 +413,64 @@ class _Peer:
     added_ns: int = field(default_factory=now_ns)
     refs: int = 1
     locked: threading.Event = field(default_factory=threading.Event)
-    lock_ns: Optional[int] = None
+    lock_ns: Optional[int] = None  # when its first Delay_Req or Pdelay_Req came
     waiters: list = field(default_factory=list)  # (loop, asyncio.Event) of wait_locked()
-    next_announce: int = 0  # at the next tick, then every announce interval
-    next_signaling: int = 0
+    next_announce: Optional[int] = None  # when the next Announce is due (None: at the next tick)
+    next_signaling: Optional[int] = None
     announce_sequence: int = 0
     signaling_sequence: int = 0
-    last_sync_ns: Optional[int] = None  # when our last Sync to it left
-    delay_req_ports: Counter = field(default_factory=Counter)  # its source ports, with how many came
+    syncs: deque = field(default_factory=lambda: deque(maxlen=16))  # when our last Syncs to it left (T1)
+    first: dict = field(default_factory=dict)  # Delay_Req, Pdelay_Req: when the first came
+    # Delay_Req, Pdelay_Req: their source ports, with how many came from each.
+    request_ports: dict = field(default_factory=lambda: {DELAY_REQ: Counter(), PDELAY_REQ: Counter()})
     dataset: Optional[Dataset] = None  # what it announced last
     better_since: Optional[int] = None  # since when it announces a better grandmaster than ours
     better_last: int = 0
     better_hold_ns: int = 3 * NS  # after this without such an Announce, it is taken to have stopped
 
+    def since_sync(self, received: int) -> Optional[int]:
+        """How long after our latest Sync before it a Delay_Req came at `received` (None if no
+        Sync left before): it answers an earlier Sync, whatever its sequenceId."""
+        for sent in reversed(list(self.syncs)):  # the sending thread adds to it
+            if sent <= received:
+                return received - sent
+        return None
+
+
+def _next_due(due: Optional[int], interval: int, now: int) -> int:
+    """When a message that went `now` (due at `due`; None for the first) is due again: one
+    interval on, with no burst to catch up when the thread was held up."""
+    if due is None:
+        return now + interval
+    return max(due + interval, now + interval // 2)
+
 
 class _Counts:
-    """Messages per type, sent and received, for a window and in all; Delay_Req lag; Sync cadence."""
+    """Messages per type, sent and received, and errors, for a window and in all; Delay_Req's
+    lag behind our latest Sync; the Sync cadence."""
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.sent: Counter = Counter()
         self.received: Counter = Counter()
-        self.errors: Counter = Counter()
-        self.lag: deque = deque(maxlen=KEEP)  # ms from our last Sync to a Delay_Req
+        self.errors: Counter = Counter()  # (what, exception type, errno)
+        self.lag: deque = deque(maxlen=KEEP)  # ms from our latest Sync to a Delay_Req
         self.interval: deque = deque(maxlen=KEEP)  # ms between two Syncs
         self.late = 0
         self._window_lag: deque = deque(maxlen=KEEP)
         self._window_interval: deque = deque(maxlen=KEEP)
-        self._start, self._sent, self._received, self._late = now_ns(), Counter(), Counter(), 0
+        with self.lock:
+            self._restart(now_ns())
+
+    def _restart(self, now: int) -> None:
+        self._start, self._sent, self._received, self._errors, self._late = (
+            now, Counter(self.sent), Counter(self.received), Counter(self.errors), self.late)
+        self._window_lag.clear()
+        self._window_interval.clear()
+
+    def start_window(self) -> None:
+        with self.lock:
+            self._restart(now_ns())
 
     def add_lag(self, ns: int) -> None:
         with self.lock:
@@ -449,23 +484,40 @@ class _Counts:
             self.late += late
 
     def window(self) -> tuple:
-        """What came since the last call: (seconds, sent, received, lag, interval, late)."""
+        """What came since the window started: (seconds, sent, received, errors, lag, interval,
+        late); the next one starts now."""
         with self.lock:
             now = now_ns()
             window = ((now - self._start) / NS, self.sent - self._sent, self.received - self._received,
-                      list(self._window_lag), list(self._window_interval), self.late - self._late)
-            self._start, self._sent, self._received, self._late = now, Counter(self.sent), Counter(self.received), \
-                self.late
-            self._window_lag.clear()
-            self._window_interval.clear()
+                      self.errors - self._errors, list(self._window_lag), list(self._window_interval),
+                      self.late - self._late)
+            self._restart(now)
             return window
 
 
 def _per_type(counts: Counter, seconds: Optional[float] = None) -> str:
     items = sorted(counts.items(), key=lambda item: item[0])
     if seconds is None:
-        return ", ".join(f"{NAMES.get(kind, 'unreadable')} {count}" for kind, count in items) or "nothing"
-    return ", ".join(f"{NAMES.get(kind, 'unreadable')} {count / seconds:.1f}" for kind, count in items) or "nothing"
+        return ", ".join(f"{name_of(kind)} {count}" for kind, count in items) or "nothing"
+    return ", ".join(f"{name_of(kind)} {count / seconds:.1f}" for kind, count in items) or "nothing"
+
+
+def _error_label(key: tuple) -> str:
+    what, name, number = key
+    if name == "ConnectionResetError":  # how Windows passes on an ICMP port unreachable for what a socket sent
+        return f"{what}: ICMP port unreachable (ConnectionResetError)"
+    return f"{what}: {name}" + (f" {number}" if number is not None else "")
+
+
+def _per_error(counts: Counter, seconds: Optional[float] = None) -> str:
+    items = sorted(counts.items(), key=lambda item: _error_label(item[0]))
+    if seconds is None:
+        return ", ".join(f"{_error_label(key)} {count}" for key, count in items)
+    return ", ".join(f"{_error_label(key)} {count / seconds:.1f}" for key, count in items)
+
+
+def _ports(counts: Counter) -> str:
+    return ", ".join(f"{port} ({count})" for port, count in sorted(counts.items()))
 
 
 def _spread(values: list) -> str:
@@ -548,12 +600,19 @@ class PtpNode:
                 _LOGGER.warning("PTP: thread %s did not stop", thread.name)
         self._event.close()
         self._general.close()
-        _LOGGER.info("PTP: our clock stopped; in all: sent %s; received %s", _per_type(self._counts.sent),
-                     _per_type(self._counts.received))
+        with self._counts.lock:
+            errors = f"; errors {_per_error(self._counts.errors)}" if self._counts.errors else ""
+        _LOGGER.info("PTP: our clock stopped; in all: sent %s; received %s%s", _per_type(self._counts.sent),
+                     _per_type(self._counts.received), errors)
 
     @property
     def running(self) -> bool:
         return not self._stop.is_set() and all(thread.is_alive() for thread in self._threads)
+
+    def start_window(self) -> None:
+        """summary()'s next figures a second count from now (the session's first window, not
+        the setting up before it)."""
+        self._counts.start_window()
 
     # -- peers -------------------------------------------------------------------------------------
 
@@ -623,31 +682,46 @@ class PtpNode:
         return now - peer.better_since
 
     async def wait_ready(self, ip: str, seconds: float) -> str:
-        """Wait for `ip` to follow our clock, `seconds` at most. "" if it does; otherwise why not,
-        for the log: no Delay_Req in time, or a better grandmaster announced for `seconds`."""
+        """Wait for `ip` to follow our clock: "" when it sends a Delay_Req or Pdelay_Req within
+        `seconds` and does not announce a better grandmaster than ours for `seconds` either;
+        otherwise why not, for the log. A TV that follows is watched until the `seconds` are
+        over all the same (and on, while it announces a better clock), since such an Announce
+        may come after its first Delay_Req."""
+        end = now_ns() + round(seconds * NS)
         locked = await self.wait_locked(ip, seconds)
-        while locked:
+        while locked and ip in self._peers:
             better = self.better_for_ns(ip)
-            if better is None:
+            if better is not None and better >= seconds * NS:
+                break  # it follows us and announces a better clock all the while
+            left = end - now_ns()
+            if better is None and left <= 0:
                 return ""
-            if better >= seconds * NS:
-                break
-            await asyncio.sleep(0.1)  # it follows us and announces a better clock: which wins?
+            await asyncio.sleep(0.1 if better is not None else min(0.1, left / NS))
         peer = self._peers.get(ip)
         if peer is None:
             return "the TV was taken off"
-        announced = (f"the TV announces a better clock than ours ({peer.dataset.describe()})"
-                     if peer.dataset is not None and self.better_for_ns(ip) is not None else "")
-        if locked:
-            return f"{announced} for {seconds:g} s, although it sent Delay_Req"
-        heard = self._heard_from(ip)
-        if announced:
-            return f"{announced} and sent no Delay_Req within {seconds:g} s"
-        return f"no Delay_Req or Pdelay_Req from the TV within {seconds:g} s (it sent {heard})"
+        dataset = f" ({peer.dataset.describe()})" if peer.dataset is not None else ""
+        if locked:  # and a better clock announced for `seconds` on end
+            asked = name_of(min(peer.first, key=peer.first.get)) if peer.first else "Delay_Req"
+            return f"the TV announces a better clock than ours{dataset} for {seconds:g} s, although it sent {asked}"
+        if dataset and self.better_for_ns(ip) is not None:
+            return f"the TV announces a better clock than ours{dataset} and sent no Delay_Req within {seconds:g} s"
+        return (f"no Delay_Req or Pdelay_Req from the TV within {seconds:g} s (it sent {self._heard_from(ip)}"
+                f"{self._kept_out()})")
 
     def _heard_from(self, ip: str) -> str:
         kinds = sorted({kind for seen_ip, _, kind, _ in list(self._seen) if seen_ip == ip})  # the threads add to it
-        return ", ".join(NAMES.get(kind, "unreadable") for kind in kinds) or "nothing on UDP 319-320"
+        return ", ".join(name_of(kind) for kind in kinds) or "nothing on UDP 319-320"
+
+    def _kept_out(self) -> str:
+        """What may have kept the TV's Delay_Req from us, for the reason it did not follow."""
+        with self._counts.lock:
+            icmp = sum(count for (_, name, _), count in self._counts.errors.items() if name == "ConnectionResetError")
+        closed = (f"; {icmp} ICMP port unreachable (ConnectionResetError) came back for what we sent it, so nothing "
+                  f"listened on its UDP 319 or 320 then" if icmp else "")
+        return (f"{closed}; a firewall may keep its packets out: with no inbound rule for UDP 319-320, or for "
+                f"MirrorBridge, Windows Firewall lets in only what the TV sends from its port 319 to our 319, or "
+                f"from 320 to 320")
 
     # -- threads -----------------------------------------------------------------------------------
 
@@ -670,12 +744,12 @@ class PtpNode:
             except (TimeoutError, socket.timeout):
                 continue
             except ConnectionResetError as ex:  # Windows: an ICMP "port unreachable" for one of our sends
-                self._error(f"receiving on UDP {local_port}", ex)
+                self._error(f"receiving on our UDP {local_port}", ex)
                 continue
             except OSError as ex:
                 if self._stop.is_set():
                     break
-                self._error(f"receiving on UDP {local_port}", ex)
+                self._error(f"receiving on our UDP {local_port}", ex)
                 time.sleep(0.01)
                 continue
             try:
@@ -707,14 +781,16 @@ class PtpNode:
         self._count(self._counts.received, head.kind)
         if (ip, port, head.kind, local_port) not in self._seen:
             self._seen.add((ip, port, head.kind, local_port))
-            _LOGGER.info("PTP: first %s from %s:%d (on our UDP %d)%s: %s", NAMES.get(head.kind, f"type {head.kind}"),
-                         ip, port, local_port, "" if peer else ", not a TV we send to", describe(data))
+            _LOGGER.info("PTP: first %s from %s:%d (on our UDP %d)%s: %s", name_of(head.kind), ip, port, local_port,
+                         "" if peer else ", not a TV we send to", describe(data))
         if peer is None:
             return
         if head.kind in (DELAY_REQ, PDELAY_REQ):
-            peer.delay_req_ports[port] += 1
-            if peer.last_sync_ns is not None:
-                self._counts.add_lag(received - peer.last_sync_ns)
+            peer.request_ports[head.kind][port] += 1
+            peer.first.setdefault(head.kind, received)
+            lag = peer.since_sync(received) if head.kind == DELAY_REQ else None  # Pdelay_Req goes by no Sync
+            if lag is not None:
+                self._counts.add_lag(lag)
             self._lock_peer(peer, head.kind, port, received)
         elif head.kind == ANNOUNCE:
             self._announced(peer, port, head, data, received)
@@ -747,8 +823,11 @@ class PtpNode:
         else:
             peer.better_since = None
         if dataset != peer.dataset:
-            _LOGGER.info("PTP: %s:%d announces %s (%s): %s", peer.ip, port, dataset.describe(),
-                         "the first time" if peer.dataset is None else "a change", verdict(dataset, self.dataset))
+            # Loud for a TV that follows our clock and yet says that its own is better.
+            contrary = compare(dataset, self.dataset) < 0 and peer.locked.is_set()
+            _LOGGER.log(logging.WARNING if contrary else logging.INFO, "PTP: %s:%d announces %s (%s): %s%s", peer.ip,
+                        port, dataset.describe(), "the first time" if peer.dataset is None else "a change",
+                        verdict(dataset, self.dataset), ", although it follows our clock" if contrary else "")
             peer.dataset = dataset
 
     def _send_loop(self) -> None:
@@ -782,24 +861,24 @@ class PtpNode:
             return None
         now = now_ns()
         for peer in peers:
-            if now >= peer.next_announce:
+            if peer.next_announce is None or now >= peer.next_announce:
                 self._send(self._general, announce(self.identity, peer.announce_sequence, self.announce_log_interval),
                            (peer.ip, peer.general_port), ANNOUNCE)
                 peer.announce_sequence = (peer.announce_sequence + 1) & 0xFFFF
-                peer.next_announce = max(peer.next_announce + self.announce_ns, now + self.announce_ns // 2)
-            if self.signaling != "off" and now >= peer.next_signaling:
+                peer.next_announce = _next_due(peer.next_announce, self.announce_ns, now)
+            if self.signaling != "off" and (peer.next_signaling is None or now >= peer.next_signaling):
                 self._send(self._general, signaling(self.identity, peer.signaling_sequence, self.signaling),
                            (peer.ip, peer.general_port), SIGNALING)
                 peer.signaling_sequence = (peer.signaling_sequence + 1) & 0xFFFF
-                peer.next_signaling = max(peer.next_signaling + SIGNALING_NS, now + SIGNALING_NS // 2)
+                peer.next_signaling = _next_due(peer.next_signaling, SIGNALING_NS, now)
         sequence = self._sync_sequence
         self._sync_sequence = (sequence + 1) & 0xFFFF
         message = sync(self.identity, sequence)
         first = None
         for peer in peers:
             sent = now_ns()  # T1: just before the Sync leaves
+            peer.syncs.append(sent)
             self._send(self._event, message, (peer.ip, peer.event_port), SYNC)
-            peer.last_sync_ns = sent
             first = sent if first is None else first
             self._send(self._general, follow_up(self.identity, sequence, sent), (peer.ip, peer.general_port), FOLLOW_UP)
         return first
@@ -828,34 +907,45 @@ class PtpNode:
     # -- what happened -------------------------------------------------------------------------------
 
     def _peer_state(self, peer: _Peer) -> str:
-        if peer.lock_ns is not None:
-            ports = ", ".join(f"{port} ({count})" for port, count in sorted(peer.delay_req_ports.items()))
-            state = (f"{peer.ip} follows our clock since {(peer.lock_ns - peer.added_ns) / NS:.2f} s after it was "
-                     f"added, Delay_Req from port {ports}")
+        delay, pdelay = peer.request_ports[DELAY_REQ], peer.request_ports[PDELAY_REQ]
+        since = {kind: (first - peer.added_ns) / NS for kind, first in peer.first.items()}
+        if DELAY_REQ in since:
+            state = (f"{peer.ip} follows our clock since {since[DELAY_REQ]:.2f} s after it was added, Delay_Req from "
+                     f"port {_ports(delay)}")
+        elif PDELAY_REQ in since:
+            # Peer delay is measured by any 802.1AS clock, the grandmaster too: no proof that it follows.
+            state = (f"{peer.ip} sent no Delay_Req, only Pdelay_Req (since {since[PDELAY_REQ]:.2f} s after it was "
+                     f"added), which a clock sends whether it follows ours or not")
         else:
             state = f"{peer.ip} does not follow our clock (no Delay_Req), it sent {self._heard_from(peer.ip)}"
+        if pdelay:
+            state += f", Pdelay_Req from port {_ports(pdelay)}"
         if peer.dataset is not None:
             state += f"; it announces {peer.dataset.describe()}, {verdict(peer.dataset, self.dataset)}"
         return state
 
     def summary(self) -> str:
-        """For the session's stats line: messages a second since the last call, Delay_Req's lag
-        behind our Sync, how steadily the Syncs leave, then the totals and each TV's state."""
-        seconds, sent, received, lag, interval, late = self._counts.window()
+        """For the session's stats line: messages and errors a second since the last call (or
+        start_window()), Delay_Req's lag behind our latest Sync, how steadily the Syncs leave,
+        then the totals and each TV's state."""
+        seconds, sent, received, errors, lag, interval, late = self._counts.window()
         seconds = max(1e-9, seconds)
         with self._lock:
             peers = list(self._peers.values())
         with self._counts.lock:
             totals = f"in all: sent {_per_type(self._counts.sent)}; received {_per_type(self._counts.received)}"
-            errors = sum(self._counts.errors.values())
+            all_errors = Counter(self._counts.errors)
         parts = [
-            f"PTP a second: sent {_per_type(sent, seconds)}; received {_per_type(received, seconds)}",
-            f"Delay_Req after our Sync ms p50/p95/max {_spread(lag)}",
+            f"PTP a second (over {seconds:.1f} s): sent {_per_type(sent, seconds)}; "
+            f"received {_per_type(received, seconds)}",
+            f"Delay_Req after our latest Sync ms p50/p95/max {_spread(lag)}",
             f"Sync every ms p50/p95/max {_spread(interval)}, {late} more than {LATE_NS // 1_000_000} ms late",
-            totals,
         ]
         if errors:
-            parts.append(f"{errors} errors")
+            parts.append(f"errors a second {_per_error(errors, seconds)}")
+        parts.append(totals)
+        if all_errors:
+            parts.append(f"errors {_per_error(all_errors)}")
         parts += [self._peer_state(peer) for peer in peers]
         return "; ".join(parts)
 
@@ -864,12 +954,11 @@ class PtpNode:
         with self._counts.lock:
             lag, interval = list(self._counts.lag), list(self._counts.interval)
             parts = [f"sent {_per_type(self._counts.sent)}", f"received {_per_type(self._counts.received)}",
-                     f"Delay_Req after our Sync ms p50/p95/max {_spread(lag)}",
+                     f"Delay_Req after our latest Sync ms p50/p95/max {_spread(lag)}",
                      f"Sync every ms p50/p95/max {_spread(interval)}, {self._counts.late} more than "
                      f"{LATE_NS // 1_000_000} ms late"]
-            errors = sum(self._counts.errors.values())
-        if errors:
-            parts.append(f"{errors} errors")
+            if self._counts.errors:
+                parts.append(f"errors {_per_error(self._counts.errors)}")
         with self._lock:
             parts += [self._peer_state(peer) for peer in self._peers.values()]
         return "; ".join(parts)
