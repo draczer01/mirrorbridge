@@ -51,8 +51,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   the virtual screen, as a cast does, instead of the PC's main display: the TV works as a second
   screen a fraction of a second behind, for PowerPoint's Presenter View with the notes on the
   laptop and the slides on the TV, for example. The virtual screen is added before the TV is
-  asked (*Creating the virtual screen*), fitted into the TV's screen (up to 1080p; *Quality >
-  Resolution* does not apply, as for a cast), kept for the whole session, also when the session
+  asked (*Creating the virtual screen*), at the *Extended screen size* but 1080p at most (4K
+  is added at 1080p: shrinking 4K took 30 to 170 ms a frame on a real PC, past the TV's
+  lead), fitted into the TV's screen (*Quality > Resolution* does not apply, as for a cast),
+  kept for the whole session, also when the session
   is set up again or FFmpeg falls back to GDI capture or x264, and removed when the session ends,
   however it ends. If it goes away first (sleep), the session ends saying so; a missing or broken
   driver gets the same offer to install or fix it as a cast. *Test this TV* and `mirror --probe`

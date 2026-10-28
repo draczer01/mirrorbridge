@@ -163,7 +163,7 @@ async def test_extend_screen_mirrors_the_virtual_screen_and_removes_it_at_the_en
     session = MirrorSession(tv.target(), SETTINGS, _watch(states, casting, lambda: session, devices), seconds=1)
     await asyncio.wait_for(session.run(), 60)
 
-    assert driver.started() == [("start", 3840, 2160, 60)]  # the Extended screen size
+    assert driver.started() == [("start", 1920, 1080, 60)]  # the Extended screen size, 4K, but 1080p at most
     assert driver.ffmpegs() == [("ddagrab", VIRTUAL)]  # that monitor, not display 1 or the window
     cmd = driver.commands[0]
     assert _option(cmd, "-i").startswith("ddagrab=output_idx=1:framerate=25:")  # the virtual monitor's DXGI output
@@ -181,6 +181,12 @@ async def test_extend_screen_mirrors_the_virtual_screen_and_removes_it_at_the_en
     assert states[-1] == (State.STOPPED, "Mirrored for 1 s, as asked") and session.error is None
 
 
+@pytest.mark.parametrize("chosen, added", [("4k", "1080p"), ("1080p", "1080p"), ("720p", "720p")])
+def test_mirror_screen_adds_the_virtual_screen_at_1080p_at_most(chosen, added):
+    # Mirroring sends 1080p at most: a 4K screen would only be shrunk again on every frame.
+    assert mirror_session.extend_mode(chosen) == added
+
+
 @pytest.mark.parametrize("ending", ["stop", "tv"])
 async def test_the_virtual_screen_goes_when_the_session_is_stopped_or_the_tv_ends_it(tv, driver, ending):
     _ffmpeg()
@@ -189,7 +195,7 @@ async def test_the_virtual_screen_goes_when_the_session_is_stopped_or_the_tv_end
     session = MirrorSession(tv.target(), SETTINGS, _watch(states, casting), remember=False)
     task = asyncio.ensure_future(session.run())
     await asyncio.wait_for(casting.wait(), 30)
-    assert driver.size == (3840, 2160) and session.virtual_device == VIRTUAL
+    assert driver.size == (1920, 1080) and session.virtual_device == VIRTUAL
     if ending == "stop":
         await session.stop()
     else:
@@ -249,7 +255,7 @@ async def test_setting_up_again_for_the_other_avcc_ending_keeps_the_virtual_scre
     session = MirrorSession(tv.target(), SETTINGS, seconds=1)
     await asyncio.wait_for(session.run(), 60)
     assert session.error is None and session.report.retried and len(tv.videos) == 2 and tv.teardowns == 2
-    assert driver.events == [("start", 3840, 2160, 60), ("ffmpeg", "ddagrab", VIRTUAL), "stop ffmpeg",
+    assert driver.events == [("start", 1920, 1080, 60), ("ffmpeg", "ddagrab", VIRTUAL), "stop ffmpeg",
                              ("ffmpeg", "ddagrab", VIRTUAL), "stop ffmpeg", "stop screen"]
     assert len(driver.screens) == 1 and session.virtual_device == ""
 
@@ -271,13 +277,13 @@ async def test_gdi_capture_after_ddagrab_takes_the_same_virtual_screen(tv, drive
     await session.stop()
     await asyncio.wait_for(task, 30)
     assert session.error is None and tv.records == 1
-    assert driver.events == [("start", 3840, 2160, 60), ("ffmpeg", "ddagrab", VIRTUAL), "stop ffmpeg",
+    assert driver.events == [("start", 1920, 1080, 60), ("ffmpeg", "ddagrab", VIRTUAL), "stop ffmpeg",
                              ("ffmpeg", "gdigrab", VIRTUAL), "stop ffmpeg", "stop screen"]
     gdi = driver.commands[1]
     # The virtual monitor's rectangle of the desktop, not the window still named in the settings.
     at = gdi.index("gdigrab")
     assert gdi[at:at + 13] == ["gdigrab", "-framerate", "30", "-draw_mouse", "1", "-offset_x", "1920", "-offset_y",
-                               "0", "-video_size", "3840x2160", "-i", "desktop"]
+                               "0", "-video_size", "1920x1080", "-i", "desktop"]
     assert _option(gdi, "-vf").startswith("scale=w='min(640,iw)':h='min(360,ih)'")
     starting = [message for state, message in states if state == State.STARTING]
     assert starting[-2:] == ["x264 (CPU) via ddagrab", "x264 (CPU) via gdigrab"]
@@ -291,7 +297,7 @@ async def test_a_failed_set_up_removes_the_virtual_screen(tv, driver, monkeypatc
     with pytest.raises(MirrorError) as caught:
         await asyncio.wait_for(session.run(), 60)
     assert caught.value.args[0].key == "mirror_no_answer" and session.state == State.FAILED
-    assert driver.events == [("start", 3840, 2160, 60), "stop screen"] and session.virtual_device == ""
+    assert driver.events == [("start", 1920, 1080, 60), "stop screen"] and session.virtual_device == ""
 
 
 async def test_stopping_while_the_tv_is_set_up_removes_the_virtual_screen(tv, driver):
@@ -306,7 +312,7 @@ async def test_stopping_while_the_tv_is_set_up_removes_the_virtual_screen(tv, dr
     await session.stop()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, 10)
-    assert driver.events == [("start", 3840, 2160, 60), "stop screen"] and states[-1] == State.STOPPED
+    assert driver.events == [("start", 1920, 1080, 60), "stop screen"] and states[-1] == State.STOPPED
     assert session.finished.is_set() and session.virtual_device == ""
 
 

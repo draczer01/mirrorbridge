@@ -96,6 +96,15 @@ def canvas_limit(settings: Settings, limit: tuple[int, int] = MAX_CANVAS) -> tup
     return min(limit[0], (height * 16 // 9 + 1) // 2 * 2), height
 
 
+def extend_mode(mode: str) -> str:
+    """The Extended screen size Mirror screen adds the virtual screen at: the one chosen, but no
+    bigger than what mirroring sends (MAX_CANVAS). A 4K screen would be captured and shrunk to
+    1080p again on every frame: on a real PC that took 30 to 170 ms a frame, past the TV's lead,
+    against about 25 ms at 1080p."""
+    width, height, _hz = vdisplay.EXTEND_MODES.get(mode, vdisplay.EXTEND_MODES["1080p"])
+    return mode if width <= MAX_CANVAS[0] and height <= MAX_CANVAS[1] else "1080p"
+
+
 def choose_fps(wanted: int, info: Optional[ReceiverInfo]) -> int:
     most = info.displays[0].max_fps if info is not None and info.displays and info.displays[0].max_fps else 60
     return max(1, min(wanted or 30, most))
@@ -324,7 +333,11 @@ class MirrorSession:
         if self._xscreen is None:
             self._set(State.EXTENDING)
             self._xscreen = extended.ExtendedScreen(on_lost=self._stop.set)
-            monitor = await self._xscreen.start(self.settings.extend_mode)
+            mode = extend_mode(self.settings.extend_mode)
+            if mode != self.settings.extend_mode:
+                _LOGGER.info("Adding the virtual screen at %s, not %s: mirroring sends no more than %dx%d", mode,
+                             self.settings.extend_mode, *MAX_CANVAS)
+            monitor = await self._xscreen.start(mode)
             self.virtual_device = monitor.device
             self.settings = extended.screen_settings(self.settings)
             _LOGGER.info("Mirroring virtual screen %s: %dx%d, fitted into the TV's screen", monitor.device,

@@ -64,9 +64,10 @@ desaparece. *Duplicar pantalla* también la envía, con una fracción de segundo
 lugar de unos segundos (ver *Duplicar la pantalla*): por ejemplo, para la Vista del moderador
 de PowerPoint, con las notas en la laptop y las diapositivas en la TV. En **Tamaño de la
 pantalla extendida** eliges 1080p (el normal), 720p (letra más grande y menos datos) o 4K.
-Al transmitir, la TV recibe exactamente ese tamaño (4K se envía a 20 Mbps o más), y
-*Duplicar pantalla* lo ajusta a la pantalla de la TV, hasta 1080p, así que la
-**Resolución** de *Calidad* no se aplica en este modo.
+Al transmitir, la TV recibe exactamente ese tamaño (4K se envía a 20 Mbps o más).
+*Duplicar pantalla* la crea a 1080p como máximo (a 1080p si eliges 4K: achicar 4K en cada
+cuadro hacía que llegaran después de lo que espera la TV) y la ajusta a la pantalla de la TV,
+así que la **Resolución** de *Calidad* no se aplica en este modo.
 
 Windows no puede crear un monitor por sí solo, así que MirrorBridge usa el controlador
 gratuito **Parsec Virtual Display Driver** de Parsec (hoy parte de Unity), firmado por
@@ -180,8 +181,8 @@ Igual que `cast`, `mirror` parte de los ajustes de la app: sin `--monitor`, `--w
   pantalla de la TV, hasta 1080p o lo que diga **Calidad** > **Resolución**, o con **Extender
   pantalla** la pantalla virtual. Esta se crea igual que al transmitir (el icono dice *Creando
   la pantalla virtual…*, y si falta el controlador se ofrece instalarlo), con su **Tamaño de la
-  pantalla extendida** ajustado a la pantalla de la TV, hasta 1080p (la **Resolución** no se
-  aplica, igual que al transmitir; a 4K la letra se ve chica en la TV). Dura toda la sesión y
+  pantalla extendida** pero a 1080p como máximo (4K se crea a 1080p), ajustada a la pantalla de
+  la TV (la **Resolución** no se aplica, igual que al transmitir). Dura toda la sesión y
   desaparece al terminarla; si desaparece antes (al suspender el equipo), la sesión termina y
   lo dice. *Probar esta TV* y `mirror --probe` nunca la crean. Todo se envía con el
   codificador, los cuadros por segundo y la tasa de bits de **Calidad**. Todavía no hay sonido.

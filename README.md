@@ -114,8 +114,9 @@ cast stops. *Mirror screen* sends it too, a fraction of a second behind instead 
 seconds (see *Screen mirroring* below): for PowerPoint's Presenter View, for example, with
 the notes on the laptop and the slides on the TV. **Extended screen size** picks 1080p (the
 default), 720p (bigger text and a lighter stream, like AirParrot's "force 720p") or 4K. A
-cast sends exactly that size (4K at 20 Mbps or more), and Mirror screen fits it into the
-TV's screen, up to 1080p, so the Resolution setting does not apply in this mode.
+cast sends exactly that size (4K at 20 Mbps or more). Mirror screen adds it at 1080p at most
+(at 1080p when 4K is chosen: shrinking 4K on every frame made frames later than the TV waits
+for) and fits it into the TV's screen, so the Resolution setting does not apply in this mode.
 
 Windows cannot add a monitor by itself, so MirrorBridge uses the free **Parsec Virtual
 Display Driver**, a Microsoft-signed driver from Parsec (now part of Unity). MirrorBridge
@@ -236,8 +237,8 @@ included.
 * It mirrors what *What to cast* names: a display or a window at the TV's screen size, up to
   1080p or the *Quality > Resolution* setting, or with *Extend screen* the virtual screen. That
   is added as for a cast (the tray says *Creating the virtual screen…*, and a missing driver
-  gets the same offer to install it), at its *Extended screen size* fitted into the TV's screen,
-  up to 1080p (Resolution does not apply, as for a cast; at 4K, text on the TV is small). It
+  gets the same offer to install it), at its *Extended screen size* but 1080p at most (4K is
+  added at 1080p), fitted into the TV's screen (Resolution does not apply, as for a cast). It
   stays for the whole session and goes when the session ends; if it goes away first (sleep),
   the session ends and says so. *Test this TV* and `mirror --probe` never add it. Each is sent
   with the encoder, frame rate and bitrate of the *Quality* menu. There is no sound yet. If
