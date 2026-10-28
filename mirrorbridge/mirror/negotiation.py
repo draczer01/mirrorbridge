@@ -64,6 +64,14 @@ FEEDBACK_INTERVAL = 2.0
 FEEDBACK_SECONDS = 5
 DEFAULT_LEAD_MS = 100  # how long after capture the TV shows a frame (75 is enough on a cable)
 
+
+def lead_from_env(lead_ms: int) -> int:
+    """MIRRORBRIDGE_LEAD_MS, for an experiment on Wi-Fi (20-1000 ms), or `lead_ms` when unset."""
+    try:
+        return min(1000, max(20, int(os.environ["MIRRORBRIDGE_LEAD_MS"])))
+    except (KeyError, ValueError):
+        return lead_ms
+
 # Who is sending (and SOURCE_VERSION, in control.py, as in the User-Agent).
 SENDER_MODEL = "Windows"
 SENDER_OS_BUILD = "10.0"

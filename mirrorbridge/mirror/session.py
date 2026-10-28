@@ -41,7 +41,7 @@ from .. import extended, ffmpeg, vdisplay
 from ..config import Settings
 from ..session import State, StatusCallback
 from ..text import Text
-from . import profiles
+from . import negotiation, profiles
 from .clock import NS, TIMING_PORTS, NtpResponder, PtsMapper, bind_udp, now_ns, to_ntp
 from .control import FEATURE_1080P, ControlChannel, ReceiverInfo, Target, open_event_channel
 from .datachannel import DataChannel
@@ -403,6 +403,9 @@ class MirrorSession:
             _LOGGER.warning("%s", ex)
 
         plan = self.profile.plan()
+        plan.lead_ms = negotiation.lead_from_env(plan.lead_ms)
+        _LOGGER.info("Experiment knobs: keyframe every %g s (MIRRORBRIDGE_KEYFRAME_SECONDS), lead %d ms "
+                     "(MIRRORBRIDGE_LEAD_MS)", ffmpeg.MIRROR_KEYFRAME_SECONDS, plan.lead_ms)
         _LOGGER.info("Setting up mirroring to %s (%s): %s", self.target.name,
                      "saved settings" if self.saved else "first time", plan.describe())
         est = self.report.established = await negotiator.establish(plan)
@@ -789,7 +792,8 @@ class MirrorSession:
         if (self.remember and est is not None and self.error is None and self._stats.frames
                 and self.report.ntp_requests and self.target.identifier):
             profile = profiles.MirrorProfile.of(est.plan, self.profile.trailer)
-            info = self.report.info.summary() if self.report.info else ""
+            profile.lead_ms = self.profile.lead_ms  # an experiment's MIRRORBRIDGE_LEAD_MS is not kept
+            info =self.report.info.summary() if self.report.info else ""
             try:
                 await loop.run_in_executor(None, lambda: profiles.save(
                     self.target.identifier, profile, name=self.target.name, info=info))

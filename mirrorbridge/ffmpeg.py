@@ -391,7 +391,15 @@ def _encoder_args(encoder: str, settings: Settings, gop: int) -> list[str]:
 # the encoder may hold none back: no B-frames, no lookahead, no frames in flight, CBR with a VBV
 # of about one frame (which also keeps a keyframe from arriving as one big burst), and an IDR at
 # the start and then every MIRROR_KEYFRAME_SECONDS.
-MIRROR_KEYFRAME_SECONDS = 2
+def _keyframe_seconds(default: float = 2) -> float:
+    """MIRRORBRIDGE_KEYFRAME_SECONDS, for an experiment on Wi-Fi (0.5-60 s), or `default` when unset."""
+    try:
+        return min(60.0, max(0.5, float(os.environ["MIRRORBRIDGE_KEYFRAME_SECONDS"])))
+    except (KeyError, ValueError):
+        return default
+
+
+MIRROR_KEYFRAME_SECONDS = _keyframe_seconds()
 MIRROR_VBV_FRAMES = 1.0
 
 
@@ -399,7 +407,7 @@ def mirror_encoder_args(encoder: str, kbps: int, fps: int, vbv_frames: float = M
     gop = max(1, round(fps * MIRROR_KEYFRAME_SECONDS))
     bufsize = max(1, round(kbps * vbv_frames / max(1, fps)))
     rate = ["-b:v", f"{kbps}k", "-maxrate", f"{kbps}k", "-bufsize", f"{bufsize}k"]
-    common = ["-g", str(gop), "-bf", "0", "-force_key_frames", f"expr:gte(t,n_forced*{MIRROR_KEYFRAME_SECONDS})"]
+    common = ["-g", str(gop), "-bf", "0", "-force_key_frames", f"expr:gte(t,n_forced*{MIRROR_KEYFRAME_SECONDS:g})"]
     if encoder == "h264_nvenc":
         # -delay 0: NVENC otherwise keeps about 3 frames in flight (50 ms at 60 fps).
         specific = ["-preset", "p4", "-tune", "ll", "-rc", "cbr", "-profile:v", "high", "-zerolatency", "1",
