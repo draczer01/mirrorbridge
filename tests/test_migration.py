@@ -108,14 +108,14 @@ def test_without_aircast_there_is_nothing_to_do(tmp_path, monkeypatch):
 
 
 def test_a_file_that_cannot_be_copied_stops_neither_the_others_nor_the_app(folders, monkeypatch, caplog):
-    copy2 = shutil.copy2
+    copyfile = shutil.copyfile
 
     def unreadable_settings(src, dst):
         if src.name == "settings.json":
             raise PermissionError(13, "Access is denied", str(src))
-        return copy2(src, dst)
+        return copyfile(src, dst)
 
-    monkeypatch.setattr(migration.shutil, "copy2", unreadable_settings)
+    monkeypatch.setattr(migration.shutil, "copyfile", unreadable_settings)
     with caplog.at_level(logging.WARNING, logger="mirrorbridge.migration"):
         assert app_data_dir() == folders.new
     assert "Access is denied" in caplog.text

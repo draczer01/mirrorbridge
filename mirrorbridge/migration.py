@@ -56,7 +56,10 @@ def _copy_new(src: Path, dest: Path) -> bool:
     half-written dest behind. True if it copied."""
     part = dest.with_name(f"{dest.name}.{os.getpid()}.part")
     try:
-        shutil.copy2(src, part)
+        # Not shutil.copy2: on Windows it calls CopyFile2, which Wine (where the exe is built
+        # and tested) does not have, and the whole process aborts.
+        shutil.copyfile(src, part)
+        shutil.copystat(src, part)
         try:
             # Neither replaces an existing dest: os.rename does not on Windows, os.link never does.
             if sys.platform == "win32":
