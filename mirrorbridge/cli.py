@@ -8,7 +8,7 @@ import getpass
 import logging
 import sys
 
-from . import APP_NAME, CLI_NAME, __version__, airplay_patch, audio, ffmpeg, mirror, vdisplay, winmonitors
+from . import APP_NAME, CLI_NAME, __version__, airplay_patch, audio, ffmpeg, mirror, probe, vdisplay, winmonitors
 from .config import Settings, app_data_dir, credentials_file
 from .devices import Device, DeviceManager
 from .session import CastSession, State
@@ -53,6 +53,7 @@ def _cli_words(message: str, device: Device) -> str:
         "Quality > Delay > Smooth": "--latency smooth",
         "Quality > Encoder > x264 (CPU)": "--encoder libx264",
         "What to cast > Extended screen size > 720p": "--extend-mode 720p",
+        "More options > Test this TV": f'probe -d "{device.name}"',
     }
     for item, option in paths.items():
         message = message.replace(item, option)
@@ -168,7 +169,7 @@ async def cmd_cast(args) -> int:
         atv = await manager.connect(device)
         try:
             print(f"Playing {args.file} on {device.name} (Ctrl+C to stop)")
-            await atv.stream.play_url(args.file)
+            await airplay_patch.play_url(atv, args.file, _file_cast(device))
         finally:
             atv.close()
         return 0
@@ -184,6 +185,38 @@ async def cmd_cast(args) -> int:
     except Exception:  # pylint: disable=broad-except
         return 1
     return 0
+
+
+def _file_cast(device: Device) -> airplay_patch.CastContext:
+    """What playing a video file (or a URL) on `device` hands the patched pyatv code."""
+    return airplay_patch.CastContext(apple=device.is_apple, live=False, password=device.requires_password,
+                                     device=device.identifier, features=device.features)
+
+
+async def cmd_probe(args) -> int:
+    args.device = args.device or args.name
+    settings = Settings.load()
+    manager = DeviceManager(asyncio.get_running_loop())
+    device = await _choose(manager, args)
+    if not device.can_cast_video:
+        print(f"{device.name}: {device.status}")
+        return 1
+    await _pair_if_needed(manager, device)
+
+    def progress(number: int, total: int, name: str) -> None:
+        print(f"Test {number} of {total}: {name}...")
+
+    print(f"Testing {device.name}. Watch the TV: it may show Apple's test video, then MirrorBridge's test "
+          f"pattern. If the TV asks whether to allow MirrorBridge, choose Allow. This takes about two minutes.")
+    report = await probe.run(manager, device, settings, seconds=args.seconds, public_url=args.url,
+                             progress=progress)
+    print()
+    for line in report.lines():
+        print(_cli_words(line, device))
+    print()
+    print(_cli_words(report.conclusion(), device))
+    print(report.where())
+    return 0 if report.worked else 1
 
 
 async def cmd_mirror(args) -> int:
@@ -372,6 +405,14 @@ def build_parser() -> argparse.ArgumentParser:
     cast.add_argument("--extend-mode", choices=list(vdisplay.EXTEND_MODES),
                       help="size of that screen (default: the app's choice, 1080p at first)")
 
+    test = common(sub.add_parser("probe", help="test which ways of sending video a receiver takes, for a bug report"))
+    test.add_argument("name", nargs="?", metavar="device", help="name, IP or id")
+    test.add_argument("-d", "--device", help="name, IP or id")
+    test.add_argument("--seconds", type=float, default=probe.DEFAULT_SECONDS,
+                      help="how long each test watches the TV once it took the video "
+                           f"(default {probe.DEFAULT_SECONDS})")
+    test.add_argument("--url", default=probe.PUBLIC_STREAM, help="the public HLS video of the first two tests")
+
     mirroring = common(sub.add_parser("mirror", help="mirror the screen with a fraction of a second of delay "
                                                      "(experimental; AirPlay 2 TVs of other brands)"))
     mirroring.add_argument("-d", "--device", help="name, IP or id")
@@ -411,7 +452,7 @@ def main(argv: list[str] | None = None) -> int:
         logging.getLogger("pyatv").setLevel(logging.WARNING)
 
     handler = {"scan": cmd_scan, "pair": cmd_pair, "forget": cmd_forget, "cast": cmd_cast, "doctor": cmd_doctor,
-               "vdd": cmd_vdd, "mirror": cmd_mirror}[args.command]
+               "probe": cmd_probe, "vdd": cmd_vdd, "mirror": cmd_mirror}[args.command]
     try:
         return asyncio.run(handler(args))
     except KeyboardInterrupt:

@@ -8,6 +8,19 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ### Added
 
+- TVs that have no `POST /play`, the first AirPlay video request (TCL, LG and others built on
+  Apple's AirPlay SDK for TVs, which answer it with 404), get the stream through the play queue
+  (AirPlay video v2), as an iPhone sends it: chosen from the feature bits the TV advertises
+  (no bit 0, with bit 33 or 49), and tried once, on a new connection, with any receiver that
+  answers `/play` with 404. The way that worked is remembered for each TV until MirrorBridge
+  quits (what *Test this TV* tries is not). Apple TVs, and every receiver that advertises
+  `/play`, get exactly the requests they got before. The log says which way was used and why,
+  and what the TV said while it played.
+- *More options* > *Test this TV…* and `MirrorBridge.exe probe "TV name"`: tries `POST /play`
+  and the play queue with Apple's public test video, then the play queue with a short cast of
+  MirrorBridge's test pattern, says what the TV did with each (and whether it fetched the stream
+  from the PC, with which player), and writes `probe-<date>-<time>.log` in the log folder, to
+  send with a bug report.
 - Screen mirroring (experimental, not yet tried on a real TV): `mirror` sends the screen, or a
   test pattern, to an AirPlay 2 TV of another brand a fraction of a second behind instead of
   a cast's seconds. Each frame goes as soon as FFmpeg has encoded it, encrypted, over a
@@ -24,6 +37,14 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   encryption, the network), as median and 95th percentile, with the frame rate FFmpeg delivers
   (and a warning when it falls short), what waits to be sent, and how often the TV asked for
   the time.
+
+### Changed
+
+- The stream's server answers the CORS preflight (OPTIONS) of video players that run in a web
+  page, and lets them read its errors.
+- `cast --file` and *Play a video file* pick `/play` or the play queue as a cast does.
+- pyatv 0.18.0, and only that version, is required: MirrorBridge takes over parts of it, and
+  screen mirroring builds on its pairing and encryption.
 
 ## [0.3.0] - 2026-10-28
 

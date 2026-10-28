@@ -145,6 +145,7 @@ class TrayMenu(QObject):
                      checked=winintegration.autostart_enabled())
         self._action(more, tr("desktop_shortcut"), self._create_shortcut)
         self._action(more, tr("log_folder"), lambda: winintegration.open_folder(str(app_data_dir())))
+        self._action(more, tr("probe"), c.test_tv, enabled=bool(device and device.can_cast_video) and not c.is_active)
         if vdisplay.available():
             installed = c.vdd_status not in (None, vdisplay.DriverStatus.NOT_INSTALLED)
             self._action(more, tr("vdd_remove"), c.extend.remove_driver, enabled=installed and not c.is_active)

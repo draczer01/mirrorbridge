@@ -85,7 +85,7 @@ async def test_requests_it_cannot_serve_are_logged_and_counted_but_are_not_fetch
         async with aiohttp.ClientSession(headers={"User-Agent": "ExoPlayerLib/2.18"}) as http:
             with caplog.at_level(logging.INFO, logger="mirrorbridge.hls_server"):
                 for method, path, status in (("GET", "/live/stream.m3u8", 404), ("GET", "/live/stream.m3u8", 404),
-                                             ("GET", "/seg_00009.ts", 404), ("OPTIONS", "/stream.m3u8", 405)):
+                                             ("GET", "/seg_00009.ts", 404), ("POST", "/stream.m3u8", 405)):
                     async with http.request(method, base + path) as resp:
                         assert resp.status == status
     finally:
@@ -97,7 +97,39 @@ async def test_requests_it_cannot_serve_are_logged_and_counted_but_are_not_fetch
     assert [r.getMessage() for r in caplog.records] == [  # once per request, with the player that asked
         f"127.0.0.1 asked for GET /live/stream.m3u8, which MirrorBridge does not serve (HTTP 404, {agent})",
         f"127.0.0.1 asked for GET /seg_00009.ts, which MirrorBridge does not serve (HTTP 404, {agent})",
-        f"127.0.0.1 asked for OPTIONS /stream.m3u8, which MirrorBridge does not serve (HTTP 405, {agent})",
+        f"127.0.0.1 asked for POST /stream.m3u8, which MirrorBridge does not serve (HTTP 405, {agent})",
+    ]
+
+
+async def test_a_player_in_a_web_page_may_fetch_the_stream(tmp_path, caplog):
+    """CORS: some TVs play AirPlay video in a web page, which asks first and must read errors too."""
+    (tmp_path / "stream.m3u8").write_text("#EXTM3U\n")
+    server = HlsServer(tmp_path, "127.0.0.1", 0)
+    await server.start()
+    base = f"http://127.0.0.1:{server.port}"
+    try:
+        async with aiohttp.ClientSession(headers={"User-Agent": "WebKit"}) as http:
+            with caplog.at_level(logging.INFO, logger="mirrorbridge.hls_server"):
+                for _ in range(2):
+                    async with http.options(base + "/stream.m3u8", headers={
+                        "Origin": "https://receiver.example", "Access-Control-Request-Method": "GET",
+                    }) as resp:
+                        assert resp.status == 204
+                        assert resp.headers["Access-Control-Allow-Origin"] == "*"
+                        assert "GET" in resp.headers["Access-Control-Allow-Methods"]
+            async with http.get(base + "/stream.m3u8") as resp:
+                assert resp.status == 200 and resp.headers["Access-Control-Allow-Origin"] == "*"
+            async with http.head(base + "/stream.m3u8") as resp:
+                assert resp.status == 200
+            async with http.get(base + "/seg_00001.ts") as resp:
+                assert resp.status == 404 and resp.headers["Access-Control-Allow-Origin"] == "*"
+    finally:
+        await server.close()
+    tv = server.activity("127.0.0.1")
+    assert tv.missing == 1 and tv.requests == 2  # the preflights are neither fetches nor refusals
+    assert tv.preflights == 2 and server.activity().preflights == 2  # but they show that the TV reached the PC
+    assert [r.getMessage() for r in caplog.records] == [  # once per client
+        "127.0.0.1 asked whether it may fetch /stream.m3u8 from a web page (OPTIONS, User-Agent: WebKit)",
     ]
 
 

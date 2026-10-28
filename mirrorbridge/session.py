@@ -80,6 +80,7 @@ class CastSession:
         on_status: Optional[StatusCallback] = None,
         *,
         work_dir: Path | None = None,
+        route: str | None = None,
     ) -> None:
         self.manager = manager
         self.device = device
@@ -93,6 +94,7 @@ class CastSession:
         self.no_codecs = False  # FFmpeg's master playlist declares no CODECS (see _log_master_playlist)
         self._work_dir = work_dir
         self._own_work_dir = work_dir is None
+        self.route = route  # how the TV is handed the stream (airplay_patch.PLAY or QUEUE); None = its best
         self._proc: subprocess.Popen | None = None
         self.encoder_returncode: int | None = None
         self._stderr_tail: deque[str] = deque(maxlen=30)
@@ -263,7 +265,8 @@ class CastSession:
         airplay_patch.apply()
         self._atv = await self.manager.connect(self.device)
         self._cast = airplay_patch.CastContext(
-            apple=self.device.is_apple, live=True, password=self.device.requires_password
+            apple=self.device.is_apple, live=True, password=self.device.requires_password,
+            device=self.device.identifier, features=self.device.features, route=self.route,
         )
         self._play_task = asyncio.ensure_future(airplay_patch.play_url(self._atv, self.stream_url, self._cast))
 
@@ -378,18 +381,26 @@ class CastSession:
             self.encoder_returncode = proc.returncode
         self._proc = None
 
-    def _tv_activity(self) -> Activity:
+    @property
+    def cast(self) -> "airplay_patch.CastContext | None":
+        """What the TV answered and said during this cast (None until it is connected)."""
+        return self._cast
+
+    def tv_activity(self) -> Activity:
         """What the TV fetched. Only its own address counts: a player opened on the PC or
         a phone must neither hide a TV that cannot reach MirrorBridge nor keep a cast going."""
         if self._server is None:
             return Activity()
         return self._server.activity(self.device.address)
 
+    def clients(self) -> dict[str, Activity]:
+        """Everything that reached the stream's server so far, by IP, the TV included."""
+        return self._server.clients() if self._server else {}
+
     def _other_clients(self) -> str:
         """Who else fetched the stream, for an error that says the TV did not."""
-        clients = self._server.clients() if self._server else {}
         others = [f"{ip} ({c.user_agent or 'no User-Agent'})"
-                  for ip, c in clients.items() if ip != self.device.address and c.requests]
+                  for ip, c in self.clients().items() if ip != self.device.address and c.requests]
         if not others:
             return ""
         return Text("tv_other_clients", " ({clients} did download it, but that is not the TV's address, "
@@ -406,6 +417,12 @@ class CastSession:
                         "does not serve, instead of the stream at {url}. Please report this TV, with "
                         "mirrorbridge.log.", path=tv.missing_path, url=self.stream_url,
                     ))
+                if tv.preflights:  # it reached the PC: the firewall is not what stops it
+                    raise StreamNotFetched(Text(
+                        "tv_preflight_only", "The TV reached MirrorBridge and asked whether its player may fetch "
+                        "the stream from a web page, but then never fetched it from {url}. Please report this TV, "
+                        "with mirrorbridge.log.", url=self.stream_url,
+                    ))
                 port = self._server.port if self._server else self.settings.http_port
                 raise StreamNotFetched(Text(
                     "tv_not_fetched", "The TV accepted the video but never downloaded it from {url}. Allow "
@@ -413,7 +430,9 @@ class CastSession:
                     "check that the PC and the TV are on the same network.{others}",
                     url=self.stream_url, port=port, others=self._other_clients(),
                 ))
-            if accepted is None and now - started_at > NO_REQUEST_TIMEOUT:
+            # On the play queue, only from the TV's answer to its first SETUP (see CastContext.waited_since).
+            since = self._cast.waited_since(started_at) if self._cast else started_at
+            if accepted is None and since is not None and now - since > NO_REQUEST_TIMEOUT:
                 raise RuntimeError(Text(
                     "tv_no_request", "The TV did not start the video within {seconds} s and never asked for "
                     "it at {url}. Allow MirrorBridge in Windows Firewall on private networks, and check that "
@@ -459,6 +478,10 @@ class CastSession:
                     exc = self._play_task.exception()
                     if exc:
                         raise exc
+                    queue = self._cast.queue if self._cast else None
+                    if queue is not None and self.tv_activity().first_segment_at is None:
+                        # The play queue's session ended before the TV fetched any of the video.
+                        raise RuntimeError(queue.ended_early())
                     return  # stopped from the TV
                 if self._proc and self._proc.poll() is not None:
                     if self._xscreen and await self._screen_lost():
@@ -467,7 +490,7 @@ class CastSession:
                                             errors=self.ffmpeg_errors()))
                 # The TV's own video requests are the one signal every receiver gives,
                 # including those that do not report playback status over AirPlay.
-                tv = self._tv_activity()
+                tv = self.tv_activity()
                 now = time.monotonic()
                 if not announced and tv.requests >= 1:
                     announced = True

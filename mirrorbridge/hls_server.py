@@ -26,6 +26,16 @@ _VARIANT_RE = re.compile(rb"^#EXT-X-STREAM-INF:[^\r\n]*", re.M)
 _BANDWIDTH_RE = re.compile(rb"[:,]BANDWIDTH=(\d+)")
 MISSING_LOG_LIMIT = 50  # distinct refused requests logged at INFO; the rest only at DEBUG
 
+# Any web page may read the stream: a TV whose video player runs in one (some AirPlay video
+# receivers) asks first, with OPTIONS, and is turned away without these.
+CORS_HEADERS = {"Access-Control-Allow-Origin": "*"}
+PREFLIGHT_HEADERS = {
+    **CORS_HEADERS,
+    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+    "Access-Control-Allow-Headers": "*",
+    "Access-Control-Max-Age": "600",
+}
+
 
 def fix_target_duration(playlist: bytes) -> bytes:
     """FFmpeg writes TARGETDURATION:0 for sub-second segments; Apple players need >= 1."""
@@ -63,6 +73,7 @@ class Activity:
     last_request_at: float = 0.0
     missing: int = 0  # requests answered 404/405: the client reached MirrorBridge, but asked for something else
     missing_path: str = ""  # the first of them
+    preflights: int = 0  # CORS preflights (OPTIONS) from a player in a web page: it reached MirrorBridge too
 
 
 class HlsServer:
@@ -84,6 +95,7 @@ class HlsServer:
         self.last_request_at = 0.0  # time.monotonic() of the receiver's latest fetch
         self._clients: dict[str, Activity] = {}
         self._missing_logged: set[tuple[str, str]] = set()
+        self._preflights_logged: set[str] = set()
         self._runner: web.AppRunner | None = None
 
     def url(self, name: str = "stream.m3u8") -> str:
@@ -110,6 +122,7 @@ class HlsServer:
             last_request_at=max((c.last_request_at for c in clients), default=0.0),
             missing=sum(c.missing for c in clients),
             missing_path=next((c.missing_path for c in clients if c.missing_path), ""),
+            preflights=sum(c.preflights for c in clients),
         )
 
     def clients(self) -> dict[str, Activity]:
@@ -171,7 +184,18 @@ class HlsServer:
         except web.HTTPException as ex:
             if ex.status in (404, 405):
                 self._record_missing(request, ex.status)
+            ex.headers.update(CORS_HEADERS)  # so that a web player sees the error, not a CORS failure
             raise
+
+    async def _preflight(self, request: web.Request) -> web.StreamResponse:
+        """OPTIONS: what a player in a web page asks before it fetches the stream."""
+        ip, client = self._client(request)
+        client.preflights += 1
+        if ip not in self._preflights_logged:
+            self._preflights_logged.add(ip)
+            _LOGGER.info("%s asked whether it may fetch %s from a web page (OPTIONS, User-Agent: %s)",
+                         ip, request.raw_path, client.user_agent or "none")
+        return web.Response(status=204, headers=PREFLIGHT_HEADERS)
 
     async def _handle(self, request: web.Request) -> web.StreamResponse:
         name = request.match_info["name"]
@@ -188,12 +212,13 @@ class HlsServer:
         return web.Response(
             body=body,
             content_type=_CONTENT_TYPES[path.suffix],
-            headers={"Cache-Control": "no-cache, no-store", "Access-Control-Allow-Origin": "*"},
+            headers={"Cache-Control": "no-cache, no-store", **CORS_HEADERS},
         )
 
     async def start(self) -> None:
         app = web.Application(middlewares=[self._note_missing])
         app.router.add_get("/{name}", self._handle)
+        app.router.add_route("OPTIONS", "/{name}", self._preflight)
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
         # On Windows SO_REUSEADDR would let a second MirrorBridge bind the same port silently,

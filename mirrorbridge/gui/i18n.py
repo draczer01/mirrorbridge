@@ -67,6 +67,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "more": {"en": "More options", "es": "Más opciones"},
     "log_folder": {"en": "Open log folder", "es": "Abrir carpeta de registros"},
+    "probe": {"en": "Test this TV…", "es": "Probar esta TV…"},
     "language_menu": {"en": "Language", "es": "Idioma"},
     "quit": {"en": "Quit", "es": "Salir"},
     # Notifications
@@ -115,6 +116,25 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "scan_failed": {"en": "Search failed: {error}", "es": "La búsqueda falló: {error}"},
     "ffmpeg_missing": {"en": "FFmpeg problem", "es": "Problema con FFmpeg"},
+    # More options > Test this TV
+    "probe_title": {"en": "Test {device}", "es": "Probar {device}"},
+    "probe_intro": {
+        "en": "MirrorBridge will try three ways of sending {device} a video, one after the other, for about "
+              "two minutes in all. Watch the TV: it may show Apple's test video, then MirrorBridge's test "
+              "pattern. If the TV asks whether to allow MirrorBridge, choose Allow. Nothing from this PC's "
+              "screen is sent.\n\nAt the end MirrorBridge says what worked, and where the report is: please "
+              "send that report with your bug report.",
+        "es": "MirrorBridge probará tres formas de enviar un video a {device}, una tras otra, durante unos dos "
+              "minutos en total. Mira la TV: puede mostrar el video de prueba de Apple y luego la imagen de "
+              "prueba de MirrorBridge. Si la TV pregunta si permite MirrorBridge, elige Permitir. No se envía "
+              "nada de la pantalla de este equipo.\n\nAl final, MirrorBridge dice qué funcionó y dónde está "
+              "el informe: mándalo con tu reporte del problema.",
+    },
+    "probe_start": {"en": "Start the test", "es": "Empezar la prueba"},
+    "status_probing": {"en": "Testing {device}: {step}…", "es": "Probando {device}: {step}…"},
+    "probe_step": {"en": "test {number} of {total}", "es": "prueba {number} de {total}"},
+    "probe_done": {"en": "Test of {device} finished", "es": "Terminó la prueba de {device}"},
+    "probe_failed_title": {"en": "The test failed", "es": "La prueba falló"},
     # Extend screen: virtual display driver
     "vdd_install_title": {"en": "Install the virtual screen", "es": "Instalar la pantalla virtual"},
     "vdd_install_text": {
@@ -551,6 +571,179 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Try a lower resolution or 30 frames per second.",
         "es": "Prueba una resolución más baja o 30 cuadros por segundo.",
     },
+    # The play queue (airplay_queue.py, airplay_patch.py)
+    "tv_queue_refused": {
+        "en": "The TV turned down the video sent from a URL ({steps}). Use {menu_probe} to see which way of "
+              "sending video it takes, and send the test's report with your bug report.",
+        "es": "La TV rechazó el video enviado desde una URL ({steps}). Usa {menu_probe} para ver de qué forma "
+              "acepta el video, y manda el informe de la prueba con tu reporte del problema.",
+    },
+    "tv_media_error": {
+        "en": "The TV's player could not play the video (error {code}, {domain}). {hint}",
+        "es": "La TV no pudo reproducir el video: su reproductor dio el error {code} ({domain}). {hint}",
+    },
+    "tv_media_network": {
+        "en": "Its player could not download the video: allow MirrorBridge in Windows Firewall on private "
+              "networks, and check that the PC and the TV are on the same network.",
+        "es": "Su reproductor no pudo descargar el video: permite MirrorBridge en el Firewall de Windows para "
+              "redes privadas, y revisa que el equipo y la TV estén en la misma red.",
+    },
+    "tv_media_format": {
+        "en": "Its player does not take this video format. Please report this TV, with mirrorbridge.log.",
+        "es": "Su reproductor no acepta este formato de video. Avisa de esta TV y manda mirrorbridge.log.",
+    },
+    "tv_media_decoder": {
+        "en": "Its player could not decode the video. Try a lower resolution or 30 frames per second.",
+        "es": "Su reproductor no pudo decodificar el video. Prueba una resolución más baja o 30 cuadros por "
+              "segundo.",
+    },
+    "tv_media_report": {
+        "en": "Please report this TV, with mirrorbridge.log.",
+        "es": "Avisa de esta TV y manda mirrorbridge.log.",
+    },
+    "tv_media_unreachable": {
+        "en": "Its player could not download the video from {host}.",
+        "es": "Su reproductor no pudo descargar el video de {host}.",
+    },
+    "tv_probe_advice": {
+        "en": "{problem} Use {menu_probe}, and send the test's report with your bug report.",
+        "es": "{problem} Usa {menu_probe} y manda el informe de la prueba con tu reporte del problema.",
+    },
+    "tv_live_played_to_end": {
+        "en": "The TV ended the live stream after {seconds} s, as if it were a video file that had reached its "
+              "end.",
+        "es": "La TV terminó la transmisión en vivo a los {seconds} s, como si fuera un archivo de video que "
+              "llegó a su final.",
+    },
+    "tv_queue_silent": {
+        "en": "The TV took the video but did not say within {seconds} s that it was playing it.",
+        "es": "La TV aceptó el video, pero en {seconds} s no dijo que lo estuviera reproduciendo.",
+    },
+    "tv_queue_ended": {
+        "en": "The TV ended the AirPlay session before it played the video: {reason}.",
+        "es": "La TV terminó la sesión de AirPlay antes de reproducir el video: {reason}.",
+    },
+    "tv_preflight_only": {
+        "en": "The TV reached MirrorBridge and asked whether its player may fetch the stream from a web page, but "
+              "then never fetched it from {url}. Please report this TV, with mirrorbridge.log.",
+        "es": "La TV llegó a MirrorBridge y preguntó si su reproductor puede descargar el video desde una página "
+              "web, pero después nunca lo descargó de {url}. Avisa de esta TV y manda mirrorbridge.log.",
+    },
+    # Why the TV ended a cast on the play queue
+    "queue_end_stopped": {"en": "the TV stopped playing", "es": "la TV dejó de reproducir"},
+    "queue_end_played": {"en": "the video ended on the TV", "es": "el video terminó en la TV"},
+    "queue_end_failed": {"en": "the TV's player failed", "es": "el reproductor de la TV falló"},
+    "queue_end_back": {
+        "en": "BACK was pressed on the TV's remote",
+        "es": "se presionó ATRÁS en el control remoto de la TV",
+    },
+    "queue_end_events_closed": {
+        "en": "the TV closed the event channel",
+        "es": "la TV cerró el canal de eventos",
+    },
+    "queue_end_hung_up": {"en": "the TV closed the connection", "es": "la TV cerró la conexión"},
+    "queue_end_silent": {
+        "en": "the TV stopped answering ({misses} keep-alives in a row)",
+        "es": "la TV dejó de responder ({misses} mensajes de mantenimiento seguidos)",
+    },
+    # What Test this TV found out (probe.py)
+    "probe_test_play": {
+        "en": "POST /play (AirPlay video v1) with Apple's test video",
+        "es": "POST /play (video AirPlay v1) con el video de prueba de Apple",
+    },
+    "probe_test_queue": {
+        "en": "The play queue (AirPlay video v2) with Apple's test video",
+        "es": "La cola de reproducción (video AirPlay v2) con el video de prueba de Apple",
+    },
+    "probe_test_live": {
+        "en": "The play queue with MirrorBridge's test pattern, from this PC",
+        "es": "La cola de reproducción con la imagen de prueba de MirrorBridge, desde este equipo",
+    },
+    "probe_line": {"en": "{number}. {test}: {result}", "es": "{number}. {test}: {result}"},
+    "probe_no_answer": {"en": "no answer ({steps})", "es": "sin respuesta ({steps})"},
+    "probe_refused": {"en": "refused ({steps})", "es": "rechazado ({steps})"},
+    "probe_failed": {"en": "failed: {error}", "es": "falló: {error}"},
+    "probe_agent": {"en": "User-Agent: {agent}", "es": "User-Agent: {agent}"},
+    "probe_no_agent": {"en": "no User-Agent", "es": "sin User-Agent"},
+    "probe_fetched": {
+        "en": "the TV took it and fetched the video ({agent})",
+        "es": "la TV lo aceptó y descargó el video ({agent})",
+    },
+    "probe_playlist_only": {
+        "en": "the TV took it and fetched the playlist, but none of the video ({agent})",
+        "es": "la TV lo aceptó y descargó la lista de reproducción, pero nada del video ({agent})",
+    },
+    "probe_not_fetched": {
+        "en": "the TV took it but never fetched it from this PC ({steps})",
+        "es": "la TV lo aceptó, pero nunca lo descargó de este equipo ({steps})",
+    },
+    "probe_playing": {
+        "en": "the TV took it and said it was playing ({steps})",
+        "es": "la TV lo aceptó y dijo que lo estaba reproduciendo ({steps})",
+    },
+    "probe_wrong_path": {
+        "en": "the TV took it and reached this PC, but asked for {path}, which MirrorBridge does not serve "
+              "({agent})",
+        "es": "la TV lo aceptó y llegó a este equipo, pero pidió {path}, que MirrorBridge no ofrece ({agent})",
+    },
+    "probe_preflight_only": {
+        "en": "the TV took it and asked from a web page whether it may fetch it (OPTIONS), but never fetched it "
+              "({agent})",
+        "es": "la TV lo aceptó y preguntó desde una página web si podía descargarlo (OPTIONS), pero nunca lo "
+              "descargó ({agent})",
+    },
+    "probe_took": {
+        "en": "the TV took it but did not say that it was playing ({steps})",
+        "es": "la TV lo aceptó, pero no dijo que lo estuviera reproduciendo ({steps})",
+    },
+    "probe_then": {"en": "{verdict}, then {ended}", "es": "{verdict}; después, {ended}"},
+    "probe_works": {
+        "en": "{device} should play your casts: it fetched MirrorBridge's video.",
+        "es": "{device} debería reproducir tus transmisiones: descargó el video de MirrorBridge.",
+    },
+    "probe_live_not_played": {
+        "en": "{device} reached this PC for MirrorBridge's stream, but did not play it: {result}. Please send the "
+              "report with your bug report.",
+        "es": "{device} llegó a este equipo para el video de MirrorBridge, pero no lo reprodujo: {result}. Manda "
+              "el informe con tu reporte del problema.",
+    },
+    "probe_internet_only": {
+        "en": "{device} plays video from the internet, but never fetched MirrorBridge's own stream from this PC. "
+              "Check that Windows Firewall allows MirrorBridge on private networks; if it does, this TV may "
+              "only play video from HTTPS addresses.",
+        "es": "{device} reproduce video de internet, pero nunca descargó el video de MirrorBridge desde este "
+              "equipo. Revisa que el Firewall de Windows permita MirrorBridge en redes privadas; si lo permite, "
+              "puede que esta TV solo reproduzca video de direcciones HTTPS.",
+    },
+    "probe_player_silent": {
+        "en": "{device} takes the video it is sent, but its player did not start: it did not say that it played "
+              "Apple's video, and never fetched MirrorBridge's stream from this PC. Please send the report with "
+              "your bug report.",
+        "es": "{device} acepta el video que se le envía, pero su reproductor no arrancó: no dijo que reprodujera "
+              "el video de Apple y nunca descargó el video de MirrorBridge desde este equipo. Manda el informe "
+              "con tu reporte del problema.",
+    },
+    "probe_not_fetched_here": {
+        "en": "{device} took MirrorBridge's stream but never fetched it from this PC. Check that Windows Firewall "
+              "allows MirrorBridge on private networks, and send the report with your bug report.",
+        "es": "{device} aceptó el video de MirrorBridge, pero nunca lo descargó de este equipo. Revisa que el "
+              "Firewall de Windows permita MirrorBridge en redes privadas, y manda el informe con tu reporte del "
+              "problema.",
+    },
+    "probe_live_refused": {
+        "en": "{device} took Apple's video, but not MirrorBridge's stream: {result}. Please send the report with "
+              "your bug report.",
+        "es": "{device} aceptó el video de Apple, pero no el de MirrorBridge: {result}. Manda el informe con tu "
+              "reporte del problema.",
+    },
+    "probe_none": {
+        "en": "None of the tests got {device} to take the video.",
+        "es": "Ninguna de las pruebas logró que {device} aceptara el video.",
+    },
+    "probe_report_file": {
+        "en": "The full report is in {file}: please send it with your bug report.",
+        "es": "El informe completo está en {file}: mándalo con tu reporte del problema.",
+    },
 }
 
 _lang = DEFAULT
@@ -603,6 +796,7 @@ def _menu_paths() -> dict[str, str]:
         "menu_smooth": (_item("quality_menu"), _item("latency"), _item("lat_smooth")),
         "menu_x264": (_item("quality_menu"), _item("encoder"), "x264 (CPU)"),
         "menu_720p": (_item("source_menu"), _item("extend_size"), "720p"),
+        "menu_probe": (_item("more"), _item("probe")),
     }
     return {name: " > ".join(words) for name, words in paths.items()}
 
