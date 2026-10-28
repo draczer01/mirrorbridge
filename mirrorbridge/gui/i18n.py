@@ -317,6 +317,96 @@ _STRINGS: dict[str, dict[str, str]] = {
     "pair_cancelled": {"en": "Pairing cancelled", "es": "Emparejamiento cancelado"},
     "pin_refused": {"en": "The device did not accept the PIN", "es": "El dispositivo no aceptó el PIN"},
     "powershell_failed": {"en": "PowerShell failed", "es": "PowerShell falló"},
+    # Screen mirroring (mirrorbridge.mirror)
+    "mirror_connect_failed": {
+        "en": "Could not connect to {device} ({address}:{port}): {error}. Check that the TV is on and on the same "
+              "network as this PC.",
+        "es": "No se pudo conectar con {device} ({address}:{port}): {error}. Revisa que la TV esté encendida y en "
+              "la misma red que este equipo.",
+    },
+    "mirror_verify_refused": {
+        "en": "{device} did not accept MirrorBridge's pairing (pair-verify: {reason}). Use {menu_forget}, then cast "
+              "again and type the new PIN the TV shows.",
+        "es": "{device} no aceptó el emparejamiento de MirrorBridge (pair-verify: {reason}). Usa {menu_forget}, "
+              "vuelve a transmitir y escribe el PIN nuevo que muestra la TV.",
+    },
+    "mirror_not_paired": {
+        "en": "MirrorBridge is not paired with {device}. Use {menu_pair}, then try again.",
+        "es": "MirrorBridge no está emparejado con {device}. Usa {menu_pair} y vuelve a intentarlo.",
+    },
+    "mirror_no_info": {
+        "en": "{device} did not say what it can show (GET /info: {answer}).",
+        "es": "{device} no dijo qué puede mostrar (GET /info: {answer}).",
+    },
+    "mirror_fairplay": {
+        "en": "{device} needs FairPlay for screen mirroring (an Apple TV or a Mac), which MirrorBridge does not "
+              "have yet. Cast to it as usual instead.",
+        "es": "{device} necesita FairPlay para duplicar la pantalla (es un Apple TV o un Mac), y MirrorBridge "
+              "todavía no lo tiene. Transmite como siempre en su lugar.",
+    },
+    "mirror_no_timing": {
+        "en": "The TV never asked MirrorBridge for the time (UDP port {port}), so it cannot show the picture. "
+              "Allow MirrorBridge, or inbound UDP ports {ports}, in Windows Firewall on private networks, then "
+              "try again.",
+        "es": "La TV nunca le pidió la hora a MirrorBridge (puerto UDP {port}), así que no puede mostrar la "
+              "imagen. Permite MirrorBridge, o los puertos UDP de entrada {ports}, en el Firewall de Windows "
+              "para redes privadas y vuelve a intentarlo.",
+    },
+    "mirror_password": {
+        "en": "The TV asks for an AirPlay password (HTTP 401), which MirrorBridge does not send for screen "
+              "mirroring yet. Turn off the AirPlay password in the TV's AirPlay settings, then try again.",
+        "es": "La TV pide una contraseña de AirPlay (HTTP 401), y MirrorBridge todavía no la envía al duplicar "
+              "la pantalla. Desactiva la contraseña en los ajustes de AirPlay de la TV y vuelve a intentarlo.",
+    },
+    "mirror_no_answer": {
+        "en": "The TV stopped answering while screen mirroring was set up ({steps}). Check that the PC and the TV "
+              "are on the same network, then try again.",
+        "es": "La TV dejó de responder mientras se preparaba la duplicación de pantalla ({steps}). Revisa que el "
+              "equipo y la TV estén en la misma red y vuelve a intentarlo.",
+    },
+    "mirror_refused": {
+        "en": "The TV turned down screen mirroring ({steps}). Please report this TV, with mirrorbridge.log.",
+        "es": "La TV rechazó la duplicación de pantalla ({steps}). Avisa de esta TV y manda mirrorbridge.log.",
+    },
+    "mirror_no_data_port": {
+        "en": "The TV accepted screen mirroring but named no port for the video ({steps}). Please report this "
+              "TV, with mirrorbridge.log.",
+        "es": "La TV aceptó la duplicación de pantalla, pero no indicó ningún puerto para el video ({steps}). "
+              "Avisa de esta TV y manda mirrorbridge.log.",
+    },
+    "mirror_no_ptp": {
+        "en": "The TV wants PTP timing, which MirrorBridge does not have yet.",
+        "es": "La TV quiere sincronizar la hora por PTP, y MirrorBridge todavía no lo tiene.",
+    },
+    "mirror_data_refused": {
+        "en": "The TV did not take the video connection (TCP port {port}: {answer}).",
+        "es": "La TV no aceptó la conexión del video (puerto TCP {port}: {answer}).",
+    },
+    "mirror_data_closed": {
+        "en": "The TV closed the video connection after {frames} frames. It may not take this video: please "
+              "report this TV, with mirrorbridge.log.",
+        "es": "La TV cerró la conexión del video después de {frames} fotogramas. Puede que no acepte este "
+              "video: avisa de esta TV y manda mirrorbridge.log.",
+    },
+    "mirror_tv_ended": {"en": "The TV ended screen mirroring", "es": "La TV terminó la duplicación de pantalla"},
+    "mirror_time_up": {
+        "en": "Mirrored for {seconds} s, as asked",
+        "es": "Pantalla duplicada durante {seconds} s, como se pidió",
+    },
+    "mirror_what_test": {"en": "the test pattern", "es": "la imagen de prueba"},
+    "mirror_what_screen": {"en": "this PC's screen", "es": "la pantalla de este equipo"},
+    "mirror_casting": {
+        "en": "Mirroring {what} to {device} ({width}x{height}, {fps} fps)",
+        "es": "Duplicando {what} en {device} ({width}x{height}, {fps} fps)",
+    },
+    "mirror_probe_works": {
+        "en": "Screen mirroring works with {device}: {how}.",
+        "es": "La duplicación de pantalla funciona con {device}: {how}.",
+    },
+    "mirror_probe_failed": {
+        "en": "Screen mirroring did not work with {device}. Please report this TV, with mirrorbridge.log.",
+        "es": "La duplicación de pantalla no funcionó con {device}. Avisa de esta TV y manda mirrorbridge.log.",
+    },
     # The TV did not play the video
     "tv_password": {
         "en": "The TV asks for an AirPlay password (HTTP 401), which MirrorBridge cannot send with video it "
