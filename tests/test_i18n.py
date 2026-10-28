@@ -230,18 +230,18 @@ def test_choosing_spanish_in_the_window_retranslates_it_and_the_tray_menu(contro
     tray = TrayMenu(controller, lambda: None, lambda: None)
     window = MainWindow(controller)
     controller.cast_state_changed.emit(State.STARTING, Text("checking_ffmpeg", "Checking FFmpeg and encoders"))
-    assert window.status_label.text() == "Starting the encoder: Checking FFmpeg and encoders"
+    assert window.status_label.text() == "Connecting to the TV…"
     english = _window_texts(window)
 
     window.language_combo.setCurrentIndex(window.language_combo.findData("es"))
     assert i18n.language() == "es" and Settings.load().language == "es"
     spanish = _window_texts(window)
     assert window.windowTitle() == "MirrorBridge - AirPlay para Windows"
-    assert {"Dispositivos AirPlay", "Buscar de nuevo", "Qué transmitir", "Resolución", "Nativa",
+    assert {"1. Elige tu TV", "Buscar de nuevo", "2. Qué mostrar", "Resolución", "Nativa",
             "Bajo (~3 s de retraso)", "Automático (el mejor disponible)", "Pantalla 1: 1920x1080 (principal)",
-            "Transmitir"} <= set(spanish)
+            "Mostrar mi pantalla en la TV", "Ajustes avanzados"} <= set(spanish)
     # The status line is said again, what the session said included
-    assert window.status_label.text() == "Iniciando el codificador: Comprobando FFmpeg y los codificadores"
+    assert window.status_label.text() == "Conectando con la TV…"
     assert set(english) & set(spanish) <= _same_in_every_language()  # no English left
     assert _menu_texts(tray.menu)[0] == "Abrir MirrorBridge"
 

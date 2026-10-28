@@ -399,26 +399,29 @@ class Controller(QObject):
 
     # -- pairing -----------------------------------------------------------
 
-    def pair(self, device: Optional[Device] = None, then: Optional[Callable[[], None]] = None) -> None:
-        """Pair (and set the AirPlay password if the receiver has one), then run `then`."""
+    def pair(self, device: Optional[Device] = None, then: Optional[Callable[[], None]] = None,
+             always: bool = False) -> None:
+        """Pair (and set the AirPlay password if the receiver has one), then run `then`. With
+        `then`, it pairs only when the receiver requires it, unless `always` (Mirror screen needs
+        MirrorBridge's own pairing even with a TV that would cast without one)."""
         device = device or self.selected_device
         if device is None or self.pairing:
             return
         self.pairing = True
         try:
-            self._pair(device, then)
+            self._pair(device, then, always)
         except Exception:
             self.pairing = False
             raise
 
-    def _pair(self, device: Device, then: Optional[Callable[[], None]]) -> None:
+    def _pair(self, device: Device, then: Optional[Callable[[], None]], always: bool = False) -> None:
         password = None
         if device.needs_password:
             password = self._ask_text(tr("password_title"), tr("password_prompt", device=device.name), True)
             if password is None:
                 self.pairing = False
                 return
-        explicit = then is None  # the Pair menu item always pairs; casting only when required
+        explicit = then is None or always  # the Pair menu item always pairs; casting only when required
         _LOGGER.info(tr("pairing", device=device.name))
 
         async def run():
@@ -527,11 +530,10 @@ class Controller(QObject):
 
     @classmethod
     def can_mirror(cls, device: Optional[Device]) -> bool:
-        """Mirror screen (experimental) needs a receiver that mirrors, the pairing MirrorBridge
-        saved for it, whose pair-verify keys the video, and a TV that does not need FairPlay
-        (Apple TVs and Macs do)."""
-        return bool(device and cls._mirrors(device) and device.is_paired
-                    and not mirror.Target.from_device(device).needs_fairplay)
+        """Mirror screen (experimental) needs a receiver that mirrors and does not need FairPlay
+        (Apple TVs and Macs do). Without MirrorBridge's pairing, whose pair-verify keys the video,
+        it pairs first: the TV shows a PIN."""
+        return bool(device and cls._mirrors(device) and not mirror.Target.from_device(device).needs_fairplay)
 
     @classmethod
     def mirror_tip(cls, device: Optional[Device]) -> str:
@@ -541,17 +543,46 @@ class Controller(QObject):
         if device is not None and mirror.Target.from_device(device).needs_fairplay:
             return tr("mirror_apple_tv")
         if device is not None and not device.is_paired:
-            return say(Text("mirror_pair_first", "Pair with this TV first: Device > Pair with PIN."))
+            return tr("mirror_pairs_first")
         return tr("mirror_hint")
+
+    def primary_action(self, device: Optional[Device] = None) -> str:
+        """What the window's one big button does with `device` (the selected one by default):
+        "mirror" when the TV takes Mirror screen, "cast" when it only takes a cast (Apple TVs
+        and Macs, until MirrorBridge has FairPlay), "" when it shows no picture at all."""
+        device = device if device is not None else self.selected_device
+        if device is None or not device.can_cast_video:
+            return ""
+        return "mirror" if self.can_mirror(device) else "cast"
+
+    def start_primary(self, *_args) -> None:
+        """The window's big button: Mirror screen when the TV takes it, otherwise a cast."""
+        action = self.primary_action()
+        if action == "mirror":
+            self.start_mirror()
+        elif action == "cast":
+            self.start_cast()
 
     def start_mirror(self, *_args) -> None:
         """Mirror screen: what What to cast names (a display, a window, or with Extend screen the
         virtual screen), on the TV a fraction of a second behind, with the Quality settings. It
-        starts, shows its states and stops as a cast does (the session is mirror.MirrorSession),
-        it offers to fix the virtual screen driver as a cast does, and it is the one session at a
-        time too."""
+        pairs first when MirrorBridge has no pairing for the TV, starts, shows its states and stops
+        as a cast does (the session is mirror.MirrorSession), it offers to fix the virtual screen
+        driver as a cast does, and it is the one session at a time too."""
         device = self.selected_device
-        if self.is_active or device is None or not self.can_mirror(device):
+        if not self.is_active and device is not None and self.can_mirror(device) and not device.is_paired:
+            self.pair(device, then=self._mirror_after_pairing, always=True)
+            return
+        self._mirror()
+
+    def _mirror_after_pairing(self) -> None:
+        device = self.selected_device
+        if device is not None and device.is_paired:  # never pairs again in a loop
+            self._mirror()
+
+    def _mirror(self) -> None:
+        device = self.selected_device
+        if self.is_active or device is None or not self.can_mirror(device) or not device.is_paired:
             return
 
         def on_status(state: State, message: str) -> None:

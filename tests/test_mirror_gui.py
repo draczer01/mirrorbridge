@@ -169,12 +169,21 @@ def test_mirror_screen_is_offered_for_a_paired_tv_of_another_brand(controller):
         "LG…); no sound yet.")
 
 
-def test_mirror_screen_needs_the_pairing(controller):
+def test_mirror_screen_pairs_first(controller, monkeypatch):
+    """Without MirrorBridge's pairing, Mirror screen is still offered: it pairs (the TV shows a PIN),
+    then mirrors."""
     _choose(controller, _device(credentials=None))
     item = _items(_tray(controller))[MIRROR]
-    assert not item.isEnabled() and item.toolTip() == "Pair with this TV first: Device > Pair with PIN."
+    assert item.isEnabled() and item.toolTip() == (
+        "The first time, the TV shows a 4-digit code to type in here. Then your screen appears on the TV.")
+    asked = []
+    monkeypatch.setattr(controller, "pair",
+                        lambda device=None, then=None, always=False: asked.append((device.name, then, always)))
     controller.start_mirror()
+    assert asked == [("TCL 55QM7L", controller._mirror_after_pairing, True)]  # pylint: disable=protected-access
     assert not controller.is_active and controller.session is None
+    controller._mirror_after_pairing()  # pylint: disable=protected-access  # a pairing that did not take
+    assert not controller.is_active and len(asked) == 1  # nothing starts, and it does not pair again in a loop
 
 
 def test_an_apple_tv_is_told_mirroring_is_coming(controller):
@@ -197,7 +206,9 @@ def test_a_receiver_that_does_not_mirror_is_not_offered_it(controller, txt):
     item = _items(_tray(controller))[MIRROR]
     assert not item.isEnabled() and item.toolTip() == "This receiver does not say that it takes screen mirroring."
     window = MainWindow(controller)
-    assert not window.mirror_btn.isEnabled() and window.mirror_btn.toolTip() == item.toolTip()
+    # The window's big button casts to a TV that does not mirror, and is off for a speaker
+    assert controller.primary_action() == ("cast" if txt is NO_SCREEN_TXT else "")
+    assert window.show_btn.isEnabled() == (txt is NO_SCREEN_TXT)
     controller.start_mirror()
     assert not controller.is_active and controller.session is None
     _choose(controller, _device(txt=txt, name="Kitchen", credentials=None))  # not "pair first": it would not help
@@ -216,18 +227,21 @@ def test_mirror_screen_in_spanish(controller):
     item = _items(tray)["Duplicar pantalla (baja latencia, experimental)"]
     assert item.isEnabled() and item.toolTip().startswith("Tu pantalla en la TV con una fracción de segundo de retraso")
     window = MainWindow(controller)
-    assert window.mirror_btn.text() == "Duplicar pantalla (baja latencia, experimental)"
-    assert window.mirror_btn.isEnabled() and window.mirror_btn.toolTip() == item.toolTip()
+    assert window.show_btn.text() == "Mostrar mi pantalla en TCL 55QM7L" and window.show_btn.isEnabled()
+    assert window.action_hint.text().startswith("Tu pantalla aparece en la TV casi al instante.")
 
     _choose(controller, _device(credentials=None))
     item = _items(_tray(controller))["Duplicar pantalla (baja latencia, experimental)"]
-    assert item.toolTip() == "Primero empareja esta TV: Dispositivo > Emparejar con PIN."
+    assert item.toolTip() == ("La primera vez, la TV muestra un código de 4 números para escribirlo aquí. Luego tu "
+                              "pantalla aparece en la TV.")
     _choose(controller, _device(txt=APPLE_TV_TXT))
     item = _items(_tray(controller))["Duplicar pantalla (baja latencia, experimental)"]
     assert item.toolTip() == ("La duplicación de pantalla en Apple TV y Mac llegará en una versión futura. Por ahora, "
                               "transmite a ellos con Transmitir.")
-    controller.set_language("en")
-    assert window.mirror_btn.text() == MIRROR and not window.mirror_btn.isEnabled()
+    controller.set_language("en")  # the window says it again, for the Apple TV now chosen: it casts
+    assert window.show_btn.text() == "Show my screen on TCL 55QM7L" and window.show_btn.isEnabled()
+    assert window.action_hint.text().startswith("On an Apple TV your screen appears a few seconds behind")
+    assert window.cast_btn.isHidden()  # the big button already casts
 
 
 # -- a session, from the tray menu ---------------------------------------------------------------------
@@ -254,8 +268,8 @@ def test_mirror_screen_runs_like_a_cast(controller, tv):
 
     assert controller.status() == ("active", "Mirroring to TCL 55QM7L")
     assert tray.tray.toolTip() == "MirrorBridge - Mirroring to TCL 55QM7L"
-    assert window.status_label.text() == "Casting: Mirroring this PC's screen to TCL 55QM7L (640x360, 30 fps)"
-    assert window.cast_btn.text() == "Stop mirroring" and not window.mirror_btn.isEnabled()
+    assert window.status_label.text() == "Your screen is on TCL 55QM7L"
+    assert window.show_btn.text() == "Stop showing on TCL 55QM7L" and not window.file_btn.isEnabled()
     tray._rebuild()  # pylint: disable=protected-access
     items = _items(tray)
     assert "Stop mirroring" in items and "Start casting to TCL 55QM7L" not in items
@@ -280,7 +294,7 @@ def test_mirror_screen_runs_like_a_cast(controller, tv):
     assert states[-1] == (State.STOPPED, "Stopped")
     assert notes == [("Mirroring to TCL 55QM7L", "", False), ("Screen mirroring stopped", "", False)]
     assert controller.status() == ("idle", "Not casting") and not controller.mirroring
-    assert window.cast_btn.text() == "Start casting" and window.mirror_btn.isEnabled()
+    assert window.show_btn.text() == "Show my screen on TCL 55QM7L" and window.file_btn.isEnabled()
     _until(lambda: _tasks(controller) == before, 5)  # nothing left running
     assert opened == [] and not window.isVisible()  # it never opens the window by itself
     saved = profiles.load("fake-tv")  # what worked, asked for first next time
@@ -303,7 +317,7 @@ def test_a_failed_mirror_is_reported_as_a_failed_cast_is(controller, tv):
     error = ("TCL 55QM7L no aceptó el emparejamiento de MirrorBridge (pair-verify: M4 error 2 (Authentication)). Usa "
              "Dispositivo > Olvidar emparejamiento, vuelve a transmitir y escribe el PIN nuevo que muestra la TV.")
     assert notes == [("La duplicación de pantalla falló", error, True)]
-    assert window.status_label.text() == f"Falló: {error}"
+    assert window.status_label.text() == f"No funcionó: {error}"
     assert controller.cast_state == State.FAILED and controller.status()[0] == "idle"
     _until(lambda: _tasks(controller) == before, 5)
 
@@ -458,7 +472,7 @@ def test_a_virtual_screen_that_goes_away_is_explained_in_spanish(controller, tv,
     error = ("La pantalla virtual se cerró (por ejemplo, al suspender el equipo). Vuelve a transmitir o a duplicar "
              "la pantalla.")
     assert notes[-1] == ("La duplicación de pantalla falló", error, True)
-    assert window.status_label.text() == f"Falló: {error}" and driver.events[-1] == "stop"
+    assert window.status_label.text() == f"No funcionó: {error}" and driver.events[-1] == "stop"
 
 
 def test_mirror_screen_offers_to_install_the_driver_as_a_cast_does(controller, tv, monkeypatch):

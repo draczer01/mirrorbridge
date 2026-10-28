@@ -60,6 +60,7 @@ def apply_dark_theme(app: QApplication) -> None:
         QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #a0a0aa; }}
         QListWidget {{ border: 1px solid #3a3a3f; border-radius: 8px; padding: 4px; }}
         QListWidget::item {{ padding: 8px; border-radius: 6px; }}
+        QListWidget::item:selected {{ background: {ACCENT}; color: white; }}
         QPushButton {{ padding: 6px 12px; border-radius: 6px; background: #2c2c30; border: 1px solid #3a3a3f; }}
         QPushButton:hover {{ background: #36363b; }}
         QPushButton:disabled {{ color: #6a6a70; }}
@@ -67,6 +68,10 @@ def apply_dark_theme(app: QApplication) -> None:
                             padding: 10px; border: none; }}
         QPushButton#cast[casting="true"] {{ background: #ff453a; }}
         QPushButton#cast:disabled {{ background: #3a3a3f; color: #888; }}
+        QLabel#hint {{ color: #a0a0aa; }}
+        QLabel#status {{ font-weight: 600; }}
+        QToolButton#section {{ border: none; color: #c8c8d0; font-weight: 600; padding: 4px 0; }}
+        QFrame#rule {{ color: #3a3a3f; }}
         QPlainTextEdit {{ font-family: Consolas, monospace; font-size: 11px; border-radius: 6px; }}
         QMenu {{ background: #2a2a2e; border: 1px solid #3a3a3f; padding: 4px; }}
         QMenu::item {{ padding: 6px 24px 6px 24px; border-radius: 4px; }}

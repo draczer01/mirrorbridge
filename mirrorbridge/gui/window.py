@@ -1,26 +1,82 @@
-"""The full window, opened from the tray menu's "Open" item. Closing it hides it."""
+"""The full window, opened from the tray menu's "Open" item. Closing it hides it.
+
+It is laid out for someone who has never used it: three numbered steps (choose your TV, what to
+show, show it) and one big button that picks the best way to show the screen on the chosen TV.
+What it will do, or why it cannot and what to do about it, is written under the button rather
+than in a tooltip. The other ways to show, the quality settings and the activity log are folded
+away below.
+"""
 
 from __future__ import annotations
 
 import contextlib
 import os
-from typing import Callable
+from typing import Callable, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
-    QListWidget, QListWidgetItem, QMainWindow, QPlainTextEdit, QPushButton, QRadioButton,
-    QSlider, QSplitter, QStyle, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QListWidget,
+    QListWidgetItem, QMainWindow, QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QSlider,
+    QStyle, QToolButton, QVBoxLayout, QWidget,
 )
 
-from .. import APP_NAME, ffmpeg, vdisplay
+from .. import APP_NAME, ffmpeg, mirror, vdisplay
+from ..devices import Device
 from ..session import State
 from .controller import Controller
 from .extend import EXTEND_SIZES, error_text, size_label
-from .i18n import LANGUAGES, language, language_menu_title, say, state_text, tr
+from .i18n import LANGUAGES, language, language_menu_title, say, tr
 from .theme import app_icon
 from .tray import LATENCIES, RESOLUTIONS, display_label
+
+_CONNECTING = (State.STARTING, State.BUFFERING, State.CONNECTING)
+
+
+class Section(QWidget):
+    """A heading that folds its content away, closed until it is clicked."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.toggle = QToolButton()
+        self.toggle.setObjectName("section")
+        self.toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.toggle.setArrowType(Qt.RightArrow)
+        self.toggle.setCheckable(True)
+        self.toggle.toggled.connect(self.set_open)
+        self.body = QWidget()
+        self.body.setVisible(False)
+        self.content = QVBoxLayout(self.body)
+        self.content.setContentsMargins(18, 4, 0, 4)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.toggle)
+        layout.addWidget(self.body)
+
+    def set_title(self, title: str) -> None:
+        self.toggle.setText(title)
+
+    def set_open(self, on: bool) -> None:
+        self.toggle.setChecked(on)
+        self.toggle.setArrowType(Qt.DownArrow if on else Qt.RightArrow)
+        self.body.setVisible(on)
+
+    def is_open(self) -> bool:
+        return self.toggle.isChecked()
+
+
+def _hint() -> QLabel:
+    """A line of explanation in smaller, softer words, under the control it explains."""
+    label = QLabel()
+    label.setObjectName("hint")
+    label.setWordWrap(True)
+    return label
+
+
+def _step_title() -> QLabel:
+    label = QLabel()
+    label.setFont(QFont(label.font().family(), 12, QFont.DemiBold))
+    return label
 
 
 class MainWindow(QMainWindow):
@@ -31,10 +87,10 @@ class MainWindow(QMainWindow):
         self.on_close = on_close  # set when there is no tray: closing then quits the app
         self._loading = False  # True while code (not the user) fills the controls
         self._saving = False  # True while our own change is being written to settings
-        self._status: Callable[[], str] = lambda: tr("select_device")  # what the status line says (_show_status)
+        self._status: Callable[[], str] = lambda: ""  # what the status line says (_show_status)
         self._monitors: list[ffmpeg.Monitor] = []
         self.setWindowIcon(app_icon())
-        self.resize(980, 640)
+        self.resize(620, 760)
         self._build_ui()
         self._load_settings()
         self._render_devices()
@@ -58,62 +114,121 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         """The controls; _retranslate gives them their words."""
-        root = QWidget()
-        layout = QHBoxLayout(root)
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(8)
 
-        left = QVBoxLayout()
-        self.devices_title = QLabel()
-        self.devices_title.setFont(QFont(self.devices_title.font().family(), 13, QFont.DemiBold))
-        left.addWidget(self.devices_title)
+        # The same choice as the tray menu's, named in every language so anyone finds it.
+        lrow = QHBoxLayout()
+        lrow.addStretch(1)
+        lrow.addWidget(QLabel(language_menu_title()))
+        self.language_combo = QComboBox()
+        for code, name in LANGUAGES.items():
+            self.language_combo.addItem(name, code)
+        self.language_combo.setCurrentIndex(max(0, self.language_combo.findData(language())))
+        lrow.addWidget(self.language_combo)
+        layout.addLayout(lrow)
+
+        # 1. Choose your TV
+        self.step1_title = _step_title()
+        layout.addWidget(self.step1_title)
         self.device_list = QListWidget()
+        self.device_list.setMinimumHeight(120)
         self.device_list.currentRowChanged.connect(self._device_clicked)
-        left.addWidget(self.device_list, 1)
+        layout.addWidget(self.device_list, 1)
+        self.devices_hint = _hint()
+        layout.addWidget(self.devices_hint)
         row = QHBoxLayout()
         self.refresh_btn = QPushButton()
         self.refresh_btn.clicked.connect(self.c.refresh_devices)
         self.add_ip_btn = QPushButton()
         self.add_ip_btn.clicked.connect(self.c.ask_add_host)
+        row.addWidget(self.refresh_btn)
+        row.addWidget(self.add_ip_btn)
+        row.addStretch(1)
+        layout.addLayout(row)
+        layout.addSpacing(6)
+
+        # 2. What to show
+        self.step2_title = _step_title()
+        layout.addWidget(self.step2_title)
+        self.rb_display = QRadioButton()
+        self.monitor_combo = QComboBox()
+        drow = QHBoxLayout()
+        drow.addWidget(self.rb_display)
+        drow.addWidget(self.monitor_combo, 1)
+        layout.addLayout(drow)
+        self.rb_window = QRadioButton()
+        self.window_combo = QComboBox()
+        self.window_combo.setEditable(True)
+        self.window_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.refresh_win = QPushButton()
+        self.refresh_win.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
+        self.refresh_win.clicked.connect(self._fill_windows)
+        wrow = QHBoxLayout()
+        wrow.addWidget(self.rb_window)
+        wrow.addWidget(self.window_combo, 1)
+        wrow.addWidget(self.refresh_win)
+        layout.addLayout(wrow)
+        self.rb_extend = QRadioButton()
+        self.rb_extend.setEnabled(vdisplay.available())
+        layout.addWidget(self.rb_extend)
+        self.extend_hint = _hint()
+        self.extend_hint.setContentsMargins(24, 0, 0, 0)
+        layout.addWidget(self.extend_hint)
+        layout.addSpacing(6)
+
+        # 3. Show it
+        self.step3_title = _step_title()
+        layout.addWidget(self.step3_title)
+        self.show_btn = QPushButton()
+        self.show_btn.setObjectName("cast")
+        self.show_btn.setMinimumHeight(48)
+        self.show_btn.clicked.connect(self._show_clicked)
+        layout.addWidget(self.show_btn)
+        self.action_hint = _hint()
+        layout.addWidget(self.action_hint)
+        self.status_label = QLabel()
+        self.status_label.setObjectName("status")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+        self.file_btn = QPushButton()
+        self.file_btn.clicked.connect(self._play_file)
+        frow = QHBoxLayout()
+        frow.addWidget(self.file_btn)
+        frow.addStretch(1)
+        layout.addLayout(frow)
+
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setObjectName("rule")
+        layout.addWidget(line)
+
+        # Other ways to show: the fallbacks, and the pairing by hand
+        self.other_section = Section()
+        self.cast_btn = QPushButton()
+        self.cast_btn.clicked.connect(self._cast_clicked)
+        self.cast_hint = _hint()
         self.pair_btn = QPushButton()
         self.pair_btn.clicked.connect(lambda: self.c.pair())
         self.forget_btn = QPushButton()
         self.forget_btn.clicked.connect(self.c.forget)
-        for b in (self.refresh_btn, self.add_ip_btn, self.pair_btn, self.forget_btn):
-            row.addWidget(b)
-        left.addLayout(row)
-        left_w = QWidget()
-        left_w.setLayout(left)
+        prow = QHBoxLayout()
+        prow.addWidget(self.pair_btn)
+        prow.addWidget(self.forget_btn)
+        prow.addStretch(1)
+        for widget in (self.cast_btn, self.cast_hint):
+            self.other_section.content.addWidget(widget)
+        self.other_section.content.addLayout(prow)
+        layout.addWidget(self.other_section)
 
-        right = QVBoxLayout()
-        self.source_box = QGroupBox()
-        sf = QFormLayout(self.source_box)
-        self.rb_display = QRadioButton()
-        self.rb_window = QRadioButton()
-        self.monitor_combo = QComboBox()
-        self.window_combo = QComboBox()
-        self.window_combo.setEditable(True)
-        self.window_combo.setInsertPolicy(QComboBox.NoInsert)
-        refresh_win = QPushButton()
-        refresh_win.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
-        refresh_win.clicked.connect(self._fill_windows)
-        wrow = QHBoxLayout()
-        wrow.addWidget(self.window_combo, 1)
-        wrow.addWidget(refresh_win)
-        self.rb_extend = QRadioButton()
-        self.rb_extend.setEnabled(vdisplay.available())
+        # Advanced settings: what most people never need to touch
+        self.advanced_section = Section()
+        af = QFormLayout()
         self.extend_combo = QComboBox()
         for _name, mode in EXTEND_SIZES:
             self.extend_combo.addItem(size_label(mode), mode)
-        sf.addRow(self.rb_display, self.monitor_combo)
-        sf.addRow(self.rb_window, wrow)
-        sf.addRow(self.rb_extend, self.extend_combo)
-        self.audio_cb = QCheckBox()
-        self.cursor_cb = QCheckBox()
-        sf.addRow(self.audio_cb)
-        sf.addRow(self.cursor_cb)
-        right.addWidget(self.source_box)
-
-        self.quality_box = QGroupBox()
-        qf = QFormLayout(self.quality_box)
         self.res_combo = QComboBox()
         for label, h in RESOLUTIONS:
             self.res_combo.addItem(label, h)
@@ -131,53 +246,33 @@ class MainWindow(QMainWindow):
             self.latency_combo.addItem("", value)
         self.encoder_combo = QComboBox()
         self._row_labels: dict[str, QLabel] = {}  # i18n key -> the label in front of its control
-        for key, field in (("resolution", self.res_combo), ("framerate", self.fps_combo), ("bitrate", brow),
-                           ("latency", self.latency_combo), ("encoder", self.encoder_combo)):
+        for key, field in (("extend_size", self.extend_combo), ("resolution", self.res_combo),
+                           ("framerate", self.fps_combo), ("bitrate", brow), ("ui_cast_latency", self.latency_combo),
+                           ("encoder", self.encoder_combo)):
             self._row_labels[key] = QLabel()
-            qf.addRow(self._row_labels[key], field)
-        right.addWidget(self.quality_box)
+            af.addRow(self._row_labels[key], field)
+        self.audio_cb = QCheckBox()
+        self.cursor_cb = QCheckBox()
+        af.addRow(self.audio_cb)
+        af.addRow(self.cursor_cb)
+        self.advanced_section.content.addLayout(af)
+        layout.addWidget(self.advanced_section)
 
-        self.status_label = QLabel()
-        self.status_label.setWordWrap(True)
-        right.addWidget(self.status_label)
-        self.cast_btn = QPushButton()
-        self.cast_btn.setObjectName("cast")
-        self.cast_btn.clicked.connect(self._cast_clicked)
-        right.addWidget(self.cast_btn)
-        self.mirror_btn = QPushButton()
-        self.mirror_btn.clicked.connect(lambda: self.c.start_mirror())
-        right.addWidget(self.mirror_btn)
-        self.file_btn = QPushButton()
-        self.file_btn.clicked.connect(self._play_file)
-        right.addWidget(self.file_btn)
-        right.addStretch(1)
-        # The same choice as the tray menu's, named in every language so anyone finds it.
-        lrow = QHBoxLayout()
-        lrow.addWidget(QLabel(language_menu_title()))
-        self.language_combo = QComboBox()
-        for code, name in LANGUAGES.items():
-            self.language_combo.addItem(name, code)
-        self.language_combo.setCurrentIndex(max(0, self.language_combo.findData(language())))
-        lrow.addWidget(self.language_combo)
-        lrow.addStretch(1)
-        right.addLayout(lrow)
-        right_w = QWidget()
-        right_w.setLayout(right)
-
-        top = QSplitter()
-        top.addWidget(left_w)
-        top.addWidget(right_w)
-        top.setSizes([420, 520])
-
+        # Technical details: the activity log, for a bug report
+        self.details_section = Section()
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(2000)
-        outer = QSplitter(Qt.Vertical)
-        outer.addWidget(top)
-        outer.addWidget(self.log_view)
-        outer.setSizes([480, 140])
-        layout.addWidget(outer)
-        self.setCentralWidget(root)
+        self.log_view.setMinimumHeight(160)
+        self.details_section.content.addWidget(self.log_view)
+        layout.addWidget(self.details_section)
+        layout.addStretch(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(page)
+        self.setCentralWidget(scroll)
         self._retranslate()
 
         # Every control writes straight to the shared settings, so the tray menu agrees.
@@ -202,24 +297,28 @@ class MainWindow(QMainWindow):
     def _retranslate(self) -> None:
         """Every fixed word in the window, in the app's language."""
         self.setWindowTitle(tr("window_title"))
-        self.devices_title.setText(tr("devices"))
+        for label, key in ((self.step1_title, "ui_step_tv"), (self.step2_title, "ui_step_what"),
+                           (self.step3_title, "ui_step_show")):
+            label.setText(tr(key))
         for button, key in ((self.refresh_btn, "refresh"), (self.add_ip_btn, "add_ip"), (self.pair_btn, "pair"),
-                            (self.forget_btn, "forget"), (self.rb_display, "entire_display"),
-                            (self.rb_window, "single_window"), (self.rb_extend, "extend_screen"),
+                            (self.forget_btn, "forget"), (self.rb_display, "ui_show_display"),
+                            (self.rb_window, "ui_show_window"), (self.rb_extend, "ui_show_extend"),
                             (self.audio_cb, "audio"), (self.cursor_cb, "cursor"), (self.file_btn, "play_file"),
-                            (self.mirror_btn, "mirror_screen")):
+                            (self.cast_btn, "ui_cast_instead")):
             button.setText(tr(key))
-        self.source_box.setTitle(tr("source_menu"))
+        self.refresh_win.setToolTip(tr("ui_refresh_windows"))
         self.window_combo.setToolTip(tr("window_moved_hint"))
-        self.rb_extend.setToolTip(tr("extend_hint"))
-        self.extend_combo.setToolTip(tr("extend_size"))
-        self.quality_box.setTitle(tr("quality_menu"))
+        self.extend_hint.setText(tr("ui_extend_hint") if vdisplay.available() else tr("vdd_unsupported"))
+        self.cast_hint.setText(tr("ui_cast_hint"))
+        self.other_section.set_title(tr("ui_other_ways"))
+        self.advanced_section.set_title(tr("ui_advanced"))
+        self.details_section.set_title(tr("ui_details"))
         for key, label in self._row_labels.items():
             label.setText(tr(key))
         self.res_combo.setItemText(self.res_combo.findData(0), tr("native"))
         for i, (key, _value) in enumerate(LATENCIES):
             self.latency_combo.setItemText(i, tr(key))
-        self.status_label.setText(self._status())
+        self._show_status(self._status)
         self.log_view.setPlaceholderText(tr("log"))
 
     def _language_chosen(self, _index: int) -> None:
@@ -234,7 +333,7 @@ class MainWindow(QMainWindow):
         self._show_monitors(self._monitors)
         self._fill_devices()
         self._render_encoders(self.c.encoders)
-        self._update_buttons()  # Start casting or Stop casting
+        self._update_buttons()
 
     # -- settings <-> UI ---------------------------------------------------
 
@@ -291,6 +390,8 @@ class MainWindow(QMainWindow):
                 if not (virtual and mon.device == virtual):
                     self.monitor_combo.addItem(display_label(mon), mon.index)
             self.monitor_combo.setCurrentIndex(max(0, self.monitor_combo.findData(self.c.settings.monitor_index)))
+            # One screen needs no choosing: the combo only says which it is.
+            self.monitor_combo.setVisible(self.monitor_combo.count() > 1)
 
     def _fill_windows(self) -> None:
         current = self.c.settings.window_title or self.window_combo.currentText()
@@ -335,24 +436,49 @@ class MainWindow(QMainWindow):
 
     def _render_devices(self) -> None:
         self._fill_devices()
-        if not self.c.is_active:
-            n = len(self.c.devices)
-            self._show_status(lambda: tr("found_n", n=n) if n else tr("found_none"))
         self._update_buttons()
+
+    @staticmethod
+    def _apple(device: Device) -> bool:
+        return mirror.Target.from_device(device).needs_fairplay
+
+    def device_line(self, device: Device) -> str:
+        """What choosing `device` means, in a few plain words, under its name."""
+        if not device.can_cast_video:
+            return tr("ui_dev_speaker")
+        if device.status_key == "restricted":
+            return tr("ui_dev_restricted")
+        if self.c.can_mirror(device):
+            return tr("ui_dev_ready") if device.is_paired else tr("ui_dev_first_code")
+        if self._apple(device):
+            return tr("ui_dev_apple")
+        return tr("ui_dev_cast_only")
 
     def _fill_devices(self) -> None:
         with self._filling():
             self.device_list.clear()
             selected = self.c.selected_device
             for dev in self.c.devices:
-                item = QListWidgetItem(f"{dev.name}\n{dev.model} - {dev.address} - {tr('st_' + dev.status_key)}")
+                item = QListWidgetItem(f"{dev.name}\n{self.device_line(dev)}")
+                item.setToolTip(f"{dev.model} - {dev.address}")
                 icon = QStyle.SP_ComputerIcon if dev.can_cast_video else QStyle.SP_MediaVolume
                 item.setIcon(self.style().standardIcon(icon))
-                if not dev.can_cast_video:
+                if not dev.can_cast_video:  # a speaker shows no picture: it cannot be chosen
                     item.setForeground(QColor(140, 140, 150))
+                    item.setFlags(item.flags() & ~(Qt.ItemIsSelectable | Qt.ItemIsEnabled))
                 self.device_list.addItem(item)
                 if dev is selected:
                     self.device_list.setCurrentItem(item)
+        if self.c.scanning and not self.c.devices:
+            self.devices_hint.setText(tr("ui_searching"))
+        elif not self.c.devices:
+            self.devices_hint.setText(tr("ui_no_tv"))
+        elif not any(d.can_cast_video for d in self.c.devices):
+            self.devices_hint.setText(tr("ui_only_speakers"))
+        elif self.c.selected_device is None:
+            self.devices_hint.setText(tr("ui_pick_tv"))
+        else:
+            self.devices_hint.setText(tr("ui_same_wifi"))
 
     def _device_clicked(self, row: int) -> None:
         if not self._loading and 0 <= row < len(self.c.devices):
@@ -360,15 +486,22 @@ class MainWindow(QMainWindow):
 
     def _scanning(self, scanning: bool) -> None:
         self.refresh_btn.setEnabled(not scanning)
-        if scanning:
-            self._show_status(lambda: tr("searching"))
+        self.refresh_btn.setText(tr("searching") if scanning else tr("refresh"))
+        self._fill_devices()
 
     def _show_status(self, text: Callable[[], str]) -> None:
         """Show a status line, from a function so that another language can say it again."""
         self._status = text
         self.status_label.setText(text())
+        self.status_label.setVisible(bool(self.status_label.text()))
 
     # -- casting -----------------------------------------------------------
+
+    def _show_clicked(self) -> None:
+        if self.c.is_active:
+            self.c.stop_cast()
+        else:
+            self.c.start_primary()
 
     def _cast_clicked(self) -> None:
         self.c.toggle_cast()
@@ -381,13 +514,22 @@ class MainWindow(QMainWindow):
             self.c.play_file(path)
 
     def _cast_state(self, state: State, message) -> None:
+        device = self.c.casting_to
+        mirroring = self.c.mirroring
+
         def line() -> str:
-            text = state_text(state)
-            if message and state in (State.STARTING, State.CASTING, State.FAILED):
-                # encoder in use, stream address, or the error, in the user's language
+            if state in _CONNECTING:
+                return tr("ui_connecting", device=device) if device else tr("ui_connecting_tv")
+            if state == State.EXTENDING:
+                return tr("state_extending") + "…"
+            if state == State.CASTING:
+                return tr("ui_on_tv_mirror" if mirroring else "ui_on_tv_cast", device=device)
+            if state == State.STOPPING:
+                return tr("state_stopping") + "…"
+            if state == State.FAILED:
                 said = error_text(message) if isinstance(message, BaseException) else say(message)
-                text = f"{text}: {said}"
-            return text
+                return tr("ui_failed", error=said) if said else tr("ui_failed_plain")
+            return ""
 
         self._show_status(line)
 
@@ -396,21 +538,58 @@ class MainWindow(QMainWindow):
         if not self.c.is_active:  # a cast or Mirror screen that ended may have removed its virtual screen
             self.c.run_blocking(ffmpeg.list_monitors, on_ok=self._show_monitors)
 
+    def action_text(self, dev: Optional[Device]) -> str:
+        """The line under the big button: what it will do, or why it cannot and what to do."""
+        c = self.c
+        if c.is_active:
+            return tr("ui_hint_stop")
+        if not c.devices:
+            return tr("ui_hint_no_tv")
+        if dev is None:
+            return tr("ui_hint_pick")
+        if not dev.can_cast_video:
+            return tr("ui_dev_speaker")
+        if c.primary_action(dev) == "mirror":
+            return tr("ui_hint_mirror") if dev.is_paired else tr("ui_hint_mirror_first") + " " + tr("ui_hint_mirror")
+        hint = tr("ui_hint_apple") if self._apple(dev) else tr("ui_hint_cast")
+        if dev.needs_pairing or dev.needs_password:
+            hint = tr("ui_hint_cast_first") + " " + hint
+        return hint
+
     def _update_buttons(self) -> None:
-        dev = self.c.selected_device
-        active = self.c.is_active
+        c = self.c
+        dev = c.selected_device
+        active = c.is_active
         usable = bool(dev and dev.can_cast_video)
         self.pair_btn.setEnabled(usable and not active)
         self.forget_btn.setEnabled(bool(dev and dev.is_paired) and not active)
         self.device_list.setEnabled(not active)
-        self.cast_btn.setEnabled(usable or active)
-        self.mirror_btn.setEnabled(self.c.can_mirror(dev) and not active)
-        self.mirror_btn.setToolTip(self.c.mirror_tip(dev))
+        for widget in (self.rb_display, self.rb_window, self.monitor_combo, self.window_combo, self.refresh_win):
+            widget.setEnabled(not active)
+        self.rb_extend.setEnabled(vdisplay.available() and not active)
+        if not active:
+            self.monitor_combo.setEnabled(self.rb_display.isChecked())
+            self.window_combo.setEnabled(self.rb_window.isChecked())
+
+        if active:
+            name = c.casting_to
+            self.show_btn.setText(tr("ui_stop_on", device=name) if name else tr("ui_stop"))
+        elif usable:
+            self.show_btn.setText(tr("ui_show_on", device=dev.name))
+        else:
+            self.show_btn.setText(tr("ui_show_on_tv"))
+        self.show_btn.setEnabled(active or usable)
+        self.show_btn.setProperty("casting", "true" if active else "false")
+        self.show_btn.style().unpolish(self.show_btn)
+        self.show_btn.style().polish(self.show_btn)
+        self.action_hint.setText(self.action_text(dev))
+
+        # The fallbacks, for a TV where the big button's way does not work
+        self.cast_btn.setEnabled(usable and not active)
+        fallback = c.primary_action(dev) != "cast"  # with an Apple TV the big button already casts
+        self.cast_btn.setVisible(fallback)
+        self.cast_hint.setVisible(fallback)
         self.file_btn.setEnabled(usable and not active)
-        self.cast_btn.setText(tr("stop_mirror") if self.c.mirroring else tr("stop") if active else tr("start"))
-        self.cast_btn.setProperty("casting", "true" if active else "false")
-        self.cast_btn.style().unpolish(self.cast_btn)
-        self.cast_btn.style().polish(self.cast_btn)
 
     # -- window behaviour --------------------------------------------------
 

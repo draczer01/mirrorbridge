@@ -891,6 +891,117 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "The full report is in {file}: please send it with your bug report.",
         "es": "El informe completo está en {file}: mándalo con tu reporte del problema.",
     },
+    # The window, laid out for someone who has never used it (window.py)
+    "mirror_pairs_first": {
+        "en": "The first time, the TV shows a 4-digit code to type in here. Then your screen appears on the TV.",
+        "es": "La primera vez, la TV muestra un código de 4 números para escribirlo aquí. Luego tu pantalla aparece "
+              "en la TV.",
+    },
+    "ui_step_tv": {"en": "1. Choose your TV", "es": "1. Elige tu TV"},
+    "ui_step_what": {"en": "2. What to show", "es": "2. Qué mostrar"},
+    "ui_step_show": {"en": "3. Show it", "es": "3. Mostrar"},
+    "ui_show_display": {"en": "My screen, as it is", "es": "Mi pantalla, tal cual"},
+    "ui_show_window": {"en": "Only one window", "es": "Solo una ventana"},
+    "ui_show_extend": {"en": "As a second screen", "es": "Como segunda pantalla"},
+    "ui_extend_hint": {
+        "en": "Best for presenting: the TV becomes another screen next to yours. Drag your slides or video onto "
+              "it and keep your notes on the laptop. The first time, it installs a free driver from Parsec.",
+        "es": "Lo mejor para presentar: la TV se vuelve otra pantalla junto a la tuya. Arrastra ahí tus diapositivas "
+              "o tu video y deja tus notas en la laptop. La primera vez instala un controlador gratuito de Parsec.",
+    },
+    "ui_refresh_windows": {"en": "Look for open windows again", "es": "Volver a buscar ventanas abiertas"},
+    "ui_show_on": {"en": "Show my screen on {device}", "es": "Mostrar mi pantalla en {device}"},
+    "ui_show_on_tv": {"en": "Show my screen on the TV", "es": "Mostrar mi pantalla en la TV"},
+    "ui_stop_on": {"en": "Stop showing on {device}", "es": "Dejar de mostrar en {device}"},
+    "ui_stop": {"en": "Stop", "es": "Detener"},
+    "ui_dev_ready": {"en": "Ready", "es": "Lista"},
+    "ui_dev_first_code": {
+        "en": "Ready. The first time, it asks for a code shown on the TV",
+        "es": "Lista. La primera vez pide un código que aparece en la TV",
+    },
+    "ui_dev_apple": {
+        "en": "Apple TV: shows your screen a few seconds behind",
+        "es": "Apple TV: muestra tu pantalla con unos segundos de retraso",
+    },
+    "ui_dev_cast_only": {
+        "en": "Shows your screen a few seconds behind",
+        "es": "Muestra tu pantalla con unos segundos de retraso",
+    },
+    "ui_dev_speaker": {
+        "en": "A speaker: it plays sound only and cannot show your screen",
+        "es": "Una bocina: solo reproduce sonido y no puede mostrar tu pantalla",
+    },
+    "ui_dev_restricted": {
+        "en": "AirPlay is limited on this TV: in its AirPlay settings, allow everyone on the same network",
+        "es": "AirPlay está limitado en esta TV: en sus ajustes de AirPlay, permite a todos en la misma red",
+    },
+    "ui_searching": {"en": "Looking for TVs on your network…", "es": "Buscando TVs en tu red…"},
+    "ui_no_tv": {
+        "en": "No TV found. Check that the TV is on and that this computer is on the same Wi-Fi network, then "
+              "press Search again.",
+        "es": "No se encontró ninguna TV. Revisa que la TV esté encendida y que esta computadora esté en la misma red "
+              "Wi-Fi, y presiona Buscar de nuevo.",
+    },
+    "ui_only_speakers": {
+        "en": "Only speakers were found. Check that the TV is on and on the same Wi-Fi network.",
+        "es": "Solo se encontraron bocinas. Revisa que la TV esté encendida y en la misma red Wi-Fi.",
+    },
+    "ui_pick_tv": {"en": "Click the TV you want to use.", "es": "Haz clic en la TV que quieres usar."},
+    "ui_same_wifi": {
+        "en": "Don't see your TV? It must be on and on the same Wi-Fi network as this computer.",
+        "es": "¿No ves tu TV? Debe estar encendida y en la misma red Wi-Fi que esta computadora.",
+    },
+    "ui_hint_no_tv": {"en": "First find your TV in step 1.", "es": "Primero encuentra tu TV en el paso 1."},
+    "ui_hint_pick": {"en": "Choose a TV in step 1.", "es": "Elige una TV en el paso 1."},
+    "ui_hint_mirror": {
+        "en": "Your screen appears on the TV almost at once. No sound yet: for a video with sound, use Play a video "
+              "file.",
+        "es": "Tu pantalla aparece en la TV casi al instante. Todavía sin sonido: para un video con sonido, usa "
+              "Reproducir un archivo de video.",
+    },
+    "ui_hint_mirror_first": {
+        "en": "The first time, the TV shows a 4-digit code: type it in when MirrorBridge asks.",
+        "es": "La primera vez, la TV muestra un código de 4 números: escríbelo cuando MirrorBridge lo pida.",
+    },
+    "ui_hint_apple": {
+        "en": "On an Apple TV your screen appears a few seconds behind, with sound. Instant mirroring for Apple TV "
+              "is coming in a later version.",
+        "es": "En una Apple TV tu pantalla aparece con unos segundos de retraso, con sonido. La duplicación al "
+              "instante para Apple TV llegará en una versión futura.",
+    },
+    "ui_hint_cast": {
+        "en": "Your screen appears on this TV a few seconds behind, with sound.",
+        "es": "Tu pantalla aparece en esta TV con unos segundos de retraso, con sonido.",
+    },
+    "ui_hint_cast_first": {
+        "en": "The first time, the TV asks for a code or password.",
+        "es": "La primera vez, la TV pide un código o una contraseña.",
+    },
+    "ui_hint_stop": {
+        "en": "To stop, press the button above or use the MirrorBridge icon next to the clock.",
+        "es": "Para detener, presiona el botón de arriba o usa el ícono de MirrorBridge junto al reloj.",
+    },
+    "ui_connecting": {"en": "Connecting to {device}…", "es": "Conectando con {device}…"},
+    "ui_connecting_tv": {"en": "Connecting to the TV…", "es": "Conectando con la TV…"},
+    "ui_on_tv_mirror": {"en": "Your screen is on {device}", "es": "Tu pantalla está en {device}"},
+    "ui_on_tv_cast": {
+        "en": "Your screen is on {device} (a few seconds behind)",
+        "es": "Tu pantalla está en {device} (con unos segundos de retraso)",
+    },
+    "ui_failed": {"en": "It did not work: {error}", "es": "No funcionó: {error}"},
+    "ui_failed_plain": {"en": "It did not work.", "es": "No funcionó."},
+    "ui_other_ways": {"en": "Other ways to show, and pairing", "es": "Otras formas de mostrar y emparejamiento"},
+    "ui_cast_instead": {"en": "Cast instead (the older way)", "es": "Transmitir en su lugar (la forma anterior)"},
+    "ui_cast_hint": {
+        "en": "If the TV does not show your screen with the big button, try this: it is a few seconds behind but "
+              "works with more TVs, and it has sound.",
+        "es": "Si la TV no muestra tu pantalla con el botón grande, prueba esto: va unos segundos atrás pero "
+              "funciona con más TVs, y lleva sonido.",
+    },
+    "ui_advanced": {"en": "Advanced settings", "es": "Ajustes avanzados"},
+    "ui_cast_latency": {"en": "Delay when casting", "es": "Retraso al transmitir"},
+    "ui_details": {"en": "Technical details (for reporting a problem)",
+                   "es": "Detalles técnicos (para reportar un problema)"},
 }
 
 _lang = DEFAULT
