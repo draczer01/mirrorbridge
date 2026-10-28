@@ -80,7 +80,8 @@ def test_every_string_has_english_and_spanish():
 
 
 def test_every_problem_has_english_and_spanish_text():
-    pytest.importorskip("PySide6.QtWidgets")  # mirrorbridge.gui.extend shows Qt dialogs
+    # mirrorbridge.gui.extend shows Qt dialogs; Qt also fails to load without libEGL (ImportError)
+    pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
     from mirrorbridge.gui import extend, i18n
 
     for status in DriverStatus:
@@ -841,7 +842,8 @@ class FakeController:
 
 @pytest.fixture
 def setup_without_consent(monkeypatch):
-    pytest.importorskip("PySide6.QtWidgets")  # mirrorbridge.gui.extend shows Qt dialogs
+    # mirrorbridge.gui.extend shows Qt dialogs; Qt also fails to load without libEGL (ImportError)
+    pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
     from mirrorbridge.gui import extend
 
     ran: list = []
