@@ -504,18 +504,34 @@ async def test_the_video_connection_closes_cleanly_once_its_buffer_went_out():
     """A close with video still buffered sends it, and then asyncio's transport lets go of its
     loop: the connection must not be aborted after that (it raised AttributeError)."""
     received = bytearray()
+    tv_done = asyncio.Event()
 
     async def tv(reader, writer):
-        received.extend(await reader.read())
-        writer.close()
+        try:
+            while chunk := await reader.read(65536):
+                received.extend(chunk)
+        except ConnectionError:
+            pass  # dropped: the count below says how much came
+        finally:
+            writer.close()
+            tv_done.set()
 
+    # Through a 16 KB send buffer even loopback is slow (2 MB took 0.3-0.7 s on Linux, and longer
+    # than the 1 s close on Windows, where the old test then hung in Server.wait_closed), so the
+    # close gets 10 s here, and every wait has a limit.
     server = await asyncio.start_server(tv, "127.0.0.1", 0)
     try:
         data = await DataChannel.open("127.0.0.1", server.sockets[0].getsockname()[1], buffer=16384)
-        data.write(b"x" * 2_000_000)  # more than the socket takes at once: the rest waits in asyncio
+        data.write(b"x" * 300_000)  # more than the socket takes at once: the rest waits in asyncio
         assert data.buffered > 0
-        await data.close()
+        try:
+            await asyncio.wait_for(data.close(seconds=10), 20)
+        except asyncio.TimeoutError:
+            pytest.fail(f"close() did not end ({len(received)} bytes came, {data.buffered} still buffered)")
+        try:
+            await asyncio.wait_for(tv_done.wait(), 10)
+        except asyncio.TimeoutError:
+            pytest.fail(f"the TV's side never saw the connection end ({len(received)} bytes came)")
     finally:
         server.close()
-        await server.wait_closed()
-    assert len(received) == 2_000_000
+    assert len(received) == 300_000

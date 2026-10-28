@@ -19,6 +19,7 @@ concurrency:
 jobs:
   package:
     runs-on: windows-latest
+    timeout-minutes: 45  # the tests and the build take about 15; a hang should not hold the runner for 6 h
     defaults:
       run:
         shell: pwsh

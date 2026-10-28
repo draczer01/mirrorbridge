@@ -35,3 +35,5 @@ include = ["mirrorbridge*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# A test still running after 2 minutes prints where every thread is, so a hang shows its place.
+faulthandler_timeout = 120
