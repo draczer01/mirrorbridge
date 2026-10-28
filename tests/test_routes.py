@@ -1,0 +1,169 @@
+"""The best way to show the screen on each TV (routes.py), and the big button that tries the next
+way by itself when one fails before the picture reaches the TV (Controller.start_primary)."""
+
+import os
+
+import pytest
+
+from mirrorbridge import ffmpeg, routes, vdisplay
+from mirrorbridge.config import Settings
+from mirrorbridge.session import State
+from mirrorbridge.googlecast import CastDevice
+from mirrorbridge.text import Text
+from test_mirror_gui import APPLE_TV_TXT, _device
+
+_APP = None
+
+
+def _cast(host: str = "127.0.0.1", name: str = "TCL 55QM7L", identifier: str = "c0ffee", ca: str = "4101"):
+    return CastDevice(name=name, host=host, identifier=identifier, model="55QM7L", properties={"ca": ca})
+
+
+def _speaker_cast(host: str = "10.0.0.9"):
+    return _cast(host=host, name="Nest Mini", identifier="beef", ca="2052")  # no video out
+
+
+@pytest.fixture
+def history(tmp_path):
+    return routes.RouteHistory(tmp_path / "routes.json")
+
+
+# -- one list of TVs -------------------------------------------------------------------------------
+
+
+def test_a_tv_found_by_airplay_and_google_cast_is_listed_once():
+    tcl = _device()
+    screens = routes.merge([tcl], [_cast(), _cast(host="10.0.0.5", name="Chromecast", identifier="abc"),
+                                   _speaker_cast()])
+    assert [s.name for s in screens] == ["Chromecast", "TCL 55QM7L", "Nest Mini"]  # speakers last
+    both = screens[1]
+    assert both.airplay is tcl and both.cast.identifier == "c0ffee" and both.identifier == tcl.identifier
+    assert both.answers_to("cast:c0ffee")  # chosen while only Google Cast had found it
+    assert screens[0].identifier == "cast:abc" and screens[0].airplay is None
+    assert [s.shows_video for s in screens] == [True, True, False]
+
+
+def test_the_ways_each_tv_takes(history):
+    assert routes.plan(routes.Screen(airplay=_device(), cast=_cast()), history) == [
+        routes.AIRPLAY_MIRROR, routes.CAST_MIRROR, routes.AIRPLAY_CAST]
+    assert routes.plan(routes.Screen(airplay=_device(txt=APPLE_TV_TXT)), history) == [routes.AIRPLAY_CAST]
+    assert routes.plan(routes.Screen(cast=_cast()), history) == [routes.CAST_MIRROR]
+    assert routes.plan(routes.Screen(cast=_speaker_cast()), history) == []
+
+
+# -- what worked before ----------------------------------------------------------------------------
+
+
+def test_what_worked_last_goes_first_and_what_the_tv_refused_goes_last(history, tmp_path):
+    tv = routes.Screen(airplay=_device(), cast=_cast())
+    history.failed(tv.identifier, routes.AIRPLAY_MIRROR, "refused", lasting=True)
+    assert routes.plan(tv, history) == [routes.CAST_MIRROR, routes.AIRPLAY_CAST, routes.AIRPLAY_MIRROR]
+    history.worked(tv.identifier, routes.AIRPLAY_CAST)
+    assert routes.plan(tv, history)[0] == routes.AIRPLAY_CAST
+
+    again = routes.RouteHistory(tmp_path / "routes.json")  # kept for the next start
+    assert routes.plan(tv, again) == routes.plan(tv, history)
+    again.failed(tv.identifier, routes.AIRPLAY_CAST, "the TV was off", lasting=False)  # only noted
+    assert routes.plan(tv, again)[0] == routes.AIRPLAY_CAST
+    again.failed(tv.identifier, routes.AIRPLAY_CAST, "format", lasting=True)
+    assert routes.plan(tv, again) == [routes.CAST_MIRROR, routes.AIRPLAY_MIRROR, routes.AIRPLAY_CAST]
+
+
+def test_a_broken_routes_file_is_no_history(tmp_path):
+    (tmp_path / "routes.json").write_text("[not json", encoding="utf-8")
+    assert routes.RouteHistory(tmp_path / "routes.json").data == {}
+
+
+def test_why_a_way_failed():
+    assert routes.classify(RuntimeError(Text("gc_no_launch", "x"))) == routes.LASTING_FAILURE
+    assert routes.classify(RuntimeError(Text("mirror_refused", "x"))) == routes.LASTING_FAILURE
+    assert routes.classify(RuntimeError(Text("gc_no_connection", "x"))) == routes.PASSING
+    assert routes.classify(RuntimeError("Connection refused")) == routes.PASSING
+    assert routes.classify(RuntimeError(Text("encoder_stopped", "x"))) == routes.LOCAL_FAILURE
+    assert routes.classify(vdisplay.VddError("lost")) == routes.LOCAL_FAILURE
+
+
+# -- the big button --------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def controller(tmp_path, monkeypatch):
+    global _APP  # pylint: disable=global-statement
+    widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    _APP = widgets.QApplication.instance() or widgets.QApplication([])
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    from mirrorbridge.gui.controller import Controller
+
+    monkeypatch.setattr(Controller, "refresh_if_stale", lambda self, max_age=60: None)
+    monkeypatch.setattr(Controller, "refresh_encoders_if_stale", lambda self, max_age=120: None)
+    monkeypatch.setattr(ffmpeg, "list_monitors", lambda: [ffmpeg.Monitor(0, 0, 0, 1920, 1080, True)])
+    monkeypatch.setattr(ffmpeg, "list_windows", lambda: [])
+    c = Controller(Settings.load())
+    started = []
+    monkeypatch.setattr(c, "_start_route", lambda screen, route: started.append(route))
+    c.started = started
+    yield c
+    c.shutdown()
+
+
+def _settle():
+    from PySide6.QtWidgets import QApplication
+
+    for _ in range(5):
+        QApplication.processEvents()
+
+
+def test_the_big_button_tries_the_next_way_when_one_fails(controller):
+    controller.devices, controller.casts = [_device()], [_cast()]
+    controller.settings.last_device_id = controller.devices[0].identifier
+    tv = controller.selected_screen.identifier
+
+    controller.start_primary()
+    assert controller.started == [routes.AIRPLAY_MIRROR]
+    states = []
+    controller.cast_state_changed.connect(lambda state, message: states.append(state))
+    refused = RuntimeError(Text("mirror_refused", "The TV turned it down"))
+    controller._on_cast_state(State.FAILED, refused, controller.selected_device)  # pylint: disable=protected-access
+    assert states == [State.CONNECTING]  # the window says it is connecting, not that it failed
+    assert controller._fall_back(RuntimeError(Text("mirror_refused", "The TV turned it down")))  # pylint: disable=protected-access
+    _settle()
+    assert controller.started == [routes.AIRPLAY_MIRROR, routes.CAST_MIRROR]  # nothing said, the next way
+    controller._route_worked()  # pylint: disable=protected-access  # the picture reached the TV
+    assert controller.routes.last_worked(tv) == routes.CAST_MIRROR
+    assert controller.plan()[0] == routes.CAST_MIRROR  # first, the next time
+    assert controller.primary_action() == "mirror"
+    assert controller.device_line(controller.selected_screen) == "Ready"
+
+    # Once it has worked, a later failure is the network's: nothing else is tried
+    assert not controller._fall_back(RuntimeError("Connection reset"))  # pylint: disable=protected-access
+
+
+def test_the_big_button_stops_trying_for_this_pcs_own_failures_and_after_stop(controller):
+    controller.devices, controller.casts = [_device()], [_cast()]
+    controller.settings.last_device_id = controller.devices[0].identifier
+    controller.start_primary()
+    assert not controller._fall_back(RuntimeError(Text("encoder_stopped", "x")))  # pylint: disable=protected-access
+    _settle()
+    assert controller.started == [routes.AIRPLAY_MIRROR]
+
+    controller.start_primary()
+    controller.stop_cast()  # the person pressed Stop while it started
+    assert not controller._fall_back(RuntimeError(Text("mirror_refused", "x")))  # pylint: disable=protected-access
+
+
+def test_the_last_way_failing_is_reported(controller):
+    controller.devices, controller.casts = [_device(txt=APPLE_TV_TXT, name="Living Room")], []
+    controller.settings.last_device_id = controller.devices[0].identifier
+    controller.start_primary()
+    assert controller.started == [routes.AIRPLAY_CAST]
+    assert not controller._fall_back(RuntimeError("no answer"))  # pylint: disable=protected-access
+
+
+def test_a_tv_only_google_cast_found_can_be_chosen(controller):
+    controller.devices, controller.casts = [], [_cast(host="10.0.0.5", name="Chromecast", identifier="abc")]
+    controller.select_device("cast:abc")
+    assert controller.selected_screen.name == "Chromecast" and controller.selected_device is None
+    controller.start_primary()
+    assert controller.started == [routes.CAST_MIRROR]

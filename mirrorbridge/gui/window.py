@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QStyle, QToolButton, QVBoxLayout, QWidget,
 )
 
-from .. import APP_NAME, ffmpeg, vdisplay
+from .. import APP_NAME, ffmpeg, routes, vdisplay
 from ..devices import Device
 from ..session import State
 from .controller import Controller
@@ -89,6 +89,7 @@ class MainWindow(QMainWindow):
         self._saving = False  # True while our own change is being written to settings
         self._status: Callable[[], str] = lambda: ""  # what the status line says (_show_status)
         self._monitors: list[ffmpeg.Monitor] = []
+        self._screens: list = []  # the TVs as the list shows them, row by row
         self.setWindowIcon(app_icon())
         self.resize(620, 760)
         self._build_ui()
@@ -441,32 +442,33 @@ class MainWindow(QMainWindow):
     def _fill_devices(self) -> None:
         with self._filling():
             self.device_list.clear()
-            selected = self.c.selected_device
-            for dev in self.c.devices:
-                item = QListWidgetItem(f"{dev.name}\n{self.c.device_line(dev)}")
-                item.setToolTip(f"{dev.model} - {dev.address}")
-                icon = QStyle.SP_ComputerIcon if dev.can_cast_video else QStyle.SP_MediaVolume
+            selected = self.c.selected_screen
+            self._screens = self.c.screens
+            for screen in self._screens:
+                item = QListWidgetItem(f"{screen.name}\n{self.c.device_line(screen)}")
+                item.setToolTip(f"{screen.model} - {screen.host}")
+                icon = QStyle.SP_ComputerIcon if screen.shows_video else QStyle.SP_MediaVolume
                 item.setIcon(self.style().standardIcon(icon))
-                if not dev.can_cast_video:  # a speaker shows no picture: it cannot be chosen
+                if not screen.shows_video:  # a speaker shows no picture: it cannot be chosen
                     item.setForeground(QColor(140, 140, 150))
                     item.setFlags(item.flags() & ~(Qt.ItemIsSelectable | Qt.ItemIsEnabled))
                 self.device_list.addItem(item)
-                if dev is selected:
+                if selected is not None and screen.identifier == selected.identifier:
                     self.device_list.setCurrentItem(item)
-        if self.c.scanning and not self.c.devices:
+        if self.c.scanning and not self._screens:
             self.devices_hint.setText(tr("ui_searching"))
-        elif not self.c.devices:
+        elif not self._screens:
             self.devices_hint.setText(tr("ui_no_tv"))
-        elif not any(d.can_cast_video for d in self.c.devices):
+        elif not any(screen.shows_video for screen in self._screens):
             self.devices_hint.setText(tr("ui_only_speakers"))
-        elif self.c.selected_device is None:
+        elif selected is None:
             self.devices_hint.setText(tr("ui_pick_tv"))
         else:
             self.devices_hint.setText(tr("ui_same_wifi"))
 
     def _device_clicked(self, row: int) -> None:
-        if not self._loading and 0 <= row < len(self.c.devices):
-            self.c.select_device(self.c.devices[row].identifier)
+        if not self._loading and 0 <= row < len(self._screens):
+            self.c.select_device(self._screens[row].identifier)
 
     def _scanning(self, scanning: bool) -> None:
         self.refresh_btn.setEnabled(not scanning)
@@ -522,20 +524,25 @@ class MainWindow(QMainWindow):
         if not self.c.is_active:  # a cast or Mirror screen that ended may have removed its virtual screen
             self.c.run_blocking(ffmpeg.list_monitors, on_ok=self._show_monitors)
 
-    def action_text(self, dev: Optional[Device]) -> str:
+    def action_text(self, screen) -> str:
         """The line under the big button: what it will do, or why it cannot and what to do."""
         c = self.c
         if c.is_active:
             return tr("ui_hint_stop")
-        if not c.devices:
+        if not c.screens:
             return tr("ui_hint_no_tv")
-        if dev is None:
+        if screen is None:
             return tr("ui_hint_pick")
-        if not dev.can_cast_video:
-            return tr("ui_dev_speaker")
-        if c.primary_action(dev) == "mirror":
-            return tr("ui_hint_mirror") if dev.is_paired else tr("ui_hint_mirror_first") + " " + tr("ui_hint_mirror")
-        hint = tr("ui_hint_apple") if self.c.is_apple(dev) else tr("ui_hint_cast")
+        steps = c.plan(screen)
+        if not steps:
+            return c.device_line(screen)
+        first = steps[0]
+        if first == routes.AIRPLAY_MIRROR and not screen.airplay.is_paired:
+            return tr("ui_hint_mirror_first") + " " + tr("ui_hint_mirror")
+        if first in routes.MIRRORING:
+            return tr("ui_hint_mirror")
+        dev = screen.airplay
+        hint = tr("ui_hint_apple") if c.is_apple(dev) else tr("ui_hint_cast")
         if dev.needs_pairing or dev.needs_password:
             hint = tr("ui_hint_cast_first") + " " + hint
         return hint
@@ -543,8 +550,10 @@ class MainWindow(QMainWindow):
     def _update_buttons(self) -> None:
         c = self.c
         dev = c.selected_device
+        screen = c.selected_screen
         active = c.is_active
-        usable = bool(dev and dev.can_cast_video)
+        usable = bool(dev and dev.can_cast_video)  # the AirPlay ways
+        shows = bool(screen and screen.shows_video)  # any way
         self.pair_btn.setEnabled(usable and not active)
         self.forget_btn.setEnabled(bool(dev and dev.is_paired) and not active)
         self.device_list.setEnabled(not active)
@@ -558,19 +567,19 @@ class MainWindow(QMainWindow):
         if active:
             name = c.casting_to
             self.show_btn.setText(tr("ui_stop_on", device=name) if name else tr("ui_stop"))
-        elif usable:
-            self.show_btn.setText(tr("ui_show_on", device=dev.name))
+        elif shows:
+            self.show_btn.setText(tr("ui_show_on", device=screen.name))
         else:
             self.show_btn.setText(tr("ui_show_on_tv"))
-        self.show_btn.setEnabled(active or usable)
+        self.show_btn.setEnabled(active or shows)
         self.show_btn.setProperty("casting", "true" if active else "false")
         self.show_btn.style().unpolish(self.show_btn)
         self.show_btn.style().polish(self.show_btn)
-        self.action_hint.setText(self.action_text(dev))
+        self.action_hint.setText(self.action_text(screen))
 
         # The fallbacks, for a TV where the big button's way does not work
         self.cast_btn.setEnabled(usable and not active)
-        fallback = c.primary_action(dev) != "cast"  # with an Apple TV the big button already casts
+        fallback = usable and c.primary_action() != "cast"  # with an Apple TV the big button already casts
         self.cast_btn.setVisible(fallback)
         self.cast_hint.setVisible(fallback)
         self.file_btn.setEnabled(usable and not active)

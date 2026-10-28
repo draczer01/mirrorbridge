@@ -19,7 +19,7 @@ from typing import Any, Callable, Coroutine, Optional
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import QApplication, QInputDialog, QLineEdit, QMessageBox, QWidget
 
-from .. import airplay_patch, ffmpeg, mirror, probe, vdisplay
+from .. import airplay_patch, ffmpeg, googlecast, mirror, probe, routes, vdisplay
 from ..config import Settings, app_data_dir
 from ..devices import Device, DeviceManager
 from ..session import CastSession, State
@@ -128,7 +128,11 @@ class Controller(QObject):
         self.bridge = UiBridge()
         self.runner = AsyncRunner(self.bridge)
         self.manager = DeviceManager(self.runner.loop)
-        self.devices: list[Device] = []
+        self.devices: list[Device] = []  # AirPlay receivers
+        self.casts: list[googlecast.CastDevice] = []  # Google Cast receivers
+        self.routes = routes.RouteHistory()  # which way worked with each TV
+        # The big button's try: {"screen", "plan", "index", "reached"}, while it may still fall back
+        self._attempt: Optional[dict] = None
         self.scanning = False
         self.last_scan = 0.0
         self.encoders: list[str] = []
@@ -188,11 +192,25 @@ class Controller(QObject):
         return "idle", tr("status_idle")
 
     @property
+    def screens(self) -> list[routes.Screen]:
+        """Every TV once, however it was found (AirPlay, Google Cast or both)."""
+        return routes.merge(self.devices, self.casts)
+
+    @property
+    def selected_screen(self) -> Optional[routes.Screen]:
+        for screen in self.screens:
+            if screen.answers_to(self.settings.last_device_id):
+                return screen
+        return None
+
+    @property
     def selected_device(self) -> Optional[Device]:
+        """The chosen TV's AirPlay side, if it has one."""
         for dev in self.devices:
             if dev.identifier == self.settings.last_device_id:
                 return dev
-        return None
+        screen = self.selected_screen
+        return screen.airplay if screen is not None else None
 
     def select_device(self, identifier: str) -> None:
         self.settings.last_device_id = identifier
@@ -300,7 +318,7 @@ class Controller(QObject):
         self.scanning_changed.emit(True)
         hosts = list(self.settings.manual_hosts)
 
-        async def scan():
+        async def airplay():
             found = await self.manager.scan(timeout=5)
             if hosts:
                 extra = await self.manager.scan(timeout=3, hosts=hosts)
@@ -308,15 +326,19 @@ class Controller(QObject):
                 found += [d for d in extra if d.identifier not in known]
             return found
 
-        def done(devices):
-            self.devices = devices
+        async def scan():
+            return await asyncio.gather(airplay(), self._scan_cast(hosts))
+
+        def done(result):
+            self.devices, self.casts = result
             self.scanning = False
             self.last_scan = time.monotonic()
-            usable = [d for d in devices if d.can_cast_video]
-            if self.selected_device is None and len(usable) == 1:
+            usable = [s for s in self.screens if s.shows_video]
+            if self.selected_screen is None and len(usable) == 1:
                 self.settings.last_device_id = usable[0].identifier
                 self.save_settings()
-            _LOGGER.info(tr("found_n", n=len(devices)) if devices else tr("found_none"))
+            n = len(self.screens)
+            _LOGGER.info(tr("found_n", n=n) if n else tr("found_none"))
             self.scanning_changed.emit(False)
             self.devices_changed.emit()
 
@@ -326,6 +348,20 @@ class Controller(QObject):
             _LOGGER.error(tr("scan_failed", error=exc))
 
         self.runner.submit(scan(), done, failed)
+
+    @staticmethod
+    async def _scan_cast(hosts: list[str]) -> list:
+        """Google Cast receivers; a host added by IP only if it answered as one (an empty
+        identifier is googlecast.scan's stand-in for a host that did not)."""
+        try:
+            found = await googlecast.scan(timeout=4)
+            if hosts:
+                extra = await googlecast.scan(timeout=2, hosts=hosts)
+                found += [d for d in extra if d.identifier and all(d.host != f.host for f in found)]
+            return found
+        except Exception as ex:  # pylint: disable=broad-except
+            _LOGGER.warning("Google Cast search failed: %s", ex)
+            return []
 
     def refresh_if_stale(self, max_age: float = 60) -> None:
         if not self.is_active and time.monotonic() - self.last_scan > max_age:
@@ -441,6 +477,7 @@ class Controller(QObject):
 
         def failed(exc):
             self.pairing = False
+            self._attempt = None  # the person sees why; nothing else is tried behind the dialog
             _LOGGER.error("%s: %s", tr("pair_failed"), exc)
             self.devices_changed.emit()
             self.show_error(tr("pair_failed"), tr("pair_failed_hint", error=error_text(exc)))
@@ -491,8 +528,14 @@ class Controller(QObject):
             self.casting_to = ""
             self.activity_changed.emit()
 
+        def ended(_=None):
+            self._attempt = None
+            finished()
+
         def failed(exc):
             finished()
+            if self._fall_back(exc):
+                return
             if isinstance(exc, concurrent.futures.CancelledError):
                 return
             if isinstance(exc, vdisplay.VddError) and exc.status is not None:
@@ -500,13 +543,17 @@ class Controller(QObject):
             else:
                 self.notify.emit(tr("cast_failed"), error_text(exc), True)
 
-        self.session_future = self.runner.submit(self.session.run(), finished, failed)
+        self.session_future = self.runner.submit(self.session.run(), ended, failed)
         self.activity_changed.emit()
 
     def _on_cast_state(self, state: State, message: Any, device: Device, mirroring: bool = False) -> None:
+        if state == State.FAILED and self._will_fall_back(message):
+            state, message = State.CONNECTING, ""  # the next way starts at once: no failure to show
         self.cast_state = state
         self.cast_message = message
         self.cast_state_changed.emit(state, message)
+        if state == State.CASTING:
+            self._route_worked()
         if mirroring:
             self._on_mirror_state(state, message, device)
         elif state == State.CASTING:
@@ -546,40 +593,105 @@ class Controller(QObject):
             return tr("mirror_pairs_first")
         return tr("mirror_hint")
 
+    def plan(self, screen: Optional[routes.Screen] = None) -> list[str]:
+        """The ways the big button tries on `screen` (the chosen TV by default), best first."""
+        screen = screen if screen is not None else self.selected_screen
+        return routes.plan(screen, self.routes) if screen is not None else []
+
     def primary_action(self, device: Optional[Device] = None) -> str:
-        """What the window's one big button does with `device` (the selected one by default):
-        "mirror" when the TV takes Mirror screen, "cast" when it only takes a cast (Apple TVs
-        and Macs, until MirrorBridge has FairPlay), "" when it shows no picture at all."""
-        device = device if device is not None else self.selected_device
-        if device is None or not device.can_cast_video:
+        """What the window's one big button does first with `device` (the chosen TV by default):
+        "mirror" (AirPlay or Google Cast screen mirroring), "cast" (the AirPlay cast: Apple TVs and
+        Macs, until MirrorBridge has FairPlay), or "" for a receiver that shows no picture."""
+        if device is not None:
+            screen = next((s for s in self.screens if s.airplay is device), routes.Screen(airplay=device))
+        else:
+            screen = self.selected_screen
+        steps = self.plan(screen) if screen is not None else []
+        if not steps:
             return ""
-        return "mirror" if self.can_mirror(device) else "cast"
+        return "mirror" if steps[0] in routes.MIRRORING else "cast"
 
     @staticmethod
     def is_apple(device: Device) -> bool:
         """An Apple TV or a Mac: Mirror screen needs FairPlay there, so it is cast to."""
         return mirror.Target.from_device(device).needs_fairplay
 
-    @classmethod
-    def device_line(cls, device: Device) -> str:
-        """What choosing `device` means, in a few plain words: the window's line under its name."""
-        if not device.can_cast_video:
+    def device_line(self, screen) -> str:
+        """What choosing `screen` (a routes.Screen, or an AirPlay Device) means, in a few plain
+        words: the window's line under its name."""
+        if isinstance(screen, Device):
+            screen = routes.Screen(airplay=screen)
+        steps = self.plan(screen)
+        if not steps:
+            if screen.airplay is not None and screen.airplay.status_key == "restricted":
+                return tr("ui_dev_restricted")
             return tr("ui_dev_speaker")
-        if device.status_key == "restricted":
+        first = steps[0]
+        if first == routes.AIRPLAY_MIRROR:
+            return tr("ui_dev_ready") if screen.airplay.is_paired else tr("ui_dev_first_code")
+        if first == routes.CAST_MIRROR:
+            return tr("ui_dev_ready")
+        if screen.airplay.status_key == "restricted":
             return tr("ui_dev_restricted")
-        if cls.can_mirror(device):
-            return tr("ui_dev_ready") if device.is_paired else tr("ui_dev_first_code")
-        if cls.is_apple(device):
-            return tr("ui_dev_apple")
-        return tr("ui_dev_cast_only")
+        return tr("ui_dev_apple") if self.is_apple(screen.airplay) else tr("ui_dev_cast_only")
 
     def start_primary(self, *_args) -> None:
-        """The window's big button: Mirror screen when the TV takes it, otherwise a cast."""
-        action = self.primary_action()
-        if action == "mirror":
+        """The big button: the best way to show the screen on the chosen TV and, when that way
+        fails before the picture reaches the TV, the next one, without asking (routes.py)."""
+        screen = self.selected_screen
+        if self.is_active or screen is None:
+            return
+        steps = self.plan(screen)
+        if not steps:
+            return
+        self._attempt = {"screen": screen.identifier, "plan": steps, "index": 0, "reached": False}
+        self._start_route(screen, steps[0])
+
+    def _start_route(self, screen: routes.Screen, route: str) -> None:
+        _LOGGER.info("Showing the screen on %s: %s", screen.name, route)
+        if route == routes.AIRPLAY_MIRROR:
             self.start_mirror()
-        elif action == "cast":
+        elif route == routes.CAST_MIRROR:
+            self._cast_mirror(screen)
+        else:
             self.start_cast()
+
+    def _route_worked(self) -> None:
+        attempt = self._attempt
+        if attempt is not None and not attempt["reached"]:
+            attempt["reached"] = True
+            self.routes.worked(attempt["screen"], attempt["plan"][attempt["index"]])
+
+    def _will_fall_back(self, exc: Any) -> bool:
+        """Whether _fall_back will start another way after `exc` (what a session failed with)."""
+        attempt = self._attempt
+        return (attempt is not None and not attempt["reached"] and attempt["index"] + 1 < len(attempt["plan"])
+                and isinstance(exc, BaseException) and routes.classify(exc) != routes.LOCAL_FAILURE)
+
+    def _fall_back(self, exc: BaseException) -> bool:
+        """After the big button's way failed: note it, and start the next way if there is one
+        and the failure was not this PC's (then True: nothing is said about the failure)."""
+        attempt, self._attempt = self._attempt, None
+        if attempt is None or attempt["reached"] or isinstance(exc, concurrent.futures.CancelledError):
+            return False  # not the big button's, it had worked (then it is the network), or stopped
+        route = attempt["plan"][attempt["index"]]
+        kind = routes.classify(exc)
+        try:
+            why = error_text(exc)
+        except (KeyError, IndexError, ValueError):  # a Text without its values
+            why = routes.error_key(exc) or str(exc)
+        self.routes.failed(attempt["screen"], route, why, lasting=kind == routes.LASTING_FAILURE)
+        _LOGGER.info("%s did not work (%s): %s", route, kind, why)
+        screen = self.selected_screen
+        if kind == routes.LOCAL_FAILURE or screen is None or not screen.answers_to(attempt["screen"]):
+            return False
+        attempt["index"] += 1
+        if attempt["index"] >= len(attempt["plan"]):
+            return False
+        self._attempt = attempt
+        next_route = attempt["plan"][attempt["index"]]
+        self.bridge.call(lambda: self._start_route(screen, next_route))  # once the failed one has let go
+        return True
 
     def start_mirror(self, *_args) -> None:
         """Mirror screen: what What to cast names (a display, a window, or with Extend screen the
@@ -602,16 +714,28 @@ class Controller(QObject):
         device = self.selected_device
         if self.is_active or device is None or not self.can_mirror(device) or not device.is_paired:
             return
+        self._run_mirror(device, lambda on_status: mirror.MirrorSession(mirror.Target.from_device(device),
+                                                                        self.settings, on_status))
+
+    def _cast_mirror(self, screen: routes.Screen) -> None:
+        """Google Cast screen mirroring (experimental), to a TV with Chromecast built-in."""
+        if self.is_active or screen.cast is None:
+            return
+        self._run_mirror(screen, lambda on_status: googlecast.GoogleCastMirror(screen.cast, self.settings, on_status))
+
+    def _run_mirror(self, target, make_session) -> None:
+        """A mirroring session (AirPlay's or Google Cast's) to `target` (anything with a name):
+        it starts, shows its states and stops as a cast does."""
 
         def on_status(state: State, message: str) -> None:
             if state == State.FAILED and session.error is not None:
                 message = session.error  # the window explains it in the user's language
-            self.bridge.call(lambda: self._on_cast_state(state, message, device, mirroring=True))
+            self.bridge.call(lambda: self._on_cast_state(state, message, target, mirroring=True))
 
-        self.casting_to = device.name
+        self.casting_to = target.name
         self.mirroring = True
         self.cast_state, self.cast_message = State.STARTING, ""
-        self.session = session = mirror.MirrorSession(mirror.Target.from_device(device), self.settings, on_status)
+        self.session = session = make_session(on_status)
 
         def finished(_=None):
             self.session_future = None
@@ -620,8 +744,14 @@ class Controller(QObject):
             self.casting_to = ""
             self.activity_changed.emit()
 
+        def ended(_=None):
+            self._attempt = None
+            finished()
+
         def failed(exc):
             finished()
+            if self._fall_back(exc):
+                return
             if isinstance(exc, concurrent.futures.CancelledError):
                 return
             if isinstance(exc, vdisplay.VddError) and exc.status is not None:
@@ -629,10 +759,10 @@ class Controller(QObject):
             else:
                 self.notify.emit(tr("mirror_failed"), error_text(exc), True)
 
-        self.session_future = self.runner.submit(session.run(), finished, failed)
+        self.session_future = self.runner.submit(session.run(), ended, failed)
         self.activity_changed.emit()
 
-    def _on_mirror_state(self, state: State, message: Any, device: Device) -> None:
+    def _on_mirror_state(self, state: State, message: Any, device) -> None:
         if state == State.CASTING:
             self.notify.emit(tr("mirror_started", device=device.name), self._extend_tip(), False)
         elif state == State.STOPPED:
@@ -640,6 +770,7 @@ class Controller(QObject):
             self.notify.emit(tr("mirror_stopped"), say(message) if isinstance(message, Text) else "", False)
 
     def stop_cast(self, *_args) -> None:
+        self._attempt = None  # stopped by the person: no other way is tried
         if self.session:
             self.runner.submit(self.session.stop())
         if self.file_future:
