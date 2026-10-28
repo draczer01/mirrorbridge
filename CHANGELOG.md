@@ -4,6 +4,22 @@ All notable changes to MirrorBridge, which was called AirCast up to version 0.2.
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Screen mirroring (experimental, not yet tried on a real TV): `mirror` sends the screen, or a
+  test pattern, to an AirPlay 2 TV of another brand a fraction of a second behind instead of
+  a cast's seconds. Each frame goes as soon as FFmpeg has encoded it, encrypted, over a
+  connection of its own, timed by MirrorBridge's own clock that the TV asks over UDP (allow
+  inbound UDP 7880-7889 in Windows Firewall). Apple TVs and Macs need FairPlay and are not
+  supported. No sound yet.
+- `mirror --probe` finds out how a TV takes screen mirroring (the SETUP order, the audio stream,
+  PTP or NTP timing, the avcC ending), reports what it answered to each step, and saves what
+  worked in `mirroring.json` for the next session.
+- The log says every 5 seconds where mirrored frames' time goes (FFmpeg's pipe, packing and
+  encryption, the network), as median and 95th percentile.
+
 ## [0.3.0] - 2026-10-28
 
 A pre-release: not yet tried on a real TV.

@@ -42,7 +42,7 @@ Spanish again, choose **Language / Idioma** > **Español** in its menu once.
 | Extend screen: the TV as a second monitor | Experimental, not yet tested with the real driver; needs a free driver from Parsec, installed the first time |
 | Hardware encoding: NVIDIA NVENC, Intel Quick Sync, AMD AMF, Media Foundation, x264 fallback | Auto-detected |
 | Play a local video file on the TV | Works |
-| Real-time screen mirroring like a Mac or iPhone (under 0.5 s delay) | Not possible yet, see below |
+| Real-time screen mirroring like a Mac or iPhone (under 0.5 s delay) | Experimental, command line only, for AirPlay 2 TVs of other brands (see [Screen mirroring](#screen-mirroring-experimental)); not possible with Apple TV yet |
 
 ### Why there is a delay, and why this is not "true" mirroring
 
@@ -168,6 +168,35 @@ casts what the app has selected under *What to cast*, the virtual screen include
 waits for Enter before closing. With output redirected (`MirrorBridge.exe doctor > out.txt`)
 it writes there instead, and asks for a PIN in a small dialog. From source, the same
 commands are `mirrorbridge doctor` and so on.
+
+## Screen mirroring (experimental)
+
+AirPlay 2 TVs of other brands (TCL, Roku, Samsung, LG...) can also be sent the screen the way
+an iPhone mirrors it: each frame goes to the TV as soon as FFmpeg has encoded it, over a
+connection of its own, with the time to show it, so the picture is a fraction of a second
+behind (100 to 200 ms is the aim) instead of the seconds a cast takes. It is new and not yet
+tried on a real TV, so for now it is only on the command line:
+
+```text
+MirrorBridge.exe mirror --probe -d "Living Room"      # find out how the TV takes it (10 s of a test pattern)
+MirrorBridge.exe mirror -d "Living Room"              # mirror the screen until Ctrl+C
+MirrorBridge.exe mirror --test-pattern --seconds 30   # a moving test pattern instead of the screen
+```
+
+* Pair the TV first (`pair`), as for a cast. Apple TVs and Macs need FairPlay for screen
+  mirroring, which MirrorBridge does not have, so they are turned down at once.
+* It mirrors what *What to cast* names (a display or a window, not the virtual screen) at the
+  TV's screen size, up to 1080p or the *Quality > Resolution* setting, with the encoder, frame
+  rate and bitrate of the *Quality* menu. There is no sound yet.
+* The TV asks the PC for the time over UDP: allow MirrorBridge, or inbound UDP ports
+  7880-7889, in Windows Firewall on private networks, or the TV shows nothing.
+* TVs differ in the order they want the session set up in, whether they need an (empty) audio
+  stream, whether they offer PTP timing, and how they want the H.264 header to end.
+  `mirror --probe` tries each, prints what the TV answered, and saves what worked in
+  `%APPDATA%\MirrorBridge\mirroring.json`, which every `mirror` after it asks for first. If
+  screen mirroring fails, please send that output with `mirrorbridge.log`.
+* Every 5 seconds the log says where the frames' time went, from FFmpeg's pipe to the network,
+  as median and 95th percentile per stage.
 
 ## How it works
 
@@ -295,6 +324,16 @@ that a language lacking a string shows it in English. With the real tray menu an
 offscreen, they check that choosing Español changes both at once (the status line and the
 dialogs' buttons too), that the choice is kept for the next start, and that a language added
 only to `gui/i18n.py` appears in both.
+
+Screen mirroring is tested piece by piece against fixed vectors and FFmpeg's own output (the
+avcC record with both endings, the 128-byte header, the frame counter nonce, the HKDF video key
+checked against an independent HKDF and ChaCha20-Poly1305, NTP answers, the FLV reader, the
+frame clock), and as a whole against a TV in the same process built on pyatv's server-side
+pairing (`tests/fake_mirror_tv.py`), which behaves like a TCL 55QM7L: it refuses the
+control-first SETUP, needs the audio stream, answers PTP without a ClockID, asks for the time,
+opens an event channel and answers `/feedback` with nothing. It decrypts the video, and FFmpeg
+decodes every frame of it. The probe is run against it too, with TVs that drop the pairing,
+drop the video or refuse it, never ask for the time, or take only the other avcC ending.
 
 ## Building MirrorBridge.exe
 

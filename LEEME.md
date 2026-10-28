@@ -102,6 +102,31 @@ Al suspender el equipo también desaparece: vuelve a transmitir al despertarlo.
 * Si algo falla, el registro está en `%APPDATA%\MirrorBridge\mirrorbridge.log` (menú *Más
   opciones* > *Abrir carpeta de registros*).
 
+## Duplicar la pantalla (experimental)
+
+A las TVs de otras marcas con AirPlay 2 (TCL, Roku, Samsung, LG...) MirrorBridge también
+puede mandarles la pantalla como la duplica un iPhone: cada cuadro va a la TV apenas FFmpeg lo
+codifica, por una conexión propia, así que la imagen llega con una fracción de segundo de
+retardo (la idea es de 100 a 200 ms) en lugar de los segundos de una transmisión. Es nuevo y
+todavía no se probó con una TV real, así que por ahora solo está en la consola:
+
+```
+.\MirrorBridge.exe mirror --probe -d "Nombre de la TV"      # averigua cómo lo acepta la TV
+.\MirrorBridge.exe mirror -d "Nombre de la TV"              # duplica la pantalla hasta Ctrl+C
+.\MirrorBridge.exe mirror --test-pattern --seconds 30       # una imagen de prueba en lugar de la pantalla
+```
+
+* Primero empareja la TV (`pair`), igual que para transmitir. Los Apple TV y los Mac necesitan
+  FairPlay para duplicar la pantalla, y MirrorBridge no lo tiene.
+* Duplica lo que elegiste en **Qué transmitir** (una pantalla o una ventana) al tamaño de la
+  pantalla de la TV, hasta 1080p o lo que diga **Calidad** > **Resolución**. Todavía no hay
+  sonido.
+* La TV le pide la hora al equipo por UDP: permite MirrorBridge, o los puertos UDP de entrada
+  7880-7889, en el Firewall de Windows para redes privadas, o la TV no mostrará nada.
+* `mirror --probe` prueba las formas en que las TVs difieren, muestra qué contestó la TV y
+  guarda lo que funcionó en `%APPDATA%\MirrorBridge\mirroring.json` para la próxima vez. Si
+  no funciona, manda lo que muestra junto con `mirrorbridge.log`.
+
 ## Diagnóstico
 
 En una ventana de PowerShell o cmd, en la carpeta del exe:
