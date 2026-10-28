@@ -16,6 +16,7 @@ from . import winintegration
 from .controller import Controller
 from .extend import EXTEND_SIZES, error_text, size_label, size_name
 from .i18n import LANGUAGES, language, language_menu_title, tr
+from .latency import LatencyMeter
 from .theme import app_icon
 
 _LOGGER = logging.getLogger(__name__)
@@ -41,6 +42,7 @@ class TrayMenu(QObject):
         self.menu = QMenu()
         self.menu.setToolTipsVisible(True)  # Mirror screen says why it is off, when it is
         self._submenus: list[QMenu] = []
+        self._meter: LatencyMeter | None = None  # More options > Debug > Latency meter, while open
         self.menu.aboutToShow.connect(self._rebuild)
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(self._activated)
@@ -153,6 +155,8 @@ class TrayMenu(QObject):
         if vdisplay.available():
             installed = c.vdd_status not in (None, vdisplay.DriverStatus.NOT_INSTALLED)
             self._action(more, tr("vdd_remove"), c.extend.remove_driver, enabled=installed and not c.is_active)
+        debug = self._submenu(more, tr("debug_menu"))
+        self._action(debug, tr("latency_meter"), self._show_latency_meter)
         self._language_menu(self._submenu(menu, language_menu_title()))
         menu.addSeparator()
         self._action(menu, tr("quit"), lambda: self.quit_app())
@@ -247,6 +251,15 @@ class TrayMenu(QObject):
         )
         if path:
             self.c.play_file(path)
+
+    def _show_latency_meter(self) -> None:
+        if self._meter is None:
+            self._meter = LatencyMeter()
+            self._meter.closed.connect(self._latency_meter_closed)
+            self._meter.show()
+
+    def _latency_meter_closed(self) -> None:
+        self._meter = None
 
     def _toggle_autostart(self, enabled: bool) -> None:
         try:
