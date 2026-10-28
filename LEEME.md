@@ -45,6 +45,8 @@ español, elige una vez **Language / Idioma** > **Español** en su menú.
    * **Calidad**: resolución, cuadros por segundo, retardo, calidad del video y codificador.
    * **Incluir el sonido del equipo**.
    * **Reproducir un archivo de video** en la TV.
+   * **Duplicar pantalla (baja latencia, experimental)**, justo debajo de **Transmitir a ...**:
+     ver *Duplicar la pantalla*.
    * **Más opciones**: iniciar con Windows, crear acceso directo en el escritorio, abrir
      la carpeta de registros y **Probar esta TV…** (ver *Avisar de una TV que no funciona*).
    * **Language / Idioma**: English o Español. La ventana completa también lo tiene, abajo.
@@ -80,12 +82,13 @@ Al suspender el equipo también desaparece: vuelve a transmitir al despertarlo.
 
 ## Lo que hay que saber
 
-* **Hay un retardo de 3 a 7 segundos** con un Apple TV (unos 7 segundos o más con TVs
-  de otras marcas, que además tardan unos 6 segundos más en empezar). El espejo en
-  tiempo real que hace un Mac o un iPhone usa un cifrado privado de Apple (FairPlay) que
-  ningún programa libre puede enviar. MirrorBridge usa "AirPlay video", lo mismo que usa
-  YouTube para mandar un video a la TV. Sirve para presentaciones, fotos y videos, no
-  para juegos.
+* **Al transmitir hay un retardo de 3 a 7 segundos** con un Apple TV (unos 7 segundos o más
+  con TVs de otras marcas, que además tardan unos 6 segundos más en empezar). Para transmitir,
+  MirrorBridge usa "AirPlay video", lo mismo que usa YouTube para mandar un video a la TV.
+  Sirve para presentaciones, fotos y videos, no para juegos. A las TVs de otras marcas también
+  puede duplicarles la pantalla con una fracción de segundo de retardo (experimental, ver
+  *Duplicar la pantalla*). Con un Apple TV, el espejo en tiempo real que hace un Mac o un
+  iPhone usa un cifrado privado de Apple (FairPlay) que MirrorBridge todavía no tiene.
 * **Una sola ventana**: se captura el lugar que ocupa la ventana al empezar. Si la mueves,
   detén y vuelve a transmitir. No puede estar minimizada.
 * **TVs que no son Apple** (LG, Samsung, Sony, Hisense, TCL...): muchas aceptan video por
@@ -113,13 +116,49 @@ A las TVs de otras marcas con AirPlay 2 (TCL, Roku, Samsung, LG...) MirrorBridge
 puede mandarles la pantalla como la duplica un iPhone: cada cuadro va a la TV apenas FFmpeg lo
 codifica, por una conexión propia, así que la imagen llega con una fracción de segundo de
 retardo (la idea es de 100 a 200 ms) en lugar de los segundos de una transmisión. Es nuevo y
-todavía no se probó con una TV real, así que por ahora solo está en la consola:
+todavía no se probó con una TV real.
+
+### Desde el menú de la bandeja
+
+1. Elige la TV en **Dispositivo** y emparéjala, como para transmitir (**Transmitir a ...** una
+   vez, o *Dispositivo* > *Emparejar con PIN…*).
+2. Una vez, usa **Más opciones** > **Probar esta TV…**. Su última prueba duplica una imagen de
+   prueba en movimiento durante unos 10 segundos: mira si aparece en la TV. Lo que funcionó
+   queda guardado para esa TV, así que *Duplicar pantalla* lo pide de entrada (ver *Avisar de
+   una TV que no funciona*).
+3. Elige **Duplicar pantalla (baja latencia, experimental)**, justo debajo de **Transmitir a
+   ...**. Igual que al transmitir, el texto del icono dice *Conectando con la TV…* y luego
+   *Duplicando la pantalla en (tu TV)*, y un aviso dice cuándo empieza, cuándo termina y, si
+   falla, por qué. **Detener la duplicación** (donde está *Detener transmisión*) o **Salir** la
+   terminan.
+
+*Duplicar pantalla* aparece en gris hasta que MirrorBridge está emparejado con la TV (al pasar
+el mouse lo dice), y con los Apple TV y los Mac, que necesitan FairPlay para duplicar la
+pantalla: llegarán en una versión futura, y mientras tanto se les transmite como siempre. Se
+hace una sola cosa a la vez: mientras hay una transmisión, una duplicación o una prueba de la
+TV, lo demás queda en gris hasta que termine. La ventana completa tiene el mismo botón, debajo
+de **Transmitir**.
+
+**Qué mandar** después de probarlo con tu TV:
+
+* el `probe-<fecha>-<hora>.log` que escribió *Probar esta TV*, y si en su última prueba
+  apareció en la TV la imagen de prueba en movimiento, y si se movía con fluidez;
+* `mirrorbridge.log` después de unos minutos de *Duplicar pantalla* (*Más opciones* > *Abrir
+  carpeta de registros*): cada 5 segundos anota en qué se fue el tiempo de los cuadros;
+* cuánto se atrasa la TV: pon un cronómetro en la pantalla del equipo (uno en una pestaña del
+  navegador sirve), duplícala y saca una sola foto con el teléfono donde se vean la pantalla
+  del equipo y la TV. La diferencia entre los dos tiempos es el retardo;
+* `%APPDATA%\MirrorBridge\mirroring.json`, donde queda lo que funcionó con la TV.
+
+### Desde la consola
 
 ```
 .\MirrorBridge.exe mirror --probe -d "Nombre de la TV"      # averigua cómo lo acepta la TV
 .\MirrorBridge.exe mirror -d "Nombre de la TV"              # duplica la pantalla hasta Ctrl+C
 .\MirrorBridge.exe mirror --test-pattern --seconds 30       # una imagen de prueba en lugar de la pantalla
 ```
+
+### Qué necesita y qué hace
 
 * Primero empareja la TV (`pair`), igual que para transmitir. Los Apple TV y los Mac necesitan
   FairPlay para duplicar la pantalla, y MirrorBridge no lo tiene.
@@ -129,7 +168,8 @@ todavía no se probó con una TV real, así que por ahora solo está en la conso
 * La TV le pide la hora al equipo por UDP: permite MirrorBridge, o los puertos UDP de entrada
   7880-7889, en el Firewall de Windows para redes privadas, o la TV no mostrará nada.
 * `mirror --probe` prueba las formas en que las TVs difieren, muestra qué contestó la TV y
-  guarda lo que funcionó en `%APPDATA%\MirrorBridge\mirroring.json` para la próxima vez. Si
+  guarda lo que funcionó en `%APPDATA%\MirrorBridge\mirroring.json`, que *Duplicar pantalla* y
+  cada `mirror` piden primero; la última prueba de *Probar esta TV* hace lo mismo. Si
   no funciona, manda lo que muestra junto con `mirrorbridge.log`. Antes de un `--probe`, si la
   TV corta el video apenas empieza, se intenta una vez más con el otro final del encabezado
   H.264.
@@ -156,17 +196,23 @@ Idioma**.
 ### Avisar de una TV que no funciona
 
 Elige la TV en **Dispositivo** y luego **Más opciones** > **Probar esta TV…**. Tarda unos
-dos minutos: mira la TV y, si pregunta si permite MirrorBridge, elige **Permitir**.
-MirrorBridge prueba tres formas de enviarle un video, una tras otra: `POST /play` con el
-video de prueba público de Apple, la cola de reproducción con el mismo video, y la cola de
+tres minutos: mira la TV y, si pregunta si permite MirrorBridge, elige **Permitir**.
+MirrorBridge prueba cuatro formas de enviarle un video, una tras otra: `POST /play` con el
+video de prueba público de Apple, la cola de reproducción con el mismo video, la cola de
 reproducción con una transmisión corta de la imagen de prueba de MirrorBridge desde este
-equipo (nada de tu pantalla). Al final dice qué hizo la TV con cada una y dónde está el
-informe: `%APPDATA%\MirrorBridge\probe-<fecha>-<hora>.log` (el botón **Abrir carpeta de
-registros** del resultado lleva ahí).
+equipo, y por último la duplicación de pantalla con una imagen de prueba en movimiento durante
+unos 10 segundos (en ninguna se manda nada de tu pantalla). Durante esa última prueba, mira si
+la imagen en movimiento aparece en la TV; una TV que necesita FairPlay (un Apple TV) se la
+salta. Al final dice qué hizo la TV con cada una (en la duplicación, si aceptó la sesión y
+mantuvo abierto el video, y qué orden de SETUP, final del encabezado H.264 y forma de dar la
+hora funcionaron, que guarda para *Duplicar pantalla*), si *Duplicar pantalla* debería
+funcionar, y dónde está el informe: `%APPDATA%\MirrorBridge\probe-<fecha>-<hora>.log` (el
+botón **Abrir carpeta de registros** del resultado lleva ahí).
 
-Manda ese archivo junto con `mirrorbridge.log`. Ahí se ve qué anuncia la TV, qué contestó
-a cada pedido de AirPlay, qué dijo mientras reproducía, si descargó el video de este equipo
-(y con qué reproductor), y si pidió algo que MirrorBridge no tiene.
+Manda ese archivo junto con `mirrorbridge.log`, y di si apareció la imagen de prueba en
+movimiento. Ahí se ve qué anuncia la TV, qué contestó a cada pedido de AirPlay, qué dijo
+mientras reproducía, si descargó el video de este equipo (y con qué reproductor), si pidió
+algo que MirrorBridge no tiene, y cada paso de la duplicación de pantalla.
 
 Lo mismo desde una consola, en la carpeta del exe:
 

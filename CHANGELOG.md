@@ -18,9 +18,14 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   and what the TV said while it played.
 - *More options* > *Test this TV…* and `MirrorBridge.exe probe "TV name"`: tries `POST /play`
   and the play queue with Apple's public test video, then the play queue with a short cast of
-  MirrorBridge's test pattern, says what the TV did with each (and whether it fetched the stream
-  from the PC, with which player), and writes `probe-<date>-<time>.log` in the log folder, to
-  send with a bug report.
+  MirrorBridge's test pattern, then about 10 seconds of screen mirroring with a moving test
+  pattern, says what the TV did with each (whether it fetched the stream from the PC, with which
+  player; whether it accepted screen mirroring and kept the video open, and which SETUP order,
+  avcC ending and timing worked, which is saved for *Mirror screen*), and writes
+  `probe-<date>-<time>.log` in the log folder, to send with a bug report. Each test has a time
+  limit and is torn down before the next; the whole run takes about three minutes. The
+  mirroring test is skipped, with a line that says why, for TVs that need FairPlay and TVs that
+  are not paired.
 - Screen mirroring (experimental, not yet tried on a real TV): `mirror` sends the screen, or a
   test pattern, to an AirPlay 2 TV of another brand a fraction of a second behind instead of
   a cast's seconds. Each frame goes as soon as FFmpeg has encoded it, encrypted, over a
@@ -29,6 +34,13 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   supported. No sound yet. When the network or the TV cannot keep up, frames are dropped up to
   the next keyframe instead of piling up; a TV that takes no video for 5 seconds ends the
   session with an error, and ending mirroring on the TV stops it.
+- *Mirror screen (low latency, experimental)* in the tray menu, next to *Start casting*, and in
+  the window: mirrors the screen with the settings under *More options* (and what *Test this TV*
+  or `mirror --probe` found for the TV), showing Connecting, Casting and Stopping as a cast does.
+  *Stop mirroring* and *Quit* end it, and a failure is explained in the app's language like a
+  failed cast. It is offered only for a paired TV that does not need FairPlay; otherwise it is
+  greyed out, and its tooltip says why (Apple TVs and Macs: coming in a later version). Only
+  one cast, mirroring or test runs at a time.
 - `mirror --probe` finds out how a TV takes screen mirroring (the SETUP order, the audio stream,
   PTP or NTP timing, the avcC ending), reports what it answered to each step, and saves what
   worked in `mirroring.json` for the next session. Before a probe, a TV that drops the video at

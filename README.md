@@ -42,7 +42,7 @@ Spanish again, choose **Language / Idioma** > **Español** in its menu once.
 | Extend screen: the TV as a second monitor | Experimental, not yet tested with the real driver; needs a free driver from Parsec, installed the first time |
 | Hardware encoding: NVIDIA NVENC, Intel Quick Sync, AMD AMF, Media Foundation, x264 fallback | Auto-detected |
 | Play a local video file on the TV | Works |
-| Real-time screen mirroring like a Mac or iPhone (under 0.5 s delay) | Experimental, command line only, for AirPlay 2 TVs of other brands (see [Screen mirroring](#screen-mirroring-experimental)); not possible with Apple TV yet |
+| Real-time screen mirroring like a Mac or iPhone (under 0.5 s delay) | Experimental, for AirPlay 2 TVs of other brands: *Mirror screen* in the tray menu, or `mirror` (see [Screen mirroring](#screen-mirroring-experimental)); not possible with Apple TV yet |
 
 ### Why there is a delay, and why this is not "true" mirroring
 
@@ -176,13 +176,46 @@ AirPlay 2 TVs of other brands (TCL, Roku, Samsung, LG...) can also be sent the s
 an iPhone mirrors it: each frame goes to the TV as soon as FFmpeg has encoded it, over a
 connection of its own, with the time to show it, so the picture is a fraction of a second
 behind (100 to 200 ms is the aim) instead of the seconds a cast takes. It is new and not yet
-tried on a real TV, so for now it is only on the command line:
+tried on a real TV.
+
+### Mirror screen, from the tray menu
+
+1. Choose the TV under **Device** and pair it, as for a cast (**Start casting** once, or
+   *Device > Pair with PIN…*).
+2. Once, run **More options > Test this TV…**. Its last test mirrors a moving test pattern
+   for about 10 seconds: watch the TV for it. What worked is saved for the TV, so Mirror screen
+   asks for it straight away (see *Reporting a TV that does not work* under Troubleshooting).
+3. Choose **Mirror screen (low latency, experimental)**, right under *Start casting*. As for a
+   cast, the tray icon's tooltip says *Connecting to the TV…*, then *Mirroring to (your TV)*,
+   and a notification says when it starts, when it stops, and why if it fails.
+   **Stop mirroring** (where *Stop casting* is) or **Quit** ends it.
+
+Mirror screen is greyed out until MirrorBridge is paired with the TV (its tooltip says so), and
+for Apple TVs and Macs, whose screen mirroring needs FairPlay: support for them is coming in a
+later version, and they cast as before. One thing runs at a time: while a cast, Mirror screen
+or *Test this TV* runs, the others are greyed out until it stops. The full window has the same
+*Mirror screen* button, under *Start casting*.
+
+**What to send back** after trying it on your TV:
+
+* the `probe-<date>-<time>.log` that *Test this TV* wrote, and whether the moving test pattern
+  appeared on the TV during its last test, and moved smoothly;
+* `mirrorbridge.log` after a few minutes of Mirror screen (*More options > Open log folder*):
+  every 5 seconds it notes where the frames' time went;
+* how far behind the TV is: show a stopwatch on the PC's screen (one in a browser tab will
+  do), mirror it, and take one phone photo with the PC's screen and the TV in it. The
+  difference between the two times is the delay;
+* `%APPDATA%\MirrorBridge\mirroring.json`, which holds what worked for the TV.
+
+### From the command line
 
 ```text
 MirrorBridge.exe mirror --probe -d "Living Room"      # find out how the TV takes it (10 s of a test pattern)
 MirrorBridge.exe mirror -d "Living Room"              # mirror the screen until Ctrl+C
 MirrorBridge.exe mirror --test-pattern --seconds 30   # a moving test pattern instead of the screen
 ```
+
+### What it needs, and what it does
 
 * Pair the TV first (`pair`), as for a cast. Apple TVs and Macs need FairPlay for screen
   mirroring, which MirrorBridge does not have, so they are turned down at once.
@@ -194,9 +227,10 @@ MirrorBridge.exe mirror --test-pattern --seconds 30   # a moving test pattern in
 * TVs differ in the order they want the session set up in, whether they need an (empty) audio
   stream, whether they offer PTP timing, and how they want the H.264 header to end.
   `mirror --probe` tries each, prints what the TV answered, and saves what worked in
-  `%APPDATA%\MirrorBridge\mirroring.json`, which every `mirror` after it asks for first. If
-  screen mirroring fails, please send that output with `mirrorbridge.log`. Before a probe, a
-  TV that drops the video at once gets one more try with the other H.264 header ending.
+  `%APPDATA%\MirrorBridge\mirroring.json`, which Mirror screen and every `mirror` after it ask
+  for first; the last test of *Test this TV* does the same, without the "no audio stream"
+  shape. If screen mirroring fails, please send that output with `mirrorbridge.log`. Before a
+  probe, a TV that drops the video at once gets one more try with the other H.264 header ending.
 * When the network or the TV cannot keep up, frames are dropped up to the next keyframe
   instead of piling up, so the picture skips but stays current. A TV that takes no video for
   5 seconds ends the session with an error; ending mirroring on the TV just stops it.
@@ -225,7 +259,8 @@ pyatv: mDNS discovery → PIN pair-setup → pair-verify → AirPlay /play (URL 
 | `mirrorbridge/session.py` | Runs a cast from start to stop, watches every part, and cleans up |
 | `mirrorbridge/airplay_patch.py` | Keeps pyatv's playback session open for an endless live stream, plays on TVs that skip Apple's optional requests, and picks /play or the play queue for each receiver |
 | `mirrorbridge/airplay_queue.py` | AirPlay video through the play queue, for TVs that have no POST /play: one request at a time, each answer matched to its request, and the TV's event channel |
-| `mirrorbridge/probe.py` | *Test this TV*: tries each way of sending the TV video and writes a report for a bug report |
+| `mirrorbridge/probe.py` | *Test this TV*: tries each way of sending the TV video, screen mirroring included, and writes a report for a bug report |
+| `mirrorbridge/mirror/` | Screen mirroring (experimental): pair-verify, the session's SETUP in the shapes TVs take, the clock the TV asks, FFmpeg's frames encrypted to the TV as they come, the probe, and what worked for each TV |
 | `mirrorbridge/winmonitors.py` | Displays at their real resolution and GPU, window rectangles, and a job object that ends FFmpeg with MirrorBridge |
 | `mirrorbridge/vdisplay.py` | Extend screen: adds and removes the virtual monitor through the Parsec driver, keeps it alive, installs the driver |
 | `mirrorbridge/gui/tray.py` | The tray icon and its menu, with every feature |
@@ -278,17 +313,22 @@ the Parsec app, keeps the driver awake). The downloaded driver installer stays i
   *Device > Forget pairing*, then cast again and type the new PIN.
 * **Reporting a TV that does not work**: choose the TV under *Device*, then *More
   options* > *Test this TV…* (or run `MirrorBridge.exe probe "TV name"`). It takes about
-  two minutes: watch the TV, and if it asks whether to allow MirrorBridge, choose *Allow*.
-  MirrorBridge tries three ways of sending it video, one after the other: `POST /play` with
-  Apple's public test video, the play queue with the same video, and the play queue with a
-  short cast of MirrorBridge's own test pattern from this PC (nothing from your screen).
-  Then it says what each one did, and where its report is:
-  `%APPDATA%\MirrorBridge\probe-<date>-<time>.log` (*Open log folder* in the result).
-  Send that file with `mirrorbridge.log`. It shows what the TV advertises, what it
-  answered to each AirPlay request, what it said while it played, whether (and with which
-  video player) it fetched the stream from this PC, and anything it asked for that
-  MirrorBridge does not serve. `MirrorBridge.exe -v scan` adds what every receiver on the
-  network advertises.
+  three minutes: watch the TV, and if it asks whether to allow MirrorBridge, choose *Allow*.
+  MirrorBridge tries four ways of sending it video, one after the other: `POST /play` with
+  Apple's public test video, the play queue with the same video, the play queue with a short
+  cast of MirrorBridge's own test pattern from this PC, and last screen mirroring with a
+  moving test pattern for about 10 seconds (nothing from your screen in any of them). Watch
+  the TV for that moving pattern during the last test; a TV that needs FairPlay (an Apple TV)
+  skips it. Then MirrorBridge says what each one did (for screen mirroring, whether the TV
+  accepted the session and kept the video open, and which SETUP order, H.264 header ending and
+  timing worked, which it saves for Mirror screen), whether Mirror screen should work, and
+  where its report is: `%APPDATA%\MirrorBridge\probe-<date>-<time>.log` (*Open log folder* in
+  the result). Send that file with `mirrorbridge.log`, and say whether the moving test pattern
+  appeared. It shows what the TV advertises, what it answered to each AirPlay request, what it
+  said while it played, whether (and with which video player) it fetched the stream from this
+  PC, anything it asked for that MirrorBridge does not serve, and each step of setting up
+  screen mirroring. `MirrorBridge.exe -v scan` adds what every receiver on the network
+  advertises.
 * **Choppy video**: choose Smooth latency, lower the bitrate or resolution, or use 5 GHz
   Wi-Fi or Ethernet.
 * **No audio**: `mirrorbridge doctor` shows whether system audio capture works. Audio is
@@ -369,6 +409,14 @@ control-first SETUP, needs the audio stream, answers PTP without a ClockID, asks
 opens an event channel and answers `/feedback` with nothing. It decrypts the video, and FFmpeg
 decodes every frame of it. The probe is run against it too, with TVs that drop the pairing,
 drop the video or refuse it, never ask for the time, or take only the other avcC ending.
+*Mirror screen* is tested with the real tray menu and window built offscreen: it is offered
+only for a paired TV that does not need FairPlay (the tooltip saying why not, in English and
+Spanish), it runs against the same fake TV on the controller's own loop through Connecting,
+Casting and Stopping, Stop and Quit tear the session down with no task left running, a
+failure is explained in Spanish, ending mirroring on the TV is said, and only one cast,
+mirroring session or test runs at a time. *Test this TV*'s last test runs against it as well:
+the TV that keeps the video, drops it, refuses the session or has dropped the pairing, the
+time limit, Stop, the skip for a TV that needs FairPlay, and the command line's output.
 
 ## Building MirrorBridge.exe
 
@@ -388,8 +436,9 @@ CI (`.github/workflows/ci.yml`) runs the tests on Linux and builds the exe on Wi
 1. **Lower delay**: Low-Latency HLS (partial segments) to get close to 1 second.
 2. **Audio-only casting to HomePods and AirPlay speakers** (RAOP), which pyatv supports.
 3. **Multi-room**: send the same stream to several Apple TVs.
-4. **True mirroring** (about 100 ms delay): the AirPlay 2 mirroring sender with the
-   FairPlay setup step, ported from doubletake, with capture and encoding kept on the GPU.
-   See the research report in the project files (`research/airplay-mirroring-windows.html`).
+4. **Screen mirroring for Apple TVs, and with sound**: *Mirror screen* sends TVs of other
+   brands the screen with about 100 ms of delay (experimental), but no sound yet; Apple TVs and
+   Macs also need the FairPlay setup step. See the research report in the project files
+   (`research/airplay-mirroring-windows.html`).
 5. **Lower CPU use now**: keep ddagrab frames on the GPU (no `hwdownload`) when the
    encoder accepts D3D11 frames.
