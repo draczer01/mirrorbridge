@@ -7,6 +7,7 @@ the dialogs are tested on reports made up here.
 
 import argparse
 import asyncio
+import contextlib
 import importlib.util
 import logging
 import os
@@ -14,6 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from aiohttp import web
 from pyatv import exceptions
 from test_patch import PLAYING, TCL_FEATURES, TV_AGENT, QueueAtv, QueueTV
 
@@ -86,6 +88,26 @@ def _has_ffmpeg():
     return True
 
 
+@contextlib.asynccontextmanager
+async def _apples_video():
+    """Stands in for Apple's test video, which the fake TV fetches before it says it plays.
+    (Not an unused port: Windows takes about 2 s to refuse a connection, longer than the probe
+    watches the TV in these tests.)"""
+    async def playlist(_request):
+        return web.Response(text="#EXTM3U\n#EXT-X-ENDLIST\n")
+
+    app = web.Application()
+    app.router.add_get("/bipbop.m3u8", playlist)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    try:
+        yield f"http://127.0.0.1:{runner.addresses[0][1]}/bipbop.m3u8"
+    finally:
+        await runner.cleanup()
+
+
 @pytest.mark.skipif(not _has_ffmpeg(), reason="the third test casts the test pattern with FFmpeg")
 async def test_the_probe_tries_each_way_and_says_what_the_tv_did(monkeypatch, tmp_path):
     wait_for_segments = CastSession._wait_for_segments
@@ -98,10 +120,10 @@ async def test_the_probe_tries_each_way_and_says_what_the_tv_did(monkeypatch, tm
     handlers = list(logging.getLogger().handlers)
     progress = []
     settings = Settings(capture_audio=False, http_port=0, extend_screen=True)
-    async with QueueTV(said=PLAYING, fetch=True) as tv:  # it plays until it is stopped
+    async with _apples_video() as public_url, QueueTV(said=PLAYING, fetch=True) as tv:  # it plays until stopped
         manager = FakeManager(tv)
         report = await asyncio.wait_for(probe.run(
-            manager, _device(), settings, seconds=0.5, public_url="http://127.0.0.1:9/bipbop.m3u8",
+            manager, _device(), settings, seconds=0.5, public_url=public_url,
             progress=lambda *step: progress.append(step), report_folder=tmp_path,
         ), 120)
 
