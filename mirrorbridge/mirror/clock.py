@@ -87,6 +87,7 @@ class NtpResponder(asyncio.DatagramProtocol):
         self.requests = 0
         self.first_request_ns: Optional[int] = None
         self.last_request_ns: Optional[int] = None
+        self._first_tv_minus_ours: Optional[int] = None
         self.peers: set[str] = set()
         self.arrived = asyncio.Event()
 
@@ -100,18 +101,25 @@ class NtpResponder(asyncio.DatagramProtocol):
 
     def datagram_received(self, data: bytes, addr) -> None:
         received = now_ns()
-        reply = ntp_reply(data, received)
-        if reply is None:
+        if ntp_reply(data, received) is None:
             if len(data) >= 2 and data[1] == NTP_REPLY:
                 return  # an answer to one of our own probes (probe_receiver)
             _LOGGER.debug("Ignoring a %d-byte packet on the timing port from %s", len(data), addr[0])
             return
+        sent = now_ns()  # the answer's transmit time: when it really leaves
         if self.transport is not None:
-            self.transport.sendto(reply, addr)
+            self.transport.sendto(ntp_reply(data, received, sent), addr)
         self.requests += 1
-        if self.last_request_ns is not None:  # experiment: when the TV syncs its clock
-            _LOGGER.debug("NTP request %d, %.0f ms after the last", self.requests,
-                          (received - self.last_request_ns) / 1e6)
+        # Experiment: the TV's own transmit time against our receive time, from the first request
+        # of the session. Its spread shows how much the TV's view of our clock can jitter.
+        tv_minus_ours = from_ntp(struct.unpack(">Q", data[24:32])[0]) - received
+        if self._first_tv_minus_ours is None:
+            self._first_tv_minus_ours = tv_minus_ours
+        _LOGGER.debug("NTP request %d, %s; tv_sent - our_received %+.2f ms vs the first; answered %.0f us "
+                      "after it came", self.requests,
+                      f"{(received - self.last_request_ns) / 1e6:.0f} ms after the last"
+                      if self.last_request_ns is not None else "the first",
+                      (tv_minus_ours - self._first_tv_minus_ours) / 1e6, (sent - received) / 1e3)
         self.last_request_ns = received
         if self.first_request_ns is None:
             self.first_request_ns = received
