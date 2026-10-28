@@ -55,14 +55,24 @@ suspender el equipo también desaparece: vuelve a transmitir al despertarlo.
 
 ## Lo que hay que saber
 
-* **Hay un retardo de 3 a 7 segundos.** El espejo en tiempo real que hace un Mac o un
-  iPhone usa un cifrado privado de Apple (FairPlay) que ningún programa libre puede
-  enviar. AirCast usa "AirPlay video", lo mismo que usa YouTube para mandar un video a la
-  TV. Sirve para presentaciones, fotos y videos, no para juegos.
+* **Hay un retardo de 3 a 7 segundos** con un Apple TV (unos 7 segundos o más con TVs
+  de otras marcas, que además tardan unos 6 segundos más en empezar). El espejo en
+  tiempo real que hace un Mac o un iPhone usa un cifrado privado de Apple (FairPlay) que
+  ningún programa libre puede enviar. AirCast usa "AirPlay video", lo mismo que usa
+  YouTube para mandar un video a la TV. Sirve para presentaciones, fotos y videos, no
+  para juegos.
 * **Una sola ventana**: se captura el lugar que ocupa la ventana al empezar. Si la mueves,
   detén y vuelve a transmitir. No puede estar minimizada.
 * **TVs que no son Apple** (LG, Samsung, Sony, Hisense, TCL...): muchas aceptan video por
-  AirPlay 2, pero algunas solo aceptan audio o fotos de equipos que no son Apple.
+  AirPlay 2, pero algunas solo aceptan audio o fotos de equipos que no son Apple. A estas
+  TVs AirCast les manda segmentos de 2 segundos, como pide Apple para TVs con AirPlay 2,
+  sin importar el ajuste de retardo. Si la TV rechaza el video, el mensaje dice qué
+  contestó a cada pedido de AirCast.
+* **TVs con contraseña de AirPlay**: AirCast no puede enviar la contraseña junto con el
+  video. Desactiva la contraseña en los ajustes de AirPlay de la TV.
+* **"The TV did not finish setting up the AirPlay session"** o **"The TV rejected
+  AirCast's credentials"**: casi siempre la TV olvidó el emparejamiento con AirCast. Usa
+  *Dispositivo > Olvidar emparejamiento* y vuelve a transmitir; escribe el PIN nuevo.
 * Si algo falla, el registro está en `%APPDATA%\AirCast\aircast.log` (menú *Más opciones*
   > *Abrir carpeta de registros*).
 
@@ -78,3 +88,15 @@ Se abre una consola que muestra FFmpeg, los codificadores de tu tarjeta de video
 puede capturar el sonido, las pantallas, si el controlador de pantalla virtual está listo
 y las TVs encontradas. Una captura de esa ventana sirve mucho para encontrar problemas.
 `.\AirCast.exe vdd status` muestra solo el estado del controlador de pantalla virtual.
+
+### Avisar de una TV que no funciona
+
+```
+.\AirCast.exe -v scan
+.\AirCast.exe -v cast -d "Nombre de la TV"
+```
+
+Manda lo que muestran estas dos consolas junto con `aircast.log` (menú *Más opciones* >
+*Abrir carpeta de registros*). Ahí se ve qué anuncia la TV, qué contestó a cada pedido de
+AirPlay, cuándo (y con qué reproductor) descargó el video, y si pidió algo que AirCast no
+tiene.

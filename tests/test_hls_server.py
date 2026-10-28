@@ -1,3 +1,5 @@
+import logging
+
 import aiohttp
 
 from aircast.hls_server import HlsServer
@@ -43,3 +45,87 @@ async def test_served_playlist_has_valid_target_duration(tmp_path):
                 assert "#EXT-X-TARGETDURATION:1" in await resp.text()
     finally:
         await server.close()
+
+
+async def test_records_each_client_and_its_first_playlist_and_segment(tmp_path, caplog):
+    (tmp_path / "master.m3u8").write_text("#EXTM3U\n")
+    (tmp_path / "seg_00001.ts").write_bytes(b"\x47" * 188)
+    server = HlsServer(tmp_path, "127.0.0.1", 0)
+    await server.start()
+    try:
+        assert server.activity().requests == 0 and server.activity().first_playlist_at is None
+        async with aiohttp.ClientSession(headers={"User-Agent": "AppleCoreMedia/1.0.0"}) as http:
+            with caplog.at_level(logging.INFO, logger="aircast.hls_server"):
+                async with http.get(server.url("master.m3u8")) as resp:
+                    assert resp.status == 200
+                async with http.get(server.url("seg_00001.ts")) as resp:
+                    assert resp.status == 200
+    finally:
+        await server.close()
+    lines = [r.getMessage() for r in caplog.records]
+    assert lines[0] == "127.0.0.1 started fetching the stream (User-Agent: AppleCoreMedia/1.0.0)"
+    assert lines[1] == "127.0.0.1 fetched its first playlist, master.m3u8"
+    assert lines[2].startswith("127.0.0.1 fetched its first video segment, seg_00001.ts, ")
+    assert lines[2].endswith(" s after its first playlist") and len(lines) == 3
+    tv = server.activity("127.0.0.1")
+    assert tv.requests == 2 and tv.user_agent == "AppleCoreMedia/1.0.0"
+    assert tv.first_playlist_at <= tv.first_segment_at <= tv.last_request_at
+    assert server.activity("192.168.1.40").requests == 0
+    assert server.activity() == tv  # only one client
+    assert server.url("master.m3u8").endswith(f":{server.port}/master.m3u8")
+
+
+async def test_requests_it_cannot_serve_are_logged_and_counted_but_are_not_fetches(tmp_path, caplog):
+    """A TV that reaches AirCast but asks for the wrong thing must not look like a firewall problem."""
+    (tmp_path / "stream.m3u8").write_text("#EXTM3U\n")
+    server = HlsServer(tmp_path, "127.0.0.1", 0)
+    await server.start()
+    base = f"http://127.0.0.1:{server.port}"
+    try:
+        async with aiohttp.ClientSession(headers={"User-Agent": "ExoPlayerLib/2.18"}) as http:
+            with caplog.at_level(logging.INFO, logger="aircast.hls_server"):
+                for method, path, status in (("GET", "/aircast/stream.m3u8", 404), ("GET", "/aircast/stream.m3u8", 404),
+                                             ("GET", "/seg_00009.ts", 404), ("OPTIONS", "/stream.m3u8", 405)):
+                    async with http.request(method, base + path) as resp:
+                        assert resp.status == status
+    finally:
+        await server.close()
+    tv = server.activity("127.0.0.1")
+    assert tv.requests == 0 and tv.first_playlist_at is None  # nothing was fetched
+    assert tv.missing == 4 and tv.missing_path == "/aircast/stream.m3u8"
+    agent = "User-Agent: ExoPlayerLib/2.18"
+    assert [r.getMessage() for r in caplog.records] == [  # once per request, with the player that asked
+        f"127.0.0.1 asked for GET /aircast/stream.m3u8, which AirCast does not serve (HTTP 404, {agent})",
+        f"127.0.0.1 asked for GET /seg_00009.ts, which AirCast does not serve (HTTP 404, {agent})",
+        f"127.0.0.1 asked for OPTIONS /stream.m3u8, which AirCast does not serve (HTTP 405, {agent})",
+    ]
+
+
+FFMPEG_MASTER = (b"#EXTM3U\n#EXT-X-VERSION:3\n"
+                 b'#EXT-X-STREAM-INF:BANDWIDTH=8976000,RESOLUTION=1280x720,CODECS="avc1.64001f,mp4a.40.2"\n'
+                 b"stream.m3u8\n\n")
+
+
+def test_master_playlist_gets_frame_rate_and_average_bandwidth():
+    from aircast.hls_server import complete_variants
+
+    done = complete_variants(FFMPEG_MASTER, 30, 8160000)
+    assert done == FFMPEG_MASTER.replace(b'mp4a.40.2"\n', b'mp4a.40.2",FRAME-RATE=30.000,AVERAGE-BANDWIDTH=8160000\n')
+    assert complete_variants(done, 60, 1) == done  # what is there already is kept
+    assert b"AVERAGE-BANDWIDTH=8976000" in complete_variants(FFMPEG_MASTER, 30, 10**8)  # never above the peak
+    media = b"#EXTM3U\n#EXTINF:2.0,\nseg_00001.ts\n"
+    assert complete_variants(media, 30, 1) == media
+
+
+async def test_served_master_playlist_is_completed_only_when_asked(tmp_path):
+    (tmp_path / "master.m3u8").write_bytes(FFMPEG_MASTER)
+    for kwargs, completed in (({}, False), ({"frame_rate": 30, "average_bandwidth": 8160000}, True)):
+        server = HlsServer(tmp_path, "127.0.0.1", 0, **kwargs)
+        await server.start()
+        try:
+            async with aiohttp.ClientSession() as http:
+                async with http.get(server.url("master.m3u8")) as resp:
+                    body = await resp.read()
+        finally:
+            await server.close()
+        assert (b",FRAME-RATE=30.000,AVERAGE-BANDWIDTH=8160000\n" in body) is completed

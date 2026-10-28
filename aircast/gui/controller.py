@@ -24,7 +24,7 @@ from ..config import Settings, app_data_dir
 from ..devices import Device, DeviceManager
 from ..session import CastSession, State
 from .extend import ExtendScreenSetup, error_text
-from .i18n import state_text, tr
+from .i18n import menu_paths, state_text, tr
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -471,12 +471,13 @@ class Controller(QObject):
             if isinstance(exc, vdisplay.VddError) and exc.status is not None:
                 self.extend.handle_status(exc.status)  # driver missing or broken: offer the fix
             else:
-                self.notify.emit(tr("cast_failed"), error_text(exc), True)
+                self.notify.emit(tr("cast_failed"), menu_paths(error_text(exc)), True)
 
         self.session_future = self.runner.submit(self.session.run(), finished, failed)
         self.activity_changed.emit()
 
     def _on_cast_state(self, state: State, message: str, device: Device) -> None:
+        message = menu_paths(message)  # errors name menu items in English
         self.cast_state = state
         self.cast_message = message
         self.cast_state_changed.emit(state, message)
@@ -522,7 +523,7 @@ class Controller(QObject):
             self.casting_to = ""
             self.activity_changed.emit()
             if not isinstance(exc, concurrent.futures.CancelledError):
-                self.notify.emit(tr("playback_failed"), str(exc), True)
+                self.notify.emit(tr("playback_failed"), menu_paths(str(exc)), True)
 
         _LOGGER.info(tr("playing_file", file=os.path.basename(path), device=device.name))
         self.casting_to = device.name

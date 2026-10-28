@@ -654,6 +654,10 @@ class FakeScreen(vdisplay.VirtualScreen):
         self.events.append("xscreen.stop")
 
 
+# FFmpeg's master playlist for other brands' TVs (see ffmpeg.MASTER_PLAYLIST)
+MASTER = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=25000000,RESOLUTION=3840x2160,CODECS="avc1.640033,mp4a.40.2"\nstream.m3u8\n'
+
+
 class FakeManager:
     async def connect(self, _device):
         async def play_url(_url):
@@ -686,15 +690,17 @@ def extend_session(tmp_path, monkeypatch):
 
     monkeypatch.setattr(CastSession, "_stop_encoder", stop_encoder)
 
-    def make(launch, **settings):
+    def make(launch, is_apple=True, **settings):
         async def launch_encoder(self, _ff, monitor, region=None):
             events.append(("launch", monitor.device, self.backend, self.encoder))
+            if not self.for_apple:
+                (self._work_dir / ffmpeg.MASTER_PLAYLIST).write_text(MASTER)
             await launch(self)
 
         monkeypatch.setattr(CastSession, "_launch_encoder", launch_encoder)
         settings = Settings(**{"extend_screen": True, "bind_address": "127.0.0.1", "http_port": 0,
                                "capture_audio": False, **settings})
-        device = types.SimpleNamespace(name="TV", address="127.0.0.1")
+        device = types.SimpleNamespace(name="TV", address="127.0.0.1", is_apple=is_apple, requires_password=False)
         states = []
         session = CastSession(FakeManager(), device, settings, lambda s, m: states.append(s), work_dir=tmp_path)
         return session, events, states
@@ -711,6 +717,7 @@ async def test_cancel_while_starting_removes_the_screen_after_ffmpeg(extend_sess
     session, events, states = extend_session(hang, extend_mode="4k", monitor_index=0, window_title="Notepad")
     task = asyncio.ensure_future(session.run())
     while not any(isinstance(e, tuple) and e[0] == "launch" for e in events):
+        assert not task.done()
         await asyncio.sleep(0.01)
     assert session.virtual_device == VIRTUAL
     await session.stop()
@@ -742,13 +749,14 @@ async def test_failed_cast_removes_the_screen_after_the_last_ffmpeg(extend_sessi
     assert states[-1] == State.FAILED
 
 
-async def test_lost_screen_ends_the_cast_with_its_own_message(extend_session):
+@pytest.mark.parametrize("is_apple", [True, False])
+async def test_lost_screen_ends_the_cast_with_its_own_message(extend_session, is_apple):
     from aircast.session import State
 
     async def runs(_session):
         return None
 
-    session, events, states = extend_session(runs)
+    session, events, states = extend_session(runs, is_apple=is_apple)
     task = asyncio.ensure_future(session.run())
     while State.CONNECTING not in states:
         assert not task.done()
@@ -760,6 +768,44 @@ async def test_lost_screen_ends_the_cast_with_its_own_message(extend_session):
     assert info.value.code == "lost" and session.error is info.value
     assert events[-2:] == ["stop_encoder", "xscreen.stop"]
     assert states[-1] == State.FAILED
+
+
+async def test_another_brands_tv_gets_its_own_stream_of_the_virtual_screen(extend_session, monkeypatch):
+    """Another brand's TV gets the stream made for such TVs (2 s segments, a master playlist
+    with FRAME-RATE and AVERAGE-BANDWIDTH) of the virtual screen at its own size. When the TV
+    stops fetching, the cast ends as any other, and the screen goes once FFmpeg has stopped."""
+    import aiohttp
+
+    from aircast import session as session_module
+    from aircast.session import State
+
+    monkeypatch.setattr(session_module, "IDLE_REQUEST_TIMEOUT", 0.5)
+    launched = []
+
+    async def writes_a_segment(session):
+        launched.append((session.for_apple, ffmpeg.segment_seconds(session.settings, session.for_apple),
+                         session.settings.output_height))
+        (session._work_dir / "stream.m3u8").write_text("#EXTM3U\n#EXTINF:2.0,\nseg_00000.ts\n")
+        (session._work_dir / "seg_00000.ts").write_bytes(b"\x47" * 188)
+
+    session, events, states = extend_session(writes_a_segment, is_apple=False, extend_mode="4k")
+    task = asyncio.ensure_future(session.run())
+    while State.CONNECTING not in states:
+        assert not task.done()
+        await asyncio.sleep(0.01)
+    assert session.stream_url.endswith("/master.m3u8")
+    async with aiohttp.ClientSession() as http:  # the TV (127.0.0.1 here) plays a moment, then stops
+        async with http.get(session.stream_url) as resp:
+            master = await resp.text()
+        for name in ("stream.m3u8", "seg_00000.ts"):
+            async with http.get(session.stream_url.replace("master.m3u8", name)) as resp:
+                assert resp.status == 200
+    await asyncio.wait_for(task, 10)
+    assert launched == [(False, 2.0, 0)] and events[1][:2] == ("launch", VIRTUAL)
+    # 4K's 20 Mbps (not the 8 Mbps of the settings) plus the audio's 160 kbps
+    assert "FRAME-RATE=30.000,AVERAGE-BANDWIDTH=20160000" in master
+    assert State.CASTING in states and states[-1] == State.STOPPED
+    assert events[-2:] == ["stop_encoder", "xscreen.stop"] and events.count("xscreen.stop") == 1
 
 
 async def test_test_capture_ignores_extend_screen(extend_session):

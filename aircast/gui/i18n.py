@@ -277,3 +277,22 @@ def tr(key: str, **kwargs) -> str:
 def state_text(state) -> str:
     """Localized name of a session.State."""
     return tr("state_" + state.name.lower())
+
+
+def _item(key: str) -> str:
+    """A menu item's name without its "…" or "(~7 s delay)"."""
+    return tr(key).split(" (")[0].rstrip("…")
+
+
+def menu_paths(text: str) -> str:
+    """Name the menu items that a cast's (English) error mentions as the menu does."""
+    paths = {
+        "Device > Forget pairing": (_item("device_menu"), _item("forget")),
+        "Device > Pair with PIN": (_item("device_menu"), _item("pair")),
+        "Quality > Delay > Smooth": (_item("quality_menu"), _item("latency"), _item("lat_smooth")),
+        "Quality > Encoder > x264 (CPU)": (_item("quality_menu"), _item("encoder"), "x264 (CPU)"),
+        "What to cast > Extended screen size > 720p": (_item("source_menu"), _item("extend_size"), "720p"),
+    }
+    for english, words in paths.items():
+        text = text.replace(english, " > ".join(words))
+    return text
