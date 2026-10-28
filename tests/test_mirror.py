@@ -3,6 +3,7 @@ cryptography, and FFmpeg's own output (tests/test_mirror_loopback.py has whole s
 
 import asyncio
 import random
+import socket
 import struct
 import subprocess
 
@@ -217,9 +218,30 @@ def test_ntp_reply_echoes_the_request():
     assert clock.ntp_reply(request[:20], 0) is None
 
 
+def _free_udp_ports(size: int = 10) -> range:
+    """A run of UDP ports free right now, for the tests of bind_udp. Not TIMING_PORTS: other
+    tests (or test processes, with pytest -n) mirroring at the same time hold some of those."""
+    for _ in range(50):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            start = probe.getsockname()[1]
+        ports = range(start, start + size)
+        if ports.stop > 65536:
+            continue
+        try:
+            for port in ports:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                    sock.bind(("127.0.0.1", port))
+        except OSError:
+            continue
+        return ports
+    pytest.skip("no run of free UDP ports")
+
+
 async def test_ntp_responder_over_udp():
     loop = asyncio.get_running_loop()
-    transport, responder = await clock.bind_udp(clock.NtpResponder, "127.0.0.1")
+    ports = _free_udp_ports()
+    transport, responder = await clock.bind_udp(clock.NtpResponder, "127.0.0.1", ports)
     answers: asyncio.Queue = asyncio.Queue()
 
     class Asker(asyncio.DatagramProtocol):
@@ -228,7 +250,7 @@ async def test_ntp_responder_over_udp():
 
     asker, _ = await loop.create_datagram_endpoint(Asker, local_addr=("127.0.0.1", 0))
     try:
-        assert responder.port in clock.TIMING_PORTS
+        assert responder.port in ports
         before = clock.now_ns()
         request = clock.ntp_request(before)
         asker.sendto(request, ("127.0.0.1", responder.port))
@@ -250,11 +272,13 @@ async def test_ntp_responder_over_udp():
 
 
 async def test_bind_udp_takes_the_next_free_port_of_the_range():
-    first, _ = await clock.bind_udp(asyncio.DatagramProtocol, "127.0.0.1")
-    second, _ = await clock.bind_udp(asyncio.DatagramProtocol, "127.0.0.1")
+    assert clock.bind_udp.__defaults__[0] == clock.TIMING_PORTS == range(7880, 7890)  # the firewall rule's
+    ports = _free_udp_ports()
+    first, _ = await clock.bind_udp(asyncio.DatagramProtocol, "127.0.0.1", ports)
+    second, _ = await clock.bind_udp(asyncio.DatagramProtocol, "127.0.0.1", ports)
     try:
-        ports = [first.get_extra_info("sockname")[1], second.get_extra_info("sockname")[1]]
-        assert all(p in clock.TIMING_PORTS for p in ports) and ports[0] != ports[1]
+        bound = [first.get_extra_info("sockname")[1], second.get_extra_info("sockname")[1]]
+        assert all(p in ports for p in bound) and bound[0] != bound[1]
     finally:
         first.close()
         second.close()

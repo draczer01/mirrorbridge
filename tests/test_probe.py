@@ -48,6 +48,9 @@ def quick(monkeypatch, tmp_path):
     # %APPDATA% (~/.config off Windows) in tmp_path: mirroring.json, settings.json, the reports
     monkeypatch.setenv("APPDATA", str(tmp_path))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    # probe.run patches pyatv before its tests; the tests that call one test alone need it too
+    # (they passed only after another file had patched it, and failed when run on their own).
+    airplay_patch.apply()
     yield
     i18n.set_language("en")
     airplay_patch._ROUTES.clear()
