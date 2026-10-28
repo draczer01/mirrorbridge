@@ -238,6 +238,8 @@ async def cmd_mirror(args) -> int:
     """Screen mirroring (experimental), or with --probe, how the TV takes it."""
     settings = Settings.load()
     _what_to_send(settings, args)
+    if args.framerate:
+        settings.framerate = args.framerate  # this run only: settings.json is not written
     manager = DeviceManager(asyncio.get_running_loop())
     device = await _choose(manager, args)
     if device.airplay is None:
@@ -442,6 +444,8 @@ def build_parser() -> argparse.ArgumentParser:
     mirroring.add_argument("--test-pattern", action="store_true",
                            help="mirror a test pattern, not the screen (and no virtual screen)")
     mirroring.add_argument("--seconds", type=float, help="stop after this many seconds (--probe: 10)")
+    mirroring.add_argument("--fps", dest="framerate", type=int,
+                           help="frame rate for this run only (default: the app's choice)")
 
     vdd = sub.add_parser("vdd", help="the virtual display driver that --extend uses")
     vdd_sub = vdd.add_subparsers(dest="vdd_command", required=True, metavar="{status,install}")
@@ -466,7 +470,7 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        format="%(asctime)s.%(msecs)03d %(levelname)-7s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
     if not args.verbose:
