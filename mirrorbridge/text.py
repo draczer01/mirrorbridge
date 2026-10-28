@@ -11,7 +11,7 @@ from __future__ import annotations
 
 class Text(str):
     """`english` (a str.format template) filled in with `values`; gui.i18n has `key` in
-    English and Spanish, with the same {placeholders}."""
+    English and its other languages, with the same {placeholders}."""
 
     key: str
     values: dict

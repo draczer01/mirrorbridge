@@ -22,6 +22,9 @@ escritorio, que MirrorBridge no toca; cuando MirrorBridge ya transmita a tu TV, 
 puedes borrar `%APPDATA%\AirCast`. AirCast y MirrorBridge no se conocen: si los dos están
 abiertos, verás dos iconos en la bandeja.
 
+AirCast seguía el idioma de Windows; MirrorBridge empieza en inglés. Para volver a tenerlo en
+español, elige una vez **Language / Idioma** > **Español** en su menú.
+
 ## Uso
 
 1. Haz doble clic en **MirrorBridge.exe**. Si Windows SmartScreen avisa que la app no es
@@ -29,11 +32,14 @@ abiertos, verás dos iconos en la bandeja.
 2. Aparece el icono de MirrorBridge junto al reloj (puede estar escondido bajo la flecha
    **^**; arrástralo afuera para tenerlo siempre visible). Haz clic en él, izquierdo o
    derecho, para abrir el menú.
-3. Cuando el Firewall de Windows pregunte, **permite MirrorBridge en redes privadas**. La
+3. El menú empieza en inglés. Para verlo en español, elige **Language / Idioma** >
+   **Español**: el menú, la ventana y los mensajes cambian enseguida, y MirrorBridge lo
+   recuerda para la próxima vez. **English** lo vuelve a poner en inglés.
+4. Cuando el Firewall de Windows pregunte, **permite MirrorBridge en redes privadas**. La
    TV descarga el video desde tu PC.
-4. En el menú: **Dispositivo** > elige tu TV, luego **Transmitir a ...**. La primera vez
+5. En el menú: **Dispositivo** > elige tu TV, luego **Transmitir a ...**. La primera vez
    la TV muestra un PIN: escríbelo y queda emparejado para siempre.
-5. Todo lo demás también está en el menú:
+6. Todo lo demás también está en el menú:
    * **Qué transmitir**: la pantalla, una sola ventana, o **Extender pantalla** (la TV
      como segunda pantalla), y si se ve el puntero.
    * **Calidad**: resolución, cuadros por segundo, retardo, calidad del video y codificador.
@@ -41,7 +47,8 @@ abiertos, verás dos iconos en la bandeja.
    * **Reproducir un archivo de video** en la TV.
    * **Más opciones**: iniciar con Windows, crear acceso directo en el escritorio y abrir
      la carpeta de registros.
-6. **Abrir MirrorBridge** muestra la ventana completa. Al cerrarla, MirrorBridge sigue en
+   * **Language / Idioma**: English o Español. La ventana completa también lo tiene, abajo.
+7. **Abrir MirrorBridge** muestra la ventana completa. Al cerrarla, MirrorBridge sigue en
    la bandeja. **Salir** detiene la transmisión y cierra MirrorBridge.
 
 ## Extender pantalla (la TV como segunda pantalla)
@@ -107,7 +114,8 @@ Se abre una consola que muestra FFmpeg, los codificadores de tu tarjeta de video
 puede capturar el sonido, las pantallas, si el controlador de pantalla virtual está listo
 y las TVs encontradas. Una captura de esa ventana sirve mucho para encontrar problemas.
 `.\MirrorBridge.exe vdd status` muestra solo el estado del controlador de pantalla virtual.
-La consola escribe en inglés; el menú y la ventana, en el idioma de Windows.
+La consola escribe en inglés; el menú y la ventana, en el idioma que elijas en **Language /
+Idioma**.
 
 ### Avisar de una TV que no funciona
 

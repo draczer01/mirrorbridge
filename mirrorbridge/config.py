@@ -65,7 +65,7 @@ class Settings:
     bind_address: str = ""  # empty -> auto-detect the interface reaching the device
 
     # App
-    language: str = ""  # "" = follow Windows, "en" or "es"
+    language: str = "en"  # a gui.i18n.LANGUAGES code; any other ("" once meant "as Windows") is English
     tray_hint_shown: bool = False
     hide_hint_shown: bool = False
     extend_tip_shown: bool = False

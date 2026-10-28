@@ -15,7 +15,7 @@ from ..config import app_data_dir
 from . import winintegration
 from .controller import Controller
 from .extend import EXTEND_SIZES, error_text, size_label, size_name
-from .i18n import tr
+from .i18n import LANGUAGES, language, language_menu_title, tr
 from .theme import app_icon
 
 _LOGGER = logging.getLogger(__name__)
@@ -49,6 +49,8 @@ class TrayMenu(QObject):
             signal.connect(self._refresh_status)
         self.c.scanning_changed.connect(self._refresh_status)
         self.c.cast_state_changed.connect(self._refresh_status)
+        self.c.language_changed.connect(self._rebuild)  # it is also rebuilt each time it opens
+        self.c.language_changed.connect(self._refresh_status)
         self.c.notify.connect(self._notify)
         self._rebuild()
         self._refresh_status()
@@ -146,6 +148,7 @@ class TrayMenu(QObject):
         if vdisplay.available():
             installed = c.vdd_status not in (None, vdisplay.DriverStatus.NOT_INSTALLED)
             self._action(more, tr("vdd_remove"), c.extend.remove_driver, enabled=installed and not c.is_active)
+        self._language_menu(self._submenu(menu, language_menu_title()))
         menu.addSeparator()
         self._action(menu, tr("quit"), lambda: self.quit_app())
 
@@ -204,6 +207,13 @@ class TrayMenu(QObject):
         sub.addSeparator()
         self._action(sub, tr("cursor"), lambda on: c.update_settings(show_cursor=on),
                      checkable=True, checked=s.show_cursor)
+
+    def _language_menu(self, sub: QMenu) -> None:
+        """Each language in its own words; choosing one shows everything in it at once."""
+        group = QActionGroup(sub)
+        for code, name in LANGUAGES.items():
+            self._action(sub, name, (lambda _=False, code=code: self.c.set_language(code)),
+                         checkable=True, checked=language() == code, group=group)
 
     def _quality_menu(self, sub: QMenu) -> None:
         c, s = self.c, self.c.settings

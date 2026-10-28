@@ -1,8 +1,18 @@
-"""User-facing strings in English and Spanish. The system language picks one."""
+"""User-facing strings in every language the app speaks. English unless the user picks another.
+
+Each string keeps its languages side by side, so a new one is written in all of them at once and
+the tests can check that each takes the same {values} as its English. Another language needs its
+entry in LANGUAGES and its words under each key; a key it lacks is shown in English.
+"""
 
 from __future__ import annotations
 
 from ..text import Text
+
+# The languages the app speaks, in the order the Language menu lists them: code -> its own name.
+LANGUAGES: dict[str, str] = {"en": "English", "es": "Español"}
+# Every string is written in English first: the default, and the words any other language lacks.
+DEFAULT = "en"
 
 _STRINGS: dict[str, dict[str, str]] = {
     # Tray menu
@@ -57,6 +67,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "more": {"en": "More options", "es": "Más opciones"},
     "log_folder": {"en": "Open log folder", "es": "Abrir carpeta de registros"},
+    "language_menu": {"en": "Language", "es": "Idioma"},
     "quit": {"en": "Quit", "es": "Salir"},
     # Notifications
     "tray_hint": {
@@ -230,6 +241,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "Arrastra ventanas hacia la derecha de tu pantalla para verlas en la TV.",
     },
     "close": {"en": "Close", "es": "Cerrar"},
+    "ok": {"en": "OK", "es": "Aceptar"},
+    "cancel": {"en": "Cancel", "es": "Cancelar"},
     # Device status
     "st_paired": {"en": "Paired", "es": "Emparejado"},
     "st_ready": {"en": "Ready", "es": "Listo"},
@@ -431,22 +444,36 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
 }
 
-_lang = "en"
+_lang = DEFAULT
 
 
-def set_language(code: str) -> None:
+def set_language(code: str) -> str:
+    """Speak `code` from now on, or English for a code not in LANGUAGES (such as the "" that
+    used to mean "as Windows"). Returns the language used."""
     global _lang  # pylint: disable=global-statement
-    _lang = "es" if code.lower().startswith("es") else "en"
+    _lang = code if code in LANGUAGES else DEFAULT
+    return _lang
 
 
 def language() -> str:
     return _lang
 
 
-def tr(key: str, **kwargs) -> str:
+def _words(key: str, code: str) -> str:
     entry = _STRINGS.get(key)
-    text = (entry.get(_lang) or entry["en"]) if entry else key
+    return (entry.get(code) or entry[DEFAULT]) if entry else key
+
+
+def tr(key: str, **kwargs) -> str:
+    """The string `key` in the app's language, or in English if that language lacks it."""
+    text = _words(key, _lang)
     return text.format(**kwargs) if kwargs else text
+
+
+def language_menu_title() -> str:
+    """The Language menu's name in every language ("Language / Idioma"), so it is found
+    whichever language the menu is in."""
+    return " / ".join(dict.fromkeys(_words("language_menu", code) for code in LANGUAGES))
 
 
 def state_text(state) -> str:
@@ -472,7 +499,8 @@ def _menu_paths() -> dict[str, str]:
 
 
 def say(text: str) -> str:
-    """A core module's Text in the user's language, its values too; any other str as it is."""
+    """A core module's Text in the user's language, its values too; any other str, or a Text
+    whose key is not here, as it is (in English)."""
     if not isinstance(text, Text) or text.key not in _STRINGS:
         return text
     values = {name: say(value) if isinstance(value, str) else value for name, value in text.values.items()}

@@ -23,8 +23,9 @@ from .. import airplay_patch, ffmpeg, vdisplay
 from ..config import Settings, app_data_dir
 from ..devices import Device, DeviceManager
 from ..session import CastSession, State
+from . import i18n
 from .extend import ExtendScreenSetup, error_text
-from .i18n import say, state_text, tr
+from .i18n import state_text, tr
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -112,12 +113,13 @@ def setup_file_logging() -> str:
 class Controller(QObject):
     devices_changed = Signal()
     scanning_changed = Signal(bool)
-    cast_state_changed = Signal(object, str)  # State, message
+    cast_state_changed = Signal(object, object)  # State, what the session said (a str or Text) or the error
     activity_changed = Signal()  # started/stopped casting or file playback
     encoders_detected = Signal(list)
     settings_changed = Signal()
     log_line = Signal(str)
     notify = Signal(str, str, bool)  # title, message, is_error
+    language_changed = Signal()  # i18n speaks another language: show every text again
 
     def __init__(self, settings: Settings) -> None:
         super().__init__()
@@ -188,6 +190,16 @@ class Controller(QObject):
         self.settings.last_device_id = identifier
         self.save_settings()
         self.devices_changed.emit()
+
+    def set_language(self, code: str) -> None:
+        """Show the menu, the window, and every dialog and notification from now on in `code`
+        (an i18n.LANGUAGES code), and save the choice."""
+        if code == i18n.language():
+            return
+        code = i18n.set_language(code)
+        _LOGGER.info("Language: %s", i18n.LANGUAGES[code])
+        self.update_settings(language=code)
+        self.language_changed.emit()
 
     def update_settings(self, **changes: Any) -> None:
         for key, value in changes.items():
@@ -342,6 +354,8 @@ class Controller(QObject):
         dialog.setWindowTitle(title)
         dialog.setLabelText(label)
         dialog.setTextEchoMode(QLineEdit.Password if password else QLineEdit.Normal)
+        dialog.setOkButtonText(tr("ok"))  # Qt's own words would be English
+        dialog.setCancelButtonText(tr("cancel"))
         self.bring_to_front(dialog)
         ok = dialog.exec()
         return dialog.textValue().strip() if ok else None
@@ -358,6 +372,7 @@ class Controller(QObject):
                 else:
                     box = QMessageBox(QMessageBox.Information, tr("pair_title", device=device.name),
                                       tr("pair_show_pin", pin=our_pin), parent=self._parent())
+                    box.addButton(tr("ok"), QMessageBox.AcceptRole)
                     self.bring_to_front(box)
                     box.exec()
                     value = our_pin
@@ -370,6 +385,7 @@ class Controller(QObject):
 
     def show_error(self, title: str, message: str) -> None:
         box = QMessageBox(QMessageBox.Warning, title, message, parent=self._parent())
+        box.addButton(tr("ok"), QMessageBox.AcceptRole)
         self.bring_to_front(box)
         box.exec()
 
@@ -451,7 +467,7 @@ class Controller(QObject):
 
         def on_status(state: State, message: str) -> None:
             if state == State.FAILED and session.error is not None:
-                message = error_text(session.error)
+                message = session.error  # the window explains it in the user's language
             self.bridge.call(lambda: self._on_cast_state(state, message, device))
 
         self.casting_to = device.name
@@ -476,8 +492,7 @@ class Controller(QObject):
         self.session_future = self.runner.submit(self.session.run(), finished, failed)
         self.activity_changed.emit()
 
-    def _on_cast_state(self, state: State, message: str, device: Device) -> None:
-        message = say(message)  # what the session said, in the user's language
+    def _on_cast_state(self, state: State, message: Any, device: Device) -> None:
         self.cast_state = state
         self.cast_message = message
         self.cast_state_changed.emit(state, message)

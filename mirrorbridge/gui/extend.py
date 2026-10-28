@@ -141,6 +141,7 @@ class ExtendScreenSetup:
 
     def _message(self, icon, text: str, info: str = "") -> None:
         box = self._box(icon, text, info)
+        box.addButton(tr("ok"), QMessageBox.AcceptRole)
         self.c.bring_to_front(box)
         box.exec()
 

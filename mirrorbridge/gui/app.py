@@ -8,7 +8,7 @@ import os
 import sys
 from typing import Optional
 
-from PySide6.QtCore import QLocale, QLockFile, QTimer
+from PySide6.QtCore import QLockFile, QTimer
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 
@@ -20,12 +20,6 @@ from .theme import app_icon, apply_dark_theme
 from .tray import TrayMenu
 
 _LOGGER = logging.getLogger(__name__)
-
-
-def _system_language() -> str:
-    """The Windows display language (es-MX, en-US...), not the regional format."""
-    languages = QLocale.system().uiLanguages()
-    return languages[0] if languages else QLocale.system().name()
 
 
 def _instance_name() -> str:
@@ -40,7 +34,7 @@ class MirrorBridgeApp:
     def __init__(self, app: QApplication, open_window: bool = False) -> None:
         self.app = app
         self.settings = Settings.load()
-        set_language(self.settings.language or _system_language())
+        set_language(self.settings.language)  # English until the user picks another in Language / Idioma
         self.controller = Controller(self.settings)
         if not self.settings.old_autostart_checked and migration.migrate_autostart():
             self.controller.update_settings(old_autostart_checked=True)

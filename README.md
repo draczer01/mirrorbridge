@@ -8,8 +8,8 @@ hardware H.264 encoder.
 It is a single `MirrorBridge.exe` (FFmpeg included, nothing to install; only Extend screen
 needs a driver, which MirrorBridge offers to install the first time) that lives in the
 system tray. Every feature is in the tray icon's menu; the full window only opens when
-you choose **Open MirrorBridge** in that menu. The interface follows the Windows display
-language (Spanish or English). There is also a command line.
+you choose **Open MirrorBridge** in that menu. The interface is in English, or in Spanish
+once you choose it under **Language / Idioma**. There is also a command line.
 
 ## Formerly AirCast
 
@@ -27,6 +27,9 @@ networks. After that, delete `AirCast.exe` and the `AirCast` shortcut on your de
 MirrorBridge leaves alone; once MirrorBridge casts to your TV, `%APPDATA%\AirCast` can go
 too. AirCast and MirrorBridge do not know about each other, so if both run, there are two
 icons in the tray.
+
+AirCast followed the Windows display language; MirrorBridge starts in English. To have it in
+Spanish again, choose **Language / Idioma** > **Español** in its menu once.
 
 ## What it can and cannot do
 
@@ -83,6 +86,15 @@ the TV.
 5. **More options** has *Start with Windows*, *Create desktop shortcut* and the log
    folder. **Open MirrorBridge** shows the full window; closing it keeps MirrorBridge in the
    tray. **Quit** stops any cast and exits.
+
+### Language
+
+MirrorBridge is in English until you choose another language: in the tray menu, choose
+**Language / Idioma** > **Español** (and **English** to go back). The menu, the window, and
+every dialog and notification from then on switch at once, and MirrorBridge keeps the choice
+for its next start. The full window has the same choice at the bottom. It does not follow the
+Windows display language, so it starts in English on a Spanish Windows too. English and
+Spanish are the only languages for now; the command line is always in English.
 
 ### Casting a single window
 
@@ -182,7 +194,7 @@ pyatv: mDNS discovery → PIN pair-setup → pair-verify → AirPlay /play (URL 
 | `mirrorbridge/gui/controller.py` | State shared by the menu and the window; runs pyatv on a background asyncio loop |
 | `mirrorbridge/gui/extend.py` | The Extend screen choice: driver check, consent and install dialogs |
 | `mirrorbridge/gui/app.py` | Single instance, startup and quit |
-| `mirrorbridge/gui/i18n.py` | Every word the menu and the window show, in English and Spanish |
+| `mirrorbridge/gui/i18n.py` | The languages the *Language / Idioma* menu offers, and every word the menu and the window show in each (English when a language lacks one) |
 | `mirrorbridge/text.py` | Messages that say which of those words they are, so a failed cast is explained in Spanish too; the command line stays in English |
 | `mirrorbridge/migration.py` | Moves settings, pairings and Start with Windows over from the app's old name (see above) |
 | `mirrorbridge/cli.py` | Command line |
@@ -277,7 +289,12 @@ still paired afterwards, and the Start with Windows entry (on, off in Task Manag
 program's, or none) against a fake registry. One more test fails if the old name shows up
 anywhere it is not needed. Every message a cast, pairing or FFmpeg can end with is checked
 to be in `gui/i18n.py` in English and Spanish, with the same English as the command line
-and the same values, and the hints name the Spanish menu items.
+and the same values, and the hints name the Spanish menu items. The language tests check that
+a first start, and a settings file from before there was a Language menu, are in English, and
+that a language lacking a string shows it in English. With the real tray menu and window built
+offscreen, they check that choosing Español changes both at once (the status line and the
+dialogs' buttons too), that the choice is kept for the next start, and that a language added
+only to `gui/i18n.py` appears in both.
 
 ## Building MirrorBridge.exe
 

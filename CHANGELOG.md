@@ -20,12 +20,17 @@ A pre-release: not yet tried on a real TV.
   once it is full, PROGRAM-DATE-TIME, and a master playlist with CODECS, FRAME-RATE and
   AVERAGE-BANDWIDTH. Expect about 7 seconds of delay, and a start about 6 seconds later, on those
   TVs. Apple TVs get the same stream as before.
-- Failed casts, pairings and FFmpeg problems are explained in the app's language (English, or
-  Spanish when Windows is in Spanish), naming the menu item to try. The command line and the log
-  stay in English.
+- The app is in English until you choose another language under *Language / Idioma*. It no
+  longer follows the Windows display language, so it starts in English on a Spanish Windows too.
+- Failed casts, pairings and FFmpeg problems are explained in the app's language, naming the menu
+  item to try. The command line and the log stay in English.
 
 ### Added
 
+- *Language / Idioma* in the tray menu and at the bottom of the window: English or Español. The
+  menu, the window, and every dialog and notification after that switch at once, and the choice is
+  kept for the next start. Another language needs only its strings and one entry in
+  `gui/i18n.py`; any string it lacks is shown in English.
 - Extend screen (experimental): the TV as a second monitor, at 1080p, 720p or 4K (*What to cast* >
   *Extend screen*, `cast --extend`, `vdd status`, `vdd install`). It uses Parsec's free Virtual
   Display Driver, which MirrorBridge never bundles: after you agree, it downloads Parsec's
