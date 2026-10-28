@@ -60,7 +60,10 @@ SHAPE_REFUSED = frozenset({400, 405, 406, 415, 455, 501})
 SETUP_SECONDS = 30  # some TVs take 20 s to answer a SETUP
 RECORD_SECONDS = 15
 TEARDOWN_SECONDS = 3
-FEEDBACK_INTERVAL = 2.0
+try:  # experiment: MIRRORBRIDGE_FEEDBACK_S, to tell a hitch every 2 s apart from POST /feedback
+    FEEDBACK_INTERVAL = min(30.0, max(0.5, float(os.environ["MIRRORBRIDGE_FEEDBACK_S"])))
+except (KeyError, ValueError):
+    FEEDBACK_INTERVAL = 2.0
 FEEDBACK_SECONDS = 5
 DEFAULT_LEAD_MS = 100  # how long after capture the TV shows a frame (75 is enough on a cable)
 

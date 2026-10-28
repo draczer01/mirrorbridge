@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import os
 import threading
 from dataclasses import dataclass, field
 from typing import Optional
@@ -42,6 +43,21 @@ from ..config import Settings
 from ..session import State, StatusCallback
 from ..text import Text
 from . import negotiation, profiles
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
+def _env_slew_ns() -> Optional[int]:
+    """MIRRORBRIDGE_PTS_SLEW_US: experiment, how far frame times may move per frame (us)."""
+    try:
+        return max(0, int(float(os.environ["MIRRORBRIDGE_PTS_SLEW_US"]) * 1000))
+    except (KeyError, ValueError):
+        return None
 from .clock import NS, TIMING_PORTS, NtpResponder, PtsMapper, bind_udp, now_ns, to_ntp
 from .control import FEATURE_1080P, ControlChannel, ReceiverInfo, Target, open_event_channel
 from .datachannel import DataChannel
@@ -629,7 +645,12 @@ class MirrorSession:
         assert est is not None
         frames = self._frames
         lead_ns = est.plan.lead_ms * 1_000_000
-        mapper = PtsMapper()
+        mapper = PtsMapper(window_ns=round(_env_float("MIRRORBRIDGE_PTS_WINDOW_S", 2.0) * NS),
+                           slew_ns=_env_slew_ns())
+        _LOGGER.info("Experiment knobs: frame times from a %g s window, %s", mapper.window_ns / NS,
+                     f"moving at most {mapper.slew_ns / 1000:g} us a frame" if mapper.slew_ns is not None
+                     else "jumping to its smallest offset")
+        last_offset: Optional[int] = None
         trailer = self.profile.trailer
         params: Optional[tuple[bytes, bytes]] = None
         avcc = b""
@@ -675,6 +696,11 @@ class MirrorSession:
                 continue
             idr = is_idr(nals)
             taken_at = mapper.map(unit.pts_ms, unit.arrived_ns)
+            used = mapper._used  # pylint: disable=protected-access
+            if last_offset is not None and used is not None and abs(used - last_offset) > 5_000_000:
+                _LOGGER.info("Frame times stepped %+.1f ms (the capture's offset changed)",
+                             (used - last_offset) / 1e6)
+            last_offset = used
             why = self._drop_reason(idr, wait_for_idr or send_codec, taken - taken_at > lead_ns)
             if why:
                 if not wait_for_idr:

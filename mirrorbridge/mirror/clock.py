@@ -109,6 +109,9 @@ class NtpResponder(asyncio.DatagramProtocol):
         if self.transport is not None:
             self.transport.sendto(reply, addr)
         self.requests += 1
+        if self.last_request_ns is not None:  # experiment: when the TV syncs its clock
+            _LOGGER.debug("NTP request %d, %.0f ms after the last", self.requests,
+                          (received - self.last_request_ns) / 1e6)
         self.last_request_ns = received
         if self.first_request_ns is None:
             self.first_request_ns = received
@@ -174,10 +177,14 @@ class PtsMapper:
     session instead, so that it still shows.
     """
 
-    def __init__(self, window_ns: int = 2 * NS) -> None:
+    def __init__(self, window_ns: int = 2 * NS, slew_ns: Optional[int] = None) -> None:
         self.window_ns = window_ns
+        # Experiment: how far the offset in use may move per frame towards the window's smallest,
+        # instead of jumping to it when the smallest leaves the window (every window_ns or so).
+        self.slew_ns = slew_ns
         self._offsets: deque[tuple[int, int]] = deque()  # (arrival, offset), offsets increasing
         self._last: Optional[int] = None
+        self._used: Optional[int] = None  # the offset in use, with slew_ns
         self.lowest: Optional[int] = None  # the smallest offset of the session
 
     def behind(self, pts_ms: int, arrival_ns: int) -> int:
@@ -195,7 +202,12 @@ class PtsMapper:
         self._offsets.append((arrival_ns, offset))
         while self._offsets[0][0] < arrival_ns - self.window_ns:
             self._offsets.popleft()
-        mapped = pts_ms * 1_000_000 + self._offsets[0][1]
+        target = self._offsets[0][1]
+        if self.slew_ns is None or self._used is None:
+            self._used = target
+        else:
+            self._used += max(-self.slew_ns, min(self.slew_ns, target - self._used))
+        mapped = pts_ms * 1_000_000 + self._used
         if self._last is not None and mapped <= self._last:
             mapped = self._last + 1_000  # 1 us later than the frame before it
         self._last = mapped
