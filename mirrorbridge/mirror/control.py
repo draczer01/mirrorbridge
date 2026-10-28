@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 import plistlib
 import time
 from dataclasses import dataclass, field
@@ -54,7 +55,15 @@ INFO_SECONDS = 10
 # User-Agent of every request on the control connection and as the SETUP's sourceVersion, the
 # same in both (a receiver may go by either). It is the version senders on HomeKit-paired
 # sessions give.
-SOURCE_VERSION = "980.71.1"
+# Experiment: MIRRORBRIDGE_SENDER=iphone says MirrorBridge is what AirParrot says it is (an iPhone
+# 13 on iOS 16.5, AirPlay 690.7.1), to see whether a TV treats an Apple sender differently;
+# MIRRORBRIDGE_SOURCE_VERSION sets the version alone.
+SENDERS = {
+    "iphone": {"model": "iPhone14,3", "osBuildVersion": "20F66", "osName": "iPhone OS", "osVersion": "16.5",
+               "sourceVersion": "690.7.1"},
+}
+SENDER = SENDERS.get(os.environ.get("MIRRORBRIDGE_SENDER", "").strip().lower(), {})
+SOURCE_VERSION = os.environ.get("MIRRORBRIDGE_SOURCE_VERSION", "").strip() or SENDER.get("sourceVersion", "980.71.1")
 USER_AGENT = f"AirPlay/{SOURCE_VERSION}"
 
 # Pair-verify goes out as pyatv's HomeKit pairing sends it ("X-Apple-HKP: 3"): TVs of other

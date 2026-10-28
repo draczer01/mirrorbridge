@@ -45,7 +45,7 @@ from typing import Any, Callable, Optional
 
 from ..airplay_patch import format_steps
 from ..text import Text
-from .control import (CONTROL_READ, CONTROL_SALT, CONTROL_WRITE, SOURCE_VERSION, ControlChannel, Target,
+from .control import (CONTROL_READ, CONTROL_SALT, CONTROL_WRITE, SENDER, SOURCE_VERSION, ControlChannel, Target,
                       decode_plist, sender_id)
 from .errors import ChannelClosed, MirrorError, NoAnswer, answer_of, refused
 
@@ -92,8 +92,8 @@ def lead_from_env(lead_ms: int) -> int:
 PEER_LIST_CHANGED = "/peer-list-changed"  # SETPEERS's Content-Type (SETPEERSX is for feature bit 52)
 
 # Who is sending (and SOURCE_VERSION, in control.py, as in the User-Agent).
-SENDER_MODEL = "Windows"
-SENDER_OS_BUILD = "10.0"
+SENDER_MODEL = SENDER.get("model", "Windows")
+SENDER_OS_BUILD = SENDER.get("osBuildVersion", "10.0")
 
 # The silent screen-audio stream: ALAC, 352 samples a packet, 44.1 kHz 16-bit stereo.
 AUDIO_STREAM = 96
@@ -296,6 +296,7 @@ class Negotiator:
             "sourceVersion": SOURCE_VERSION,
             "timingProtocol": "PTP" if plan.timing == PTP else "NTP",
         }
+        fields.update({key: SENDER[key] for key in ("osName", "osVersion") if key in SENDER})  # experiment
         if plan.timing == PTP and self.ptp_clock_id is not None:
             # Our own grandmaster clock, as OwnTone describes its own (no ClockPorts, so no
             # port matching to override).

@@ -2,10 +2,12 @@
 cryptography, and FFmpeg's own output (tests/test_mirror_loopback.py has whole sessions)."""
 
 import asyncio
+import os
 import random
 import socket
 import struct
 import subprocess
+import sys
 
 import pytest
 from cryptography.hazmat.primitives import hashes
@@ -637,3 +639,22 @@ def test_an_experiment_adds_noise_to_the_test_pattern(monkeypatch):
     assert vf() == "format=nv12"
     monkeypatch.setenv("MIRRORBRIDGE_PATTERN_NOISE", "12")
     assert vf() == "noise=alls=12:allf=t,format=nv12"
+
+
+def test_an_experiment_says_the_sender_is_an_iphone_and_picks_the_h264_profile():
+    """MIRRORBRIDGE_SENDER=iphone and MIRRORBRIDGE_H264_PROFILE=main, read when MirrorBridge starts."""
+    code = ("from mirrorbridge import ffmpeg; from mirrorbridge.mirror import control, negotiation; "
+            "args = ffmpeg.mirror_encoder_args('h264_nvenc', 8000, 60); "
+            "print(negotiation.SENDER_MODEL, negotiation.SENDER_OS_BUILD, control.SENDER.get('osVersion'), "
+            "control.USER_AGENT, ffmpeg.MIRROR_PROFILE, args[args.index('-profile:v') + 1])")
+
+    def run(**knobs):
+        env = {key: value for key, value in os.environ.items() if not key.startswith("MIRRORBRIDGE_")}
+        return subprocess.run([sys.executable, "-c", code], env={**env, **knobs}, capture_output=True, text=True,
+                              check=True).stdout.split()
+
+    assert run() == ["Windows", "10.0", "None", "AirPlay/980.71.1", "high", "high"]
+    assert run(MIRRORBRIDGE_SENDER="iphone", MIRRORBRIDGE_H264_PROFILE="main") == [
+        "iPhone14,3", "20F66", "16.5", "AirPlay/690.7.1", "main", "main"]
+    assert run(MIRRORBRIDGE_SOURCE_VERSION="377.40.00", MIRRORBRIDGE_H264_PROFILE="nonsense")[3:] == [
+        "AirPlay/377.40.00", "high", "high"]

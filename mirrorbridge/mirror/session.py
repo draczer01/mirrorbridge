@@ -455,14 +455,17 @@ class MirrorSession:
                      "(MIRRORBRIDGE_LEAD_MS), /feedback every %g s (MIRRORBRIDGE_FEEDBACK_S), frames shown %s "
                      "(MIRRORBRIDGE_ON_ARRIVAL), time requests %s (MIRRORBRIDGE_NTP_STOP_S), heartbeat %s "
                      "(MIRRORBRIDGE_HEARTBEAT_IDLE_ONLY), audio stream %s (MIRRORBRIDGE_NO_AUDIO), %d fps asked, "
-                     "pattern noise %s (MIRRORBRIDGE_PATTERN_NOISE), %s timing (mirror --timing, MIRRORBRIDGE_TIMING)%s",
+                     "pattern noise %s (MIRRORBRIDGE_PATTERN_NOISE), sender %s with AirPlay %s (MIRRORBRIDGE_SENDER, "
+                     "MIRRORBRIDGE_SOURCE_VERSION), H.264 profile %s (MIRRORBRIDGE_H264_PROFILE), "
+                     "%s timing (mirror --timing, MIRRORBRIDGE_TIMING)%s",
                      ffmpeg.MIRROR_KEYFRAME_SECONDS, plan.lead_ms,
                      negotiation.FEEDBACK_INTERVAL, "as they arrive" if ON_ARRIVAL else "at their timestamps",
                      f"answered for {_env_float('MIRRORBRIDGE_NTP_STOP_S', 0):g} s only"
                      if "MIRRORBRIDGE_NTP_STOP_S" in os.environ else "always answered",
                      "only when idle" if HEARTBEAT_IDLE_ONLY else "every second",
                      "set up" if plan.audio else "left out", self.settings.framerate,
-                     os.environ.get("MIRRORBRIDGE_PATTERN_NOISE") or "off", plan.timing.upper(), self._ptp_knobs(plan))
+                     os.environ.get("MIRRORBRIDGE_PATTERN_NOISE") or "off", negotiation.SENDER_MODEL,
+                     negotiation.SOURCE_VERSION, ffmpeg.MIRROR_PROFILE, plan.timing.upper(), self._ptp_knobs(plan))
         if self.report.info is not None and "PTPInfo" in self.report.info.raw:
             _LOGGER.info("The TV's GET /info has PTPInfo: %r", self.report.info.raw["PTPInfo"])
         if plan.timing == PTP:
