@@ -55,6 +55,10 @@ def feature_bits(value: int) -> list[int]:
     return [bit for bit in range(64) if value >> bit & 1]
 
 
+def _has_video(features: int) -> bool:
+    return bool(features & (AirPlayFlags.SupportsAirPlayVideoV1 | AirPlayFlags.SupportsAirPlayVideoV2))
+
+
 @dataclass
 class Device:
     config: BaseConfig
@@ -92,16 +96,56 @@ class Device:
         except ValueError:
             return None
 
+    def _pyatv_features(self) -> int | None:
+        """The feature bits as pyatv reads them where it decides if play_url may run."""
+        svc = self.airplay
+        text = svc and svc.properties.get("features")
+        if not text:
+            return None
+        try:
+            return int(pyatv_parse_features(text))
+        except ValueError:
+            return None
+
     @property
     def can_cast_video(self) -> bool:
-        """True if the receiver advertises AirPlay video (needed for URL/HLS playback)."""
+        """True if the receiver advertises AirPlay video (needed for URL/HLS playback).
+
+        Other brands' receivers are judged by the bits they really advertise, and pyatv
+        is handed those bits before it connects (fix_features). Apple's receivers, and
+        those that do not say what they are, keep pyatv's own reading: it is the one
+        that decides whether pyatv lets play_url run at all.
+        """
         svc = self.airplay
         if svc is None or svc.pairing in (PairingRequirement.Unsupported, PairingRequirement.Disabled):
             return False
-        features = self.features
+        features = self.features if self.is_apple is False else self._pyatv_features()
         if features is None:
             return True  # let the device decide
-        return bool(features & (AirPlayFlags.SupportsAirPlayVideoV1 | AirPlayFlags.SupportsAirPlayVideoV2))
+        return _has_video(features)
+
+    def fix_features(self) -> None:
+        """Make pyatv read the AirPlay video bits that a receiver of another brand advertises.
+
+        pyatv joins "low,high" as text, so a receiver that does not zero-pad the low word
+        looks to it like one with other bits. Where that changes whether AirPlay video is
+        there, pyatv would refuse play_url ("not supported") after AirCast showed the TV
+        as ready, so the value is rewritten zero-padded, which pyatv reads correctly.
+        Apple's receivers are left alone.
+        """
+        svc = self.airplay
+        features = self.features
+        if svc is None or features is None or self.is_apple is not False:
+            return
+        theirs = self._pyatv_features()
+        if theirs is not None and _has_video(theirs) == _has_video(features):
+            return
+        text = f"0x{features & 0xFFFFFFFF:08X},0x{features >> 32:08X}"
+        _LOGGER.info("pyatv misreads the features of %s (%s); handing it %s", self.name,
+                     svc.properties.get("features") or svc.properties.get("ft"), text)
+        for key in ("features", "ft"):
+            if key == "features" or key in svc.properties:
+                svc.properties[key] = text
 
     @property
     def is_apple(self) -> bool | None:
@@ -157,9 +201,15 @@ class Device:
         return svc.pairing == PairingRequirement.Mandatory
 
     @property
+    def requires_password(self) -> bool:
+        """The receiver advertises an AirPlay password (TXT "pw", or flags bit 0x80)."""
+        svc = self.airplay
+        return bool(svc and svc.requires_password)
+
+    @property
     def needs_password(self) -> bool:
         svc = self.airplay
-        return bool(svc and svc.requires_password and not svc.password)
+        return bool(self.requires_password and not svc.password)
 
     @property
     def status_key(self) -> str:
@@ -222,6 +272,7 @@ class DeviceManager:
     async def pair(self, device: Device, pin_callback: PinCallback) -> None:
         """Run AirPlay pair-setup. The TV shows a 4-digit PIN which the user types in."""
         await self._ensure_loaded()
+        device.fix_features()
         handler = await pyatv.pair(device.config, Protocol.AirPlay, self.loop, storage=self.storage)
         try:
             await handler.begin()
@@ -265,6 +316,7 @@ class DeviceManager:
     async def connect(self, device: Device) -> AppleTV:
         await self._ensure_loaded()
         _LOGGER.info("Receiver %s (%s): %s", device.name, device.address, device.details())
+        device.fix_features()
         # pyatv only cleans up a half-made connection on errors, not on cancellation
         # (Stop pressed while connecting), so let it finish and close the result.
         task = asyncio.ensure_future(pyatv.connect(device.config, self.loop, storage=self.storage))
