@@ -71,6 +71,7 @@ class StageTimes:
         self._window_start = now_ns()
         self._last: Optional[int] = None  # when the last frame came, was sent or was dropped
         self._ntp_requests: Optional[int] = None
+        self._lag: list[float] = []  # ms, this window
 
     def _frame_seen(self) -> None:
         now = now_ns()
@@ -103,6 +104,9 @@ class StageTimes:
             self._window[stage].append(ms)
             self._all[stage].append(ms)
 
+    def loop_lag(self, ns: int) -> None:
+        self._lag.append(ns / 1e6)
+
     def drop(self, count: int = 1) -> None:
         if count > 0:
             self._frame_seen()
@@ -125,13 +129,18 @@ class StageTimes:
             if self._ntp_requests is not None:
                 timing = f"; the TV asked for the time {ntp_requests - self._ntp_requests} times"
             self._ntp_requests = ntp_requests
+        lag = ""
+        if self._lag:  # experiment: how late the session's loop runs a 10 ms sleep
+            lag = (f"; loop lag ms p50/p95/max {percentile(self._lag, 0.5):.1f}/{percentile(self._lag, 0.95):.1f}/"
+                   f"{max(self._lag):.1f}")
+            self._lag = []
         _LOGGER.info(
             "Mirroring: %.1f fps (of %d), %.1f Mbit/s; ms p50/p95: %s (after capture and encoding); lead %d ms; "
-            "up to %d KB waiting to go; keyframes %d (largest %d KB%s); dropped %d%s",
+            "up to %d KB waiting to go; keyframes %d (largest %d KB%s); dropped %d%s%s",
             delivered, self.fps, self._window_bytes * 8 / seconds / 1e6, ", ".join(parts) or "no frames",
             self.lead_ms, self._window_buffered // 1024, self.keyframes, self.largest_keyframe // 1024,
             f", {self.big_keyframes} over {BIG_KEYFRAME_FRAMES} frames' share of the bitrate" if self.big_keyframes
-            else "", self.dropped, timing,
+            else "", self.dropped, timing, lag,
         )
         if self.fps and seconds >= 1 and delivered < SLOW_FPS * self.fps:
             self.slow_windows += 1

@@ -485,11 +485,20 @@ class MirrorSession:
         if info.displays:
             self.report.info = info
 
+    async def _probe_loop_lag(self) -> None:
+        """Experiment: how late a 10 ms sleep wakes on the session's loop, which also answers the
+        TV's timing requests (so a late loop stamps them late)."""
+        while True:
+            asked = now_ns()
+            await asyncio.sleep(0.010)
+            self._stats.loop_lag(max(0, now_ns() - asked - 10_000_000))
+
     async def _supervise(self) -> str:
         assert self._data is not None and self._feedback is not None and self._responder is not None
         est = self.report.established
         assert est is not None
         pump = asyncio.ensure_future(self._pump())
+        lag_probe = asyncio.ensure_future(self._probe_loop_lag())
         waits = {
             "stop": asyncio.ensure_future(self._stop.wait()),
             "lost": asyncio.ensure_future(self._feedback.lost.wait()),
@@ -525,6 +534,7 @@ class MirrorSession:
                     self._stats.log_window(now, self._responder.requests)
         finally:
             pump.cancel()
+            lag_probe.cancel()
             for wait in waits.values():
                 wait.cancel()
             try:
