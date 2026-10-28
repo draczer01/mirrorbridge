@@ -19,10 +19,11 @@ from typing import Any, Callable, Coroutine, Optional
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import QApplication, QInputDialog, QLineEdit, QMessageBox, QWidget
 
-from .. import airplay_patch, ffmpeg, probe, vdisplay
+from .. import airplay_patch, ffmpeg, mirror, probe, vdisplay
 from ..config import Settings, app_data_dir
 from ..devices import Device, DeviceManager
 from ..session import CastSession, State
+from ..text import Text
 from . import i18n, winintegration
 from .extend import ExtendScreenSetup, error_text
 from .i18n import say, state_text, tr
@@ -114,7 +115,7 @@ class Controller(QObject):
     devices_changed = Signal()
     scanning_changed = Signal(bool)
     cast_state_changed = Signal(object, object)  # State, what the session said (a str or Text) or the error
-    activity_changed = Signal()  # started/stopped casting or file playback
+    activity_changed = Signal()  # started/stopped casting, mirroring or file playback
     encoders_detected = Signal(list)
     settings_changed = Signal()
     log_line = Signal(str)
@@ -135,8 +136,10 @@ class Controller(QObject):
         self._probed_at = 0.0
         self._ffmpeg_warned = False
         self.ffmpeg_path: Optional[str] = None
-        self.session: Optional[CastSession] = None
+        # A cast, or with Mirror screen a mirroring session: they start, show and stop alike.
+        self.session: Optional[CastSession | mirror.MirrorSession] = None
         self.session_future: Optional[concurrent.futures.Future] = None
+        self.mirroring = False  # the session is Mirror screen's
         self.file_future: Optional[concurrent.futures.Future] = None
         self.probe_future: Optional[concurrent.futures.Future] = None  # More options > Test this TV
         self.probe_step = ""
@@ -180,7 +183,7 @@ class Controller(QObject):
             return "active", tr("status_playing_file", device=self.casting_to)
         if self.session_future is not None:
             if self.cast_state == State.CASTING:
-                return "active", tr("status_casting", device=self.casting_to)
+                return "active", tr("status_mirroring" if self.mirroring else "status_casting", device=self.casting_to)
             return "busy", tr("status_busy", state=state_text(self.cast_state))
         return "idle", tr("status_idle")
 
@@ -457,7 +460,7 @@ class Controller(QObject):
     @property
     def virtual_device(self) -> str:
         """\\\\.\\DISPLAYn of the virtual screen the current cast added, if any."""
-        return self.session.virtual_device if self.session else ""
+        return self.session.virtual_device if isinstance(self.session, CastSession) else ""
 
     def choose_extend_screen(self, *_args) -> None:
         self.extend.choose()
@@ -497,11 +500,13 @@ class Controller(QObject):
         self.session_future = self.runner.submit(self.session.run(), finished, failed)
         self.activity_changed.emit()
 
-    def _on_cast_state(self, state: State, message: Any, device: Device) -> None:
+    def _on_cast_state(self, state: State, message: Any, device: Device, mirroring: bool = False) -> None:
         self.cast_state = state
         self.cast_message = message
         self.cast_state_changed.emit(state, message)
-        if state == State.CASTING:
+        if mirroring:
+            self._on_mirror_state(state, message, device)
+        elif state == State.CASTING:
             tip = ""
             if self.virtual_device and not self.settings.extend_tip_shown:
                 tip = tr("extend_tip")  # once: where the new screen is
@@ -509,6 +514,63 @@ class Controller(QObject):
             self.notify.emit(tr("cast_started", device=device.name), tip, False)
         elif state == State.STOPPED:
             self.notify.emit(tr("cast_stopped"), "", False)
+
+    # -- Mirror screen -----------------------------------------------------
+
+    @staticmethod
+    def can_mirror(device: Optional[Device]) -> bool:
+        """Mirror screen (experimental) needs the pairing MirrorBridge saved for the TV, whose
+        pair-verify keys the video, and a TV that does not need FairPlay (Apple TVs and Macs do)."""
+        return bool(device and device.is_paired and not mirror.Target.from_device(device).needs_fairplay)
+
+    @staticmethod
+    def mirror_tip(device: Optional[Device]) -> str:
+        """What Mirror screen does, or why it cannot start with `device`: its tooltip."""
+        if device is not None and mirror.Target.from_device(device).needs_fairplay:
+            return tr("mirror_apple_tv")
+        if device is not None and not device.is_paired:
+            return say(Text("mirror_pair_first", "Pair with this TV first: Device > Pair with PIN."))
+        return tr("mirror_hint")
+
+    def start_mirror(self, *_args) -> None:
+        """Mirror screen: what What to cast names (a display or a window), on the TV a fraction
+        of a second behind, with the Quality settings. It starts, shows its states and stops as a
+        cast does (the session is mirror.MirrorSession), and it is the one session at a time too."""
+        device = self.selected_device
+        if self.is_active or device is None or not self.can_mirror(device):
+            return
+
+        def on_status(state: State, message: str) -> None:
+            if state == State.FAILED and session.error is not None:
+                message = session.error  # the window explains it in the user's language
+            self.bridge.call(lambda: self._on_cast_state(state, message, device, mirroring=True))
+
+        self.casting_to = device.name
+        self.mirroring = True
+        self.cast_state, self.cast_message = State.STARTING, ""
+        self.session = session = mirror.MirrorSession(mirror.Target.from_device(device), self.settings, on_status)
+
+        def finished(_=None):
+            self.session_future = None
+            self.session = None
+            self.mirroring = False
+            self.casting_to = ""
+            self.activity_changed.emit()
+
+        def failed(exc):
+            finished()
+            if not isinstance(exc, concurrent.futures.CancelledError):
+                self.notify.emit(tr("mirror_failed"), error_text(exc), True)
+
+        self.session_future = self.runner.submit(session.run(), finished, failed)
+        self.activity_changed.emit()
+
+    def _on_mirror_state(self, state: State, message: Any, device: Device) -> None:
+        if state == State.CASTING:
+            self.notify.emit(tr("mirror_started", device=device.name), "", False)
+        elif state == State.STOPPED:
+            # The TV ending it is worth saying; "Stopped", after Stop, is not.
+            self.notify.emit(tr("mirror_stopped"), say(message) if isinstance(message, Text) else "", False)
 
     def stop_cast(self, *_args) -> None:
         if self.session:

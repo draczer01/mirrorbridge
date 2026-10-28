@@ -144,6 +144,9 @@ class MainWindow(QMainWindow):
         self.cast_btn.setObjectName("cast")
         self.cast_btn.clicked.connect(self._cast_clicked)
         right.addWidget(self.cast_btn)
+        self.mirror_btn = QPushButton()
+        self.mirror_btn.clicked.connect(lambda: self.c.start_mirror())
+        right.addWidget(self.mirror_btn)
         self.file_btn = QPushButton()
         self.file_btn.clicked.connect(self._play_file)
         right.addWidget(self.file_btn)
@@ -203,7 +206,8 @@ class MainWindow(QMainWindow):
         for button, key in ((self.refresh_btn, "refresh"), (self.add_ip_btn, "add_ip"), (self.pair_btn, "pair"),
                             (self.forget_btn, "forget"), (self.rb_display, "entire_display"),
                             (self.rb_window, "single_window"), (self.rb_extend, "extend_screen"),
-                            (self.audio_cb, "audio"), (self.cursor_cb, "cursor"), (self.file_btn, "play_file")):
+                            (self.audio_cb, "audio"), (self.cursor_cb, "cursor"), (self.file_btn, "play_file"),
+                            (self.mirror_btn, "mirror_screen")):
             button.setText(tr(key))
         self.source_box.setTitle(tr("source_menu"))
         self.window_combo.setToolTip(tr("window_moved_hint"))
@@ -400,8 +404,10 @@ class MainWindow(QMainWindow):
         self.forget_btn.setEnabled(bool(dev and dev.is_paired) and not active)
         self.device_list.setEnabled(not active)
         self.cast_btn.setEnabled(usable or active)
+        self.mirror_btn.setEnabled(self.c.can_mirror(dev) and not active)
+        self.mirror_btn.setToolTip(self.c.mirror_tip(dev))
         self.file_btn.setEnabled(usable and not active)
-        self.cast_btn.setText(tr("stop") if active else tr("start"))
+        self.cast_btn.setText(tr("stop_mirror") if self.c.mirroring else tr("stop") if active else tr("start"))
         self.cast_btn.setProperty("casting", "true" if active else "false")
         self.cast_btn.style().unpolish(self.cast_btn)
         self.cast_btn.style().polish(self.cast_btn)

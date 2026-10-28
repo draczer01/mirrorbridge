@@ -23,6 +23,29 @@ _STRINGS: dict[str, dict[str, str]] = {
     "start_to": {"en": "Start casting to {device}", "es": "Transmitir a {device}"},
     "start_no_device": {"en": "Start casting (choose a device)", "es": "Transmitir (elige un dispositivo)"},
     "stop": {"en": "Stop casting", "es": "Detener transmisión"},
+    "mirror_screen": {
+        "en": "Mirror screen (low latency, experimental)",
+        "es": "Duplicar pantalla (baja latencia, experimental)",
+    },
+    "stop_mirror": {"en": "Stop mirroring", "es": "Detener la duplicación"},
+    "status_mirroring": {"en": "Mirroring to {device}", "es": "Duplicando la pantalla en {device}"},
+    "mirror_hint": {
+        "en": "Your screen on the TV a fraction of a second behind, instead of a cast's few seconds. For paired "
+              "AirPlay 2 TVs of other brands (TCL, Roku, Samsung, LG…); no sound yet.",
+        "es": "Tu pantalla en la TV con una fracción de segundo de retraso, en lugar de los segundos de una "
+              "transmisión. Para TV AirPlay 2 de otras marcas ya emparejadas (TCL, Roku, Samsung, LG…); todavía "
+              "sin sonido.",
+    },
+    "mirror_apple_tv": {
+        "en": "Screen mirroring to Apple TVs and Macs is coming in a later version. For now, cast to them with "
+              "Start casting.",
+        "es": "La duplicación de pantalla en Apple TV y Mac llegará en una versión futura. Por ahora, transmite a "
+              "ellos con Transmitir.",
+    },
+    "mirror_pair_first": {
+        "en": "Pair with this TV first: {menu_pair}.",
+        "es": "Primero empareja esta TV: {menu_pair}.",
+    },
     "device_menu": {"en": "Device", "es": "Dispositivo"},
     "searching": {"en": "Searching…", "es": "Buscando…"},
     "no_devices": {"en": "No devices found", "es": "No se encontraron dispositivos"},
@@ -86,6 +109,9 @@ _STRINGS: dict[str, dict[str, str]] = {
     "cast_started": {"en": "Casting to {device}", "es": "Transmitiendo a {device}"},
     "cast_stopped": {"en": "Casting stopped", "es": "Transmisión detenida"},
     "cast_failed": {"en": "Casting failed", "es": "La transmisión falló"},
+    "mirror_started": {"en": "Mirroring to {device}", "es": "Duplicando la pantalla en {device}"},
+    "mirror_stopped": {"en": "Screen mirroring stopped", "es": "Duplicación de pantalla detenida"},
+    "mirror_failed": {"en": "Screen mirroring failed", "es": "La duplicación de pantalla falló"},
     "pair_title": {"en": "Pair with {device}", "es": "Emparejar con {device}"},
     "pair_prompt": {
         "en": "Enter the 4-digit PIN shown on your TV:",

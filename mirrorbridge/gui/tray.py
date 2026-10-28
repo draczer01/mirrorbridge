@@ -39,6 +39,7 @@ class TrayMenu(QObject):
         self.icons = {state: app_icon(state) for state in ("idle", "active", "busy")}
         self.tray = QSystemTrayIcon(self.icons["idle"])
         self.menu = QMenu()
+        self.menu.setToolTipsVisible(True)  # Mirror screen says why it is off, when it is
         self._submenus: list[QMenu] = []
         self.menu.aboutToShow.connect(self._rebuild)
         self.tray.setContextMenu(self.menu)
@@ -125,11 +126,14 @@ class TrayMenu(QObject):
 
         device = c.selected_device
         if c.is_active:
-            self._action(menu, tr("stop"), c.stop_cast)
+            self._action(menu, tr("stop_mirror") if c.mirroring else tr("stop"), c.stop_cast)
         elif device and device.can_cast_video:
             self._action(menu, tr("start_to", device=device.name), c.start_cast)
         else:
             self._action(menu, tr("start_no_device"), enabled=False)
+        mirror = self._action(menu, tr("mirror_screen"), c.start_mirror,
+                              enabled=c.can_mirror(device) and not c.is_active)
+        mirror.setToolTip(c.mirror_tip(device))
         menu.addSeparator()
 
         self._device_menu(self._submenu(menu, tr("device_menu") + (f": {device.name}" if device else "")))

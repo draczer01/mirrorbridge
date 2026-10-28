@@ -43,7 +43,7 @@ def quick(monkeypatch):
 def _device(**changes):
     values = dict(name="Sala familiar", address="127.0.0.1", identifier="TCL", features=TCL_FEATURES, is_apple=False,
                   requires_password=False, needs_password=False, needs_pairing=False, can_cast_video=True,
-                  status="paired", status_key="paired", is_paired=True,
+                  status="paired", status_key="paired", is_paired=True, airplay=None,
                   details=lambda: "features=0x7F8AD0,0x38BCF46")
     return SimpleNamespace(**{**values, **changes})
 
