@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QStyle, QToolButton, QVBoxLayout, QWidget,
 )
 
-from .. import APP_NAME, ffmpeg, mirror, vdisplay
+from .. import APP_NAME, ffmpeg, vdisplay
 from ..devices import Device
 from ..session import State
 from .controller import Controller
@@ -438,28 +438,12 @@ class MainWindow(QMainWindow):
         self._fill_devices()
         self._update_buttons()
 
-    @staticmethod
-    def _apple(device: Device) -> bool:
-        return mirror.Target.from_device(device).needs_fairplay
-
-    def device_line(self, device: Device) -> str:
-        """What choosing `device` means, in a few plain words, under its name."""
-        if not device.can_cast_video:
-            return tr("ui_dev_speaker")
-        if device.status_key == "restricted":
-            return tr("ui_dev_restricted")
-        if self.c.can_mirror(device):
-            return tr("ui_dev_ready") if device.is_paired else tr("ui_dev_first_code")
-        if self._apple(device):
-            return tr("ui_dev_apple")
-        return tr("ui_dev_cast_only")
-
     def _fill_devices(self) -> None:
         with self._filling():
             self.device_list.clear()
             selected = self.c.selected_device
             for dev in self.c.devices:
-                item = QListWidgetItem(f"{dev.name}\n{self.device_line(dev)}")
+                item = QListWidgetItem(f"{dev.name}\n{self.c.device_line(dev)}")
                 item.setToolTip(f"{dev.model} - {dev.address}")
                 icon = QStyle.SP_ComputerIcon if dev.can_cast_video else QStyle.SP_MediaVolume
                 item.setIcon(self.style().standardIcon(icon))
@@ -551,7 +535,7 @@ class MainWindow(QMainWindow):
             return tr("ui_dev_speaker")
         if c.primary_action(dev) == "mirror":
             return tr("ui_hint_mirror") if dev.is_paired else tr("ui_hint_mirror_first") + " " + tr("ui_hint_mirror")
-        hint = tr("ui_hint_apple") if self._apple(dev) else tr("ui_hint_cast")
+        hint = tr("ui_hint_apple") if self.c.is_apple(dev) else tr("ui_hint_cast")
         if dev.needs_pairing or dev.needs_password:
             hint = tr("ui_hint_cast_first") + " " + hint
         return hint

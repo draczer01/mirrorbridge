@@ -555,6 +555,24 @@ class Controller(QObject):
             return ""
         return "mirror" if self.can_mirror(device) else "cast"
 
+    @staticmethod
+    def is_apple(device: Device) -> bool:
+        """An Apple TV or a Mac: Mirror screen needs FairPlay there, so it is cast to."""
+        return mirror.Target.from_device(device).needs_fairplay
+
+    @classmethod
+    def device_line(cls, device: Device) -> str:
+        """What choosing `device` means, in a few plain words: the window's line under its name."""
+        if not device.can_cast_video:
+            return tr("ui_dev_speaker")
+        if device.status_key == "restricted":
+            return tr("ui_dev_restricted")
+        if cls.can_mirror(device):
+            return tr("ui_dev_ready") if device.is_paired else tr("ui_dev_first_code")
+        if cls.is_apple(device):
+            return tr("ui_dev_apple")
+        return tr("ui_dev_cast_only")
+
     def start_primary(self, *_args) -> None:
         """The window's big button: Mirror screen when the TV takes it, otherwise a cast."""
         action = self.primary_action()
