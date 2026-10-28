@@ -72,6 +72,11 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   mirroring: the difference between the two clocks is the whole delay from screen to TV, which
   the log cannot see. The last "Mirroring:" line of the log (frame rate, age of the frames,
   lead) shows below the clock. Esc or a click closes every window.
+- Experimental, for testing: `mirror --timing ptp` (or `MIRRORBRIDGE_TIMING=ptp`) makes
+  MirrorBridge the TV's PTP clock (IEEE 1588, UDP 319 and 320) instead of answering its NTP
+  requests. The session waits for the TV to follow that clock and goes on with NTP, on a fresh
+  connection, when it does not; the log says which, with what the TV sent. Without it, NTP timing
+  is exactly as before, and a session with PTP timing is never saved in `mirroring.json`.
 
 ### Changed
 

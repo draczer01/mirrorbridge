@@ -26,6 +26,14 @@ added before the TV is asked, captured as any display is and fitted into the TV'
 kept for the whole session, through the retry above and FFmpeg's fallbacks, so the windows on
 it stay there. It goes when the session ends, however it ends; if it goes away first (sleep),
 the session ends with VddError("lost"), as a cast does.
+
+PTP timing is an experiment (mirror --timing ptp, MIRRORBRIDGE_TIMING=ptp; ptp.py), for this run
+only: never saved. Our PTP clock starts on UDP 319 and 320 before SETUP (NTP if they cannot be
+had), the TV is added as its peer and named in SETPEERS after the SETUPs, and the video
+connection opens only once the TV follows our clock (its first Delay_Req), within
+MIRRORBRIDGE_PTP_LOCK_S, so that the codec packet and the first frame come after it. If SETPEERS
+is refused or the TV does not follow, the session is set up again over NTP (unless
+MIRRORBRIDGE_PTP_NO_FALLBACK=1). The NTP responder stays bound either way.
 """
 
 from __future__ import annotations
@@ -34,6 +42,7 @@ import asyncio
 import dataclasses
 import logging
 import os
+import sys
 import threading
 from dataclasses import dataclass, field
 from typing import Optional
@@ -42,7 +51,7 @@ from .. import extended, ffmpeg, vdisplay
 from ..config import Settings
 from ..session import State, StatusCallback
 from ..text import Text
-from . import negotiation, profiles
+from . import negotiation, profiles, ptp
 
 
 def _env_float(name: str, default: float) -> float:
@@ -50,6 +59,15 @@ def _env_float(name: str, default: float) -> float:
         return float(os.environ[name])
     except (KeyError, ValueError):
         return default
+
+
+def _env_switch_interval() -> Optional[float]:
+    """MIRRORBRIDGE_SWITCH_INTERVAL_MS: experiment, Python's thread switch interval for the
+    session (sys.setswitchinterval, 5 ms by default), so that PTP's threads wait less for the GIL."""
+    try:
+        return min(100.0, max(0.1, float(os.environ["MIRRORBRIDGE_SWITCH_INTERVAL_MS"]))) / 1000
+    except (KeyError, ValueError):
+        return None
 
 
 def _env_slew_ns() -> Optional[int]:
@@ -64,7 +82,7 @@ from .datachannel import HEARTBEAT_IDLE_ONLY, DataChannel
 from .errors import MirrorError, answer_of, data_closed, data_refused, needs_fairplay, no_timing, refused
 from .flv import CONFIG, FRAME
 from .h264 import TRAILERS, avcc_record, frame_nals, is_idr, join_avcc, parse_avcc, parse_sps, split_avcc
-from .negotiation import NTP, Established, Feedback, Negotiator
+from .negotiation import NTP, PTP, Established, Feedback, Negotiator
 from .packets import ON_ARRIVAL, VideoCipher, codec_packet, video_key
 from .source import DESKTOP, TEST_PATTERN, FFmpegSource, FrameQueue, Unit, build_command, ended_text
 from .stats import LOG_SECONDS, StageTimes
@@ -142,6 +160,7 @@ class SessionReport:
     data_closed_after: Optional[int] = None  # frames sent when the TV closed the video connection
     timing_port: int = 0  # our NTP responder's UDP port
     ntp_requests: int = 0
+    ptp: str = ""  # what our PTP clock did, when it ran (ptp.PtpNode.totals())
     feedback: dict = field(default_factory=dict)
     latency: dict = field(default_factory=dict)
     first_frame_ms: Optional[float] = None  # from starting FFmpeg to the first frame sent
@@ -165,6 +184,7 @@ class MirrorSession:
         seconds: Optional[float] = None,
         remember: bool = True,
         max_canvas: tuple[int, int] = MAX_CANVAS,
+        timing: Optional[str] = None,
     ) -> None:
         self.target = target
         self.settings = settings
@@ -176,6 +196,7 @@ class MirrorSession:
         self.seconds = seconds
         self.remember = remember
         self.max_canvas = max_canvas
+        self.timing = timing  # NTP or PTP for this run only (mirror --timing); None: MIRRORBRIDGE_TIMING, else saved
         self.state = State.IDLE
         self.report = SessionReport(trailer=self.profile.trailer)
         self.error: Optional[Exception] = None
@@ -185,6 +206,9 @@ class MirrorSession:
         self._starting = False
         self._negotiator: Optional[Negotiator] = None
         self._responder: Optional[NtpResponder] = None
+        self._ptp: Optional[ptp.PtpNode] = None  # our PTP clock, while a PTP session has it
+        self._ptp_peer = ""  # the TV's address on it
+        self._timeline = 0  # [40:48] of each frame
         self._transports: list[asyncio.BaseTransport] = []
         self._events: Optional[asyncio.Task] = None  # opening the event channel, then its transport
         self._data: Optional[DataChannel] = None
@@ -225,6 +249,9 @@ class MirrorSession:
     async def run(self) -> None:
         """Mirror until stop(), the time limit, the TV ending it, or an error (raised)."""
         self._task = asyncio.current_task()
+        switch, before = _env_switch_interval(), sys.getswitchinterval()
+        if switch is not None:
+            sys.setswitchinterval(switch)
         try:
             if self._stop.is_set():
                 self._set(State.STOPPED, "Cancelled")
@@ -255,6 +282,8 @@ class MirrorSession:
             try:
                 await asyncio.shield(self._cleanup())
             finally:
+                if switch is not None:
+                    sys.setswitchinterval(before)
                 self.finished.set()
 
     async def stop(self) -> None:
@@ -421,21 +450,35 @@ class MirrorSession:
         plan = self.profile.plan()
         plan.lead_ms = negotiation.lead_from_env(plan.lead_ms)
         plan.audio = negotiation.audio_from_env(plan.audio)
+        plan.timing = self.timing or negotiation.timing_from_env(plan.timing)
         _LOGGER.info("Experiment knobs: keyframe every %g s (MIRRORBRIDGE_KEYFRAME_SECONDS), lead %d ms "
                      "(MIRRORBRIDGE_LEAD_MS), /feedback every %g s (MIRRORBRIDGE_FEEDBACK_S), frames shown %s "
                      "(MIRRORBRIDGE_ON_ARRIVAL), time requests %s (MIRRORBRIDGE_NTP_STOP_S), heartbeat %s "
                      "(MIRRORBRIDGE_HEARTBEAT_IDLE_ONLY), audio stream %s (MIRRORBRIDGE_NO_AUDIO), %d fps asked, "
-                     "pattern noise %s (MIRRORBRIDGE_PATTERN_NOISE)",
+                     "pattern noise %s (MIRRORBRIDGE_PATTERN_NOISE), %s timing (mirror --timing, MIRRORBRIDGE_TIMING)%s",
                      ffmpeg.MIRROR_KEYFRAME_SECONDS, plan.lead_ms,
                      negotiation.FEEDBACK_INTERVAL, "as they arrive" if ON_ARRIVAL else "at their timestamps",
                      f"answered for {_env_float('MIRRORBRIDGE_NTP_STOP_S', 0):g} s only"
                      if "MIRRORBRIDGE_NTP_STOP_S" in os.environ else "always answered",
                      "only when idle" if HEARTBEAT_IDLE_ONLY else "every second",
                      "set up" if plan.audio else "left out", self.settings.framerate,
-                     os.environ.get("MIRRORBRIDGE_PATTERN_NOISE") or "off")
+                     os.environ.get("MIRRORBRIDGE_PATTERN_NOISE") or "off", plan.timing.upper(), self._ptp_knobs(plan))
+        if self.report.info is not None and "PTPInfo" in self.report.info.raw:
+            _LOGGER.info("The TV's GET /info has PTPInfo: %r", self.report.info.raw["PTPInfo"])
+        if plan.timing == PTP:
+            plan.timing = self._start_ptp(channel.local_ip)
+        negotiator.ptp_clock_id = int(self._ptp.identity) if self._ptp is not None else None
         _LOGGER.info("Setting up mirroring to %s (%s): %s", self.target.name,
                      "saved settings" if self.saved else "first time", plan.describe())
         est = self.report.established = await negotiator.establish(plan)
+        if est.plan.timing == PTP:
+            est = self.report.established = await self._follow_us(negotiator, est)
+        if est.plan.timing != PTP:
+            await self._stop_ptp()  # the TV gave a ClockID of its own, or did not follow ours
+        self._timeline = est.timeline_id if est.plan.timing == PTP else 0
+        if self._timeline and os.environ.get("MIRRORBRIDGE_PTP_TIMELINE") == "0":
+            _LOGGER.info("Frames go on timeline 0, not our PTP clock's (MIRRORBRIDGE_PTP_TIMELINE=0)")
+            self._timeline = 0
         for note in est.fallbacks:
             _LOGGER.info("Fallback: %s", note)
         channel = negotiator.channel
@@ -460,6 +503,73 @@ class MirrorSession:
         self._record_ns = now_ns()
         self._feedback = Feedback(channel)
         self._feedback.start()
+
+    @staticmethod
+    def _ptp_knobs(plan: negotiation.Plan) -> str:
+        if plan.timing != PTP:
+            return ""
+        return (f": the TV must follow our clock within {ptp.lock_seconds_from_env():g} s (MIRRORBRIDGE_PTP_LOCK_S) "
+                f"{'or the session is kept anyway' if os.environ.get('MIRRORBRIDGE_PTP_NO_FALLBACK') == '1' else 'or NTP'}"
+                f" (MIRRORBRIDGE_PTP_NO_FALLBACK), Announce every {ptp.announce_ms_from_env()} ms "
+                f"(MIRRORBRIDGE_PTP_ANNOUNCE_MS), Signaling {ptp.signaling_from_env()} (MIRRORBRIDGE_PTP_SIGNALING), "
+                f"frames on timeline {'0' if os.environ.get('MIRRORBRIDGE_PTP_TIMELINE') == '0' else 'our ClockID'} "
+                f"(MIRRORBRIDGE_PTP_TIMELINE), thread switch interval {sys.getswitchinterval() * 1000:g} ms "
+                f"(MIRRORBRIDGE_SWITCH_INTERVAL_MS)")
+
+    def _start_ptp(self, local_ip: str) -> str:
+        """Our PTP clock on UDP 319 and 320, for a PTP session: PTP, or NTP if they cannot be had."""
+        try:
+            self._ptp = ptp.PtpNode.acquire(local_ip)
+        except ptp.PtpUnavailable as ex:
+            _LOGGER.warning("PTP timing not possible: %s: NTP timing", ex.explain())
+            self.report.steps["ptp"] = ex.kind
+            return NTP
+        return PTP
+
+    async def _follow_us(self, negotiator: Negotiator, est: Established) -> Established:
+        """The TV took a PTP session: send it our clock, name the two of us in SETPEERS, and wait
+        for it to follow; otherwise the session again, over NTP."""
+        node, channel = self._ptp, negotiator.channel
+        assert node is not None and channel is not None
+        tv_ip = channel.remote_ip
+        if est.ptp_addresses and tv_ip not in est.ptp_addresses:
+            _LOGGER.info("PTP: the TV names %s, not %s, in its timingPeerInfo; sending to %s", est.ptp_addresses,
+                         tv_ip, tv_ip)
+        node.add_peer(tv_ip)
+        self._ptp_peer = tv_ip
+        answer = await negotiator.set_peers(est, [tv_ip, channel.local_ip])
+        if answer != 200:
+            why = f"SETPEERS answered {answer}"
+        else:
+            why = await node.wait_ready(tv_ip, ptp.lock_seconds_from_env())
+        if not why:
+            return est
+        if os.environ.get("MIRRORBRIDGE_PTP_NO_FALLBACK") == "1":
+            _LOGGER.warning("PTP: %s. Keeping PTP timing anyway (MIRRORBRIDGE_PTP_NO_FALLBACK=1): the TV may show "
+                            "nothing, or a picture that freezes", why)
+            return est
+        await self._stop_ptp()
+        self._close_events()  # the PTP session's; the NTP session names its own
+        return await negotiator.ptp_fallback(est, why)
+
+    async def _stop_ptp(self) -> None:
+        """The TV off our PTP clock, and our use of it ended (the last one stops it)."""
+        node, self._ptp = self._ptp, None
+        if node is None:
+            return
+        self.report.ptp = node.totals()
+        if self._ptp_peer:
+            node.remove_peer(self._ptp_peer)
+            self._ptp_peer = ""
+        await asyncio.get_running_loop().run_in_executor(None, node.release)
+
+    def _close_events(self) -> None:
+        events, self._events = self._events, None
+        if events is not None:
+            if not events.done():
+                events.cancel()
+            elif not events.cancelled() and events.exception() is None and events.result() is not None:
+                events.result().close()
 
     def _on_setup_reply(self, reply: dict) -> None:
         """As soon as a SETUP answer names them: probe the TV's timing port, open its event channel."""
@@ -542,7 +652,7 @@ class MirrorSession:
                     self._check_timing(now)
                 self._check_frames(now)
                 if self._stats.due(now):
-                    self._stats.log_window(now, self._responder.requests)
+                    self._stats.log_window(now, self._responder.requests, self._ptp.summary() if self._ptp else "")
         finally:
             pump.cancel()
             lag_probe.cancel()
@@ -744,7 +854,7 @@ class MirrorSession:
                 self.report.codec_packets += 1
                 send_codec = False
             payload = join_avcc(nals)
-            packets.append(self._cipher.video_packet(payload, timestamp, idr))
+            packets.append(self._cipher.video_packet(payload, timestamp, idr, timeline=self._timeline))
             packed = now_ns()
             data = b"".join(packets)
             try:
@@ -777,6 +887,12 @@ class MirrorSession:
     async def _release(self) -> None:
         """Stop what the session started and tear it down on the TV. Each part is taken before
         it is stopped, so that this can run again (a retry, then the end) without doing twice."""
+        try:
+            await self._release_session()
+        finally:
+            await self._stop_ptp()  # however the rest went: no thread or port left behind
+
+    async def _release_session(self) -> None:
         loop = asyncio.get_running_loop()
         self._stopping = True
         feedback, self._feedback = self._feedback, None
@@ -796,18 +912,13 @@ class MirrorSession:
         data, self._data = self._data, None
         if data is not None:
             await data.close()
-        events, self._events = self._events, None
-        if events is not None:
-            if not events.done():
-                events.cancel()
-            elif not events.cancelled() and events.exception() is None and events.result() is not None:
-                events.result().close()
+        self._close_events()
         if negotiator is not None:
             negotiator.close()
         responder, self._responder = self._responder, None
         if responder is not None:
             self.report.ntp_requests = responder.requests
-            self._stats.log_last(responder.requests)
+            self._stats.log_last(responder.requests, self._ptp.summary() if self._ptp else "")
         for transport in self._transports:
             transport.close()
         self._transports.clear()
@@ -832,12 +943,14 @@ class MirrorSession:
                 self._xscreen = None
                 self.virtual_device = ""
         _LOGGER.info("Mirroring ended: %d frames sent, %d dropped; the TV asked for the time %d times; "
-                     "/feedback answers %s; steps %s", self._stats.frames, self._stats.dropped,
-                     self.report.ntp_requests, self.report.feedback or "none", self.report.steps)
+                     "/feedback answers %s; steps %s%s", self._stats.frames, self._stats.dropped,
+                     self.report.ntp_requests, self.report.feedback or "none", self.report.steps,
+                     f"; PTP: {self.report.ptp}" if self.report.ptp else "")
         est = self.report.established
         # Remembered only once the TV has taken frames and the time: what was asked for works.
+        # Not a PTP session (an experiment), nor a profile with PTP in it.
         if (self.remember and est is not None and self.error is None and self._stats.frames
-                and self.report.ntp_requests and self.target.identifier):
+                and self.report.ntp_requests and self.target.identifier and est.plan.timing == NTP):
             profile = profiles.MirrorProfile.of(est.plan, self.profile.trailer)
             profile.lead_ms = self.profile.lead_ms  # an experiment's MIRRORBRIDGE_LEAD_MS is not kept
             if negotiation.audio_from_env(True) is False:  # nor a plan without audio (MIRRORBRIDGE_NO_AUDIO)

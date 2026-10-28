@@ -116,9 +116,9 @@ class StageTimes:
     def due(self, now: Optional[int] = None) -> bool:
         return (now or now_ns()) - self._window_start >= self.interval_ns
 
-    def log_window(self, now: Optional[int] = None, ntp_requests: Optional[int] = None) -> None:
+    def log_window(self, now: Optional[int] = None, ntp_requests: Optional[int] = None, ptp: str = "") -> None:
         """Log the frames since the last time, and start a new window. `ntp_requests` is how
-        many times the TV has asked for the time so far."""
+        many times the TV has asked for the time so far; `ptp`, what PTP timing did (ptp.py)."""
         now = now or now_ns()
         seconds = max(1e-9, (now - self._window_start) / NS)
         parts = [f"{stage} {percentile(values, 0.5):.1f}/{percentile(values, 0.95):.1f}"
@@ -136,11 +136,11 @@ class StageTimes:
             self._lag = []
         _LOGGER.info(
             "Mirroring: %.1f fps (of %d), %.1f Mbit/s; ms p50/p95: %s (after capture and encoding); lead %d ms; "
-            "up to %d KB waiting to go; keyframes %d (largest %d KB%s); dropped %d%s%s",
+            "up to %d KB waiting to go; keyframes %d (largest %d KB%s); dropped %d%s%s%s",
             delivered, self.fps, self._window_bytes * 8 / seconds / 1e6, ", ".join(parts) or "no frames",
             self.lead_ms, self._window_buffered // 1024, self.keyframes, self.largest_keyframe // 1024,
             f", {self.big_keyframes} over {BIG_KEYFRAME_FRAMES} frames' share of the bitrate" if self.big_keyframes
-            else "", self.dropped, timing, lag,
+            else "", self.dropped, timing, lag, f"; {ptp}" if ptp else "",
         )
         if self.fps and seconds >= 1 and delivered < SLOW_FPS * self.fps:
             self.slow_windows += 1
@@ -158,11 +158,11 @@ class StageTimes:
         self._window_buffered = 0
         self._window_start = now
 
-    def log_last(self, ntp_requests: Optional[int] = None) -> None:
+    def log_last(self, ntp_requests: Optional[int] = None, ptp: str = "") -> None:
         """Log the frames since the last window, which ends with the last frame: the time the
         session took to stop after it is not FFmpeg's."""
         if self._last is not None and (self._window_frames or self._window_dropped or self._window_arrived):
-            self.log_window(max(self._last, self._window_start + 1), ntp_requests)
+            self.log_window(max(self._last, self._window_start + 1), ntp_requests, ptp)
 
     def summary(self) -> dict:
         """p50/p95 (ms) of each stage over the session, and the counts."""

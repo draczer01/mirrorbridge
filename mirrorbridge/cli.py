@@ -264,7 +264,8 @@ async def cmd_mirror(args) -> int:
         print(f"[{state.value}] {message}" if message else f"[{state.value}]")
 
     source = mirror.TEST_PATTERN if args.test_pattern else mirror.DESKTOP
-    session = mirror.MirrorSession(target, settings, status, source=source, seconds=args.seconds)
+    session = mirror.MirrorSession(target, settings, status, source=source, seconds=args.seconds,
+                                   timing=args.timing)
     print("Press Ctrl+C to stop mirroring.")
     try:
         await session.run()
@@ -448,6 +449,10 @@ def build_parser() -> argparse.ArgumentParser:
     mirroring.add_argument("--seconds", type=float, help="stop after this many seconds (--probe: 10)")
     mirroring.add_argument("--fps", dest="framerate", type=int,
                            help="frame rate for this run only (default: the app's choice)")
+    mirroring.add_argument("--timing", choices=["ntp", "ptp"],
+                           help="how the TV gets the time, for this run only (default: MIRRORBRIDGE_TIMING, else "
+                                "NTP). ptp is an experiment: MirrorBridge as the TV's PTP clock, which needs inbound "
+                                "UDP 319-320; NTP if the TV does not follow it")
 
     vdd = sub.add_parser("vdd", help="the virtual display driver that --extend uses")
     vdd_sub = vdd.add_subparsers(dest="vdd_command", required=True, metavar="{status,install}")
