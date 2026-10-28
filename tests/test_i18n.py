@@ -167,6 +167,7 @@ def _same_in_every_language() -> set[str]:
     same = {i18n.language_menu_title(), *i18n.LANGUAGES.values()}
     same |= {f"{f} fps" for f in tray.FRAMERATES} | {f"{b} Mbps" for b in tray.BITRATES}
     same |= {name for name, height in tray.RESOLUTIONS if height}
+    same |= {f"{ms} ms" for ms in tray.DEBUG_LEADS if ms} | {f"{n} s" for n in ffmpeg.MIRROR_KEYFRAME_CHOICES}
     return same | {extend.size_label(mode) for _name, mode in extend.EXTEND_SIZES}
 
 

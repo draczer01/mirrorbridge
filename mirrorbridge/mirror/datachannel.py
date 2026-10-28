@@ -1,8 +1,9 @@
 """The TCP connection the video goes over (the type-110 stream's dataPort).
 
 Small socket buffers and no Nagle delay: a frame should leave the moment it is encrypted, and
-a TV that falls behind should show up as a slow write here (which the sender answers by
-dropping frames up to the next keyframe), not as seconds of video queued in the PC's kernel.
+a TV that falls behind should show up as a slow write here (which the sender rides out for up
+to a second, then answers by dropping frames up to the next keyframe), not as seconds of video
+queued in the PC's kernel.
 So the kernel's send buffer and asyncio's, which together hold what the TV has not yet taken,
 are about two frames big (the session says how big). A heartbeat (a bare header of type 2) goes
 every second once the first frame went. The TV sends nothing back; when it closes the

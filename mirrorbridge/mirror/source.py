@@ -105,7 +105,8 @@ def build_command(
     video_in = _paced(video_in, ff)
     cmd = [ff, "-hide_banner", "-nostats", "-loglevel", "warning", "-thread_queue_size", str(INPUT_QUEUE), *video_in]
     cmd += ["-vf", ",".join(filters), "-an"]
-    cmd += ffmpeg.mirror_encoder_args(encoder, settings.video_bitrate_kbps, fps)
+    cmd += ffmpeg.mirror_encoder_args(encoder, settings.video_bitrate_kbps, fps,
+                                      keyframe_seconds=settings.mirror_keyframe_seconds)
     cmd += ["-flush_packets", "1", "-flvflags", "no_duration_filesize+no_metadata", "-f", "flv", "pipe:1"]
     return cmd
 

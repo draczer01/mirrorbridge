@@ -390,16 +390,28 @@ def _encoder_args(encoder: str, settings: Settings, gop: int) -> list[str]:
 # Screen mirroring (mirrorbridge.mirror) shows each frame about 100 ms after it was captured, so
 # the encoder may hold none back: no B-frames, no lookahead, no frames in flight, CBR with a VBV
 # of about one frame (which also keeps a keyframe from arriving as one big burst), and an IDR at
-# the start and then every MIRROR_KEYFRAME_SECONDS.
+# the start and then every MIRROR_KEYFRAME_SECONDS (or the Debug menu's test value, one of
+# MIRROR_KEYFRAME_CHOICES): a frame dropped costs the frames up to the next keyframe.
 MIRROR_KEYFRAME_SECONDS = 2
+MIRROR_KEYFRAME_CHOICES = (1, 2, 5)
 MIRROR_VBV_FRAMES = 1.0
 
 
-def mirror_encoder_args(encoder: str, kbps: int, fps: int, vbv_frames: float = MIRROR_VBV_FRAMES) -> list[str]:
-    gop = max(1, round(fps * MIRROR_KEYFRAME_SECONDS))
+def mirror_keyframe_seconds(seconds: object) -> int:
+    """`seconds` if it is one of MIRROR_KEYFRAME_CHOICES, else MIRROR_KEYFRAME_SECONDS (a
+    settings.json edited by hand)."""
+    if isinstance(seconds, (int, float)) and seconds in MIRROR_KEYFRAME_CHOICES:
+        return int(seconds)
+    return MIRROR_KEYFRAME_SECONDS
+
+
+def mirror_encoder_args(encoder: str, kbps: int, fps: int, vbv_frames: float = MIRROR_VBV_FRAMES,
+                        keyframe_seconds: int = MIRROR_KEYFRAME_SECONDS) -> list[str]:
+    keyframe_seconds = mirror_keyframe_seconds(keyframe_seconds)
+    gop = max(1, round(fps * keyframe_seconds))
     bufsize = max(1, round(kbps * vbv_frames / max(1, fps)))
     rate = ["-b:v", f"{kbps}k", "-maxrate", f"{kbps}k", "-bufsize", f"{bufsize}k"]
-    common = ["-g", str(gop), "-bf", "0", "-force_key_frames", f"expr:gte(t,n_forced*{MIRROR_KEYFRAME_SECONDS})"]
+    common = ["-g", str(gop), "-bf", "0", "-force_key_frames", f"expr:gte(t,n_forced*{keyframe_seconds})"]
     if encoder == "h264_nvenc":
         # -delay 0: NVENC otherwise keeps about 3 frames in flight (50 ms at 60 fps).
         specific = ["-preset", "p4", "-tune", "ll", "-rc", "cbr", "-profile:v", "high", "-zerolatency", "1",

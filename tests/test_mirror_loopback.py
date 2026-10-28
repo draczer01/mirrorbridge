@@ -3,6 +3,7 @@ default: pairing, SETUP in its shapes and the fallbacks, the clock, the event ch
 decrypted and decoded by FFmpeg, the probe, and the ways a TV says no, is slow, or goes away."""
 
 import asyncio
+import dataclasses
 import logging
 import statistics
 import subprocess
@@ -24,6 +25,9 @@ from mirrorbridge.session import State
 from mirrorbridge.text import Text
 
 SETTINGS = Settings(encoder="libx264", framerate=30, video_bitrate_kbps=1500, output_height=360)
+SMALL_BUFFERS = pytest.mark.skipif(sys.platform == "win32", reason="Windows holds sends in buffers of its own that "
+                                   "the test cannot keep small (Wine leaves out SO_SNDBUF), so a TV that reads slowly "
+                                   "or stops for a moment shows only after the session, or not at all")
 
 
 def _ffmpeg() -> str:
@@ -408,6 +412,27 @@ async def test_saved_profile_is_asked_for_first(tv):
     assert tv.videos[0].codec_packets[0][3].endswith(bytes.fromhex("fdf8f800"))
 
 
+async def test_the_debug_switches_reach_the_tv_and_a_test_lead_is_not_saved(tv, caplog):
+    """More options > Debug: a TV wait of 300 ms (in SETUP, the frames' times and the stats), a
+    keyframe every second and frames shown as they come; mirroring.json keeps the TV's own lead."""
+    _ffmpeg()
+    profiles.save("fake-tv", profiles.MirrorProfile(MEDIA_FIRST, lead_ms=150))
+    settings = dataclasses.replace(SETTINGS, mirror_lead_ms=300, mirror_keyframe_seconds=1, mirror_on_arrival=True)
+    session = MirrorSession(tv.target(), settings, source=TEST_PATTERN, seconds=2.5)
+    with caplog.at_level(logging.INFO, logger=mirror_session.__name__):
+        await asyncio.wait_for(session.run(), 60)
+    assert "Mirroring with lead 300 ms (test value), keyframe every 1 s, frames shown on arrival" in caplog.text
+    assert tv.video_streams[0]["latencyMs"] == 300 and tv.setups[0]["streams"][0]["latencyMax"] == 300 * 44100 // 1000
+    assert session.report.established.plan.lead_ms == 300
+    assert session._stats.lead_ms == 300  # pylint: disable=protected-access
+    (video,) = tv.videos
+    ahead = [from_ntp(stamp) - arrived for (stamp, _, _), arrived in zip(video.frames, video.arrived)]
+    assert max(ahead) <= 300 * NS // 1000 and statistics.median(ahead) > 240 * NS // 1000
+    assert video.errors == [] and video.codec_subtypes == [b"\x14\x01"]
+    assert [n for n, (_, idr, _) in enumerate(video.frames) if idr][:3] == [0, 30, 60]
+    assert profiles.load("fake-tv").lead_ms == 150  # the TV's own, not the test value
+
+
 async def test_a_first_session_tries_the_other_avcc_ending_once(tv):
     _ffmpeg()
     tv.reconfigure(want_trailer=bytes.fromhex("fdf8f800"))
@@ -502,7 +527,7 @@ async def test_ending_mirroring_on_the_tv_stops_the_session(tv):
 
 async def test_frames_the_tv_cannot_take_in_time_are_dropped_up_to_a_keyframe(tv, monkeypatch, tmp_path):
     ff = _ffmpeg()
-    monkeypatch.setattr(mirror_session, "MAX_BACKLOG_FRAMES", -1)  # as if frames were always waiting
+    monkeypatch.setattr(mirror_session, "CATCH_UP_MS", -10_000)  # as if every frame were far past its lead
     session = MirrorSession(tv.target(), SETTINGS, source=TEST_PATTERN, seconds=2.5, remember=False)
     await asyncio.wait_for(session.run(), 60)
     (video,) = tv.videos
@@ -511,11 +536,47 @@ async def test_frames_the_tv_cannot_take_in_time_are_dropped_up_to_a_keyframe(tv
     assert _decode(ff, bytes(video.annexb), tmp_path)[0] == len(video.frames)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="Windows holds sends in buffers of its own that the test "
-                    "cannot keep small (Wine leaves out SO_SNDBUF), so a slow reader shows only after the session")
+@SMALL_BUFFERS
+async def test_a_network_that_holds_the_video_up_for_a_moment_is_ridden_out(tv, tmp_path, caplog, monkeypatch):
+    """The TV reads none of the video for 0.6 s, as Wi-Fi held a TCL's up now and then: the
+    frames that waited go late, with the times they were taken for, and the TV goes on with
+    them, P-frames, instead of every frame up to the next keyframe being dropped (2 s of a
+    frozen picture)."""
+    ff = _ffmpeg()
+    real_build_command = mirror_session.build_command
+
+    def noisy(ff, settings, **kw):  # frames as big as a busy screen's: the buffers on the way hide less
+        cmd = real_build_command(ff, settings, **kw)
+        at = next(n for n, arg in enumerate(cmd) if arg.startswith("testsrc="))
+        cmd[at] += ",noise=alls=100:allf=t"
+        return cmd
+
+    monkeypatch.setattr(mirror_session, "build_command", noisy)
+    tv.reconfigure(pause_after=15, pause_seconds=0.6, video_buffer=4096)
+    settings = dataclasses.replace(SETTINGS, video_bitrate_kbps=4000)
+    session = MirrorSession(tv.target(), settings, source=TEST_PATTERN, seconds=3, remember=False)
+    with caplog.at_level(logging.INFO, logger=mirror_session.__name__):
+        await asyncio.wait_for(session.run(), 60)
+    (video,) = tv.videos
+    latency = session.report.latency
+    assert video.errors == [] and video.paused_at == 15
+    assert latency["dropped"] == 0 and latency["late"] > 0 and len(video.frames) == latency["frames"] >= 61
+    # Every frame up to the next keyframe (every 2 s) is a P-frame, those that waited too.
+    assert [n for n, (_, idr, _) in enumerate(video.frames) if idr] == [0, 60]
+    # Each keeps the time it was taken for, a frame after the one before, so those that waited
+    # came past it.
+    shown = [from_ntp(stamp) for stamp, _, _ in video.frames]
+    assert all(20 * NS // 1000 < b - a < 50 * NS // 1000 for a, b in zip(shown[10:40], shown[11:40]))
+    assert sum(1 for at, arrived in zip(shown, video.arrived) if arrived > at) >= 5
+    assert _decode(ff, bytes(video.annexb), tmp_path)[0] == len(video.frames)
+    assert "frames late instead of dropping them" in caplog.text and "Dropping frames" not in caplog.text
+
+
+@SMALL_BUFFERS
 async def test_a_slow_tv_gets_fewer_frames_not_later_ones(tv):
     """The video connection's buffers are kept to about two frames (session.send_buffer), so
-    that a TV that reads slowly pushes back at once and frames are dropped rather than queued."""
+    that a TV that reads slowly pushes back at once; once frames are more than CATCH_UP_MS past
+    their lead, they are dropped rather than queued."""
     _ffmpeg()
     tv.reconfigure(read_kbps=60, video_buffer=8192)
     session = MirrorSession(tv.target(), SETTINGS, source=TEST_PATTERN, seconds=8, remember=False)
@@ -636,6 +697,17 @@ async def test_probe_finds_how_tcl_mirrors_and_saves_it(tv):
     assert tv.teardowns == len(tv.orderings) == 4
     await asyncio.sleep(0.1)
     assert all(conn.closed for conn in tv.connections)
+
+
+async def test_probe_leaves_the_debug_switches_out(tv):
+    _ffmpeg()
+    settings = dataclasses.replace(SETTINGS, mirror_lead_ms=300, mirror_keyframe_seconds=5, mirror_on_arrival=True)
+    result = await asyncio.wait_for(probe_mirroring(tv.target(), settings, seconds=2.5, variants=()), 60)
+    assert result.worked and {stream["latencyMs"] for stream in tv.video_streams} == {100}
+    video = tv.videos[-1]
+    assert video.codec_subtypes == [b"\x16\x01"]
+    assert [n for n, (_, idr, _) in enumerate(video.frames) if idr][:2] == [0, 60]  # every 2 s
+    assert result.profile.lead_ms == profiles.load("fake-tv").lead_ms == 100
 
 
 async def test_probe_tries_the_other_avcc_ending_when_the_tv_drops_the_video(tv):

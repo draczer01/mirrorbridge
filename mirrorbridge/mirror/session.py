@@ -10,12 +10,23 @@ It speaks to the tray and the command line as a cast does (session.CastSession):
 the session ends, stop() from anywhere on the loop, and on_status(State, message) on the way,
 the messages and errors being Texts.
 
-Delay comes first. A frame that cannot help the TV is not sent: when the TV (or the network)
-takes the video slower than it comes, frames are dropped up to the next keyframe, and a TV
-that takes nothing for VIDEO_STALL_SECONDS ends the session. So does FFmpeg giving no picture
-(FIRST_FRAME_SECONDS, FRAME_GAP_SECONDS); setting up has START_SECONDS in all. FFmpeg ending
-before its first frame (the driver refuses ddagrab, the GPU encoder is out of sessions) does
-not: the session goes on with GDI capture, then with the CPU encoder, as a cast does.
+Delay comes first, but a dropped frame costs every frame after it up to the next keyframe
+(ffmpeg.MIRROR_KEYFRAME_SECONDS): that long, the picture on the TV is frozen. So a network that
+holds the video up for a moment (Wi-Fi does, for a few hundred ms now and then) is ridden out:
+the frames that waited are sent late, with the times they were taken for, and the TV catches
+up. Each is sent as long as it is at most CATCH_UP_MS past its lead and the video connection
+holds no more than about CATCH_UP_MS of the bitrate (catch_up_bytes). Only past that, when the
+TV (or the network) takes the video slower than it comes, are frames dropped up to the next
+keyframe; a keyframe goes unless a newer one is waiting. A TV that takes nothing for
+VIDEO_STALL_SECONDS ends the session. So does FFmpeg giving no picture (FIRST_FRAME_SECONDS,
+FRAME_GAP_SECONDS); setting up has START_SECONDS in all. FFmpeg ending before its first frame
+(the driver refuses ddagrab, the GPU encoder is out of sessions) does not: the session goes on
+with GDI capture, then with the CPU encoder, as a cast does.
+
+More options > Debug has test switches for the sessions after they are set (lead_override):
+the TV's wait (the lead) in place of the one saved for the TV, which is what is saved again;
+a keyframe every 1, 2 or 5 seconds; and codec packets that ask the TV to show each frame as
+it comes, not at its time (packets.codec_packet). Test this TV leaves them out.
 
 A TV that drops the video connection before the second keyframe of a first session (nothing
 saved for it yet) may not take the avcC ending it was sent: the session is set up once more
@@ -59,7 +70,7 @@ MAX_CANVAS = (1920, 1080)  # never more, whatever the TV's screen: 4K costs more
 FALLBACK_CANVAS = (1280, 720)  # a TV that gives no displays[] and no 1080p feature bit
 NTP_GRACE_SECONDS = 10  # from RECORD until the TV must have asked for the time
 NTP_QUIET_SECONDS = 15  # then, a pause this long in its requests is worth a warning
-MAX_BACKLOG_FRAMES = 3  # frames waiting to be sent; beyond that, drop up to the next keyframe
+CATCH_UP_MS = 1000  # how far past its lead a frame still goes; beyond that, drop up to the next keyframe
 QUEUE_SECONDS = 2  # frames kept at most while the TV takes none (source.FrameQueue)
 SEND_BUFFER_FRAMES = 2  # the video connection's send buffers, in average frames
 MIN_SEND_BUFFER = 16 * 1024
@@ -115,6 +126,21 @@ def send_buffer(kbps: int, fps: int) -> int:
     SEND_BUFFER_FRAMES average frames, so that a slow network pushes back at once."""
     frame = kbps * 1000 // 8 // max(1, fps)
     return max(MIN_SEND_BUFFER, min(MAX_SEND_BUFFER, SEND_BUFFER_FRAMES * frame))
+
+
+def catch_up_bytes(kbps: int, fps: int) -> int:
+    """How much video may wait in asyncio's send buffer before frames are dropped: about
+    CATCH_UP_MS of the bitrate, and never less than the send buffers."""
+    return max(send_buffer(kbps, fps), kbps * 1000 // 8 * CATCH_UP_MS // 1000)
+
+
+def lead_override(settings: Settings) -> int:
+    """More options > Debug > TV wait: the lead to ask for in place of the one saved for the TV,
+    within what a saved one may be; 0 for the saved one."""
+    lead = settings.mirror_lead_ms
+    if not isinstance(lead, int) or lead <= 0:
+        return 0
+    return max(profiles.MIN_LEAD_MS, min(profiles.MAX_LEAD_MS, lead))
 
 
 @dataclass
@@ -182,6 +208,7 @@ class MirrorSession:
         self._events: Optional[asyncio.Task] = None  # opening the event channel, then its transport
         self._data: Optional[DataChannel] = None
         self._send_buffer = MIN_SEND_BUFFER
+        self._catch_up = MIN_SEND_BUFFER  # catch_up_bytes
         self._feedback: Optional[Feedback] = None
         self._ffmpeg: Optional[FFmpegSource] = None
         self._capture: tuple = ()  # FFmpeg, the display and the window's region, for each way below
@@ -416,6 +443,12 @@ class MirrorSession:
             _LOGGER.warning("%s", ex)
 
         plan = self.profile.plan()
+        lead = lead_override(s)
+        if lead:
+            plan.lead_ms = lead
+        _LOGGER.info("Mirroring with lead %d ms (%s), keyframe every %d s, frames shown %s", plan.lead_ms,
+                     "test value" if lead else "automatic", ffmpeg.mirror_keyframe_seconds(s.mirror_keyframe_seconds),
+                     "on arrival" if s.mirror_on_arrival else "at their time")
         _LOGGER.info("Setting up mirroring to %s (%s): %s", self.target.name,
                      "saved settings" if self.saved else "first time", plan.describe())
         est = self.report.established = await negotiator.establish(plan)
@@ -430,6 +463,7 @@ class MirrorSession:
         self.report.fps = choose_fps(s.framerate, self.report.info)
 
         self._send_buffer = send_buffer(s.video_bitrate_kbps, self.report.fps)
+        self._catch_up = catch_up_bytes(s.video_bitrate_kbps, self.report.fps)
         try:
             self._data = await DataChannel.open(channel.remote_ip, est.data_port, buffer=self._send_buffer)
         except (OSError, asyncio.TimeoutError) as ex:
@@ -597,23 +631,24 @@ class MirrorSession:
             "PC and the TV (the Wi-Fi signal, or use a cable), then try again.", seconds=VIDEO_STALL_SECONDS,
         ), step="video", steps=self.report.steps)
 
-    def _drop_reason(self, idr: bool, waiting: bool, late: bool) -> str:
-        """Why the frame at hand is not to be sent ("" to send it). Dropping a frame costs the
-        frames after it up to the next keyframe, so a frame goes unless it cannot help: a newer
-        keyframe is already waiting, the TV takes the video slower than it comes, or the frame
-        is past its lead with newer ones waiting behind it."""
+    def _drop_reason(self, idr: bool, waiting: bool, late_ns: int) -> str:
+        """Why the frame at hand is not to be sent ("" to send it); `late_ns` is how far past its
+        lead it is now. Dropping a frame costs the frames after it up to the next keyframe, a
+        frozen picture for up to a keyframe's interval, so a frame goes unless it cannot help: a
+        newer keyframe is already waiting, or the network has not kept up for longer than the TV
+        is given to catch up (more than about CATCH_UP_MS of the video still waiting to go, or
+        the frame more than CATCH_UP_MS past its lead). A short hold-up of the network leaves
+        frames waiting, a little late: they still go, and the TV catches up."""
         assert self._frames is not None and self._data is not None
-        frames = self._frames
         if idr:
-            return "a newer keyframe is waiting" if frames.keyframe_waiting() else ""
+            return "a newer keyframe is waiting" if self._frames.keyframe_waiting() else ""
         if waiting:
             return "waiting for a keyframe"
-        if frames.frames > MAX_BACKLOG_FRAMES:
-            return f"{frames.frames} frames are waiting to be sent"
-        if self._data.buffered > self._send_buffer:
+        if self._data.buffered > self._catch_up:
             return f"{self._data.buffered // 1024} KB are still waiting for the network"
-        if late and frames.frames:
-            return "frames are older than the lead when they come to be sent"
+        if late_ns > CATCH_UP_MS * 1_000_000:
+            return (f"a frame is {late_ns // 1_000_000} ms past its lead when it comes to be sent, more than the "
+                    f"{CATCH_UP_MS} ms the TV is given to catch up")
         return ""
 
     async def _drained(self) -> None:
@@ -632,13 +667,16 @@ class MirrorSession:
                 left = data.buffered
 
     async def _pump(self) -> None:
-        """FFmpeg's frames to the TV, as they come."""
+        """FFmpeg's frames to the TV, as they come. A frame the network held up past its lead
+        goes late, with its own timestamp (the TV catches up), unless _drop_reason says it
+        cannot help."""
         assert self._data is not None and self._cipher is not None and self._ffmpeg is not None
         assert self._frames is not None
         est = self.report.established
         assert est is not None
         frames = self._frames
         lead_ns = est.plan.lead_ms * 1_000_000
+        on_arrival = self.settings.mirror_on_arrival
         mapper = PtsMapper()
         trailer = self.profile.trailer
         params: Optional[tuple[bytes, bytes]] = None
@@ -647,7 +685,8 @@ class MirrorSession:
         length_size = 4
         send_codec = True
         wait_for_idr = True
-        slow_logged = 0
+        slow_logged = ridden_logged = 0
+        late_frames = held_ns = 0  # frames sent past their lead since the last on time, and their sends
         while True:
             unit = await frames.get()
             if unit is None:
@@ -685,11 +724,12 @@ class MirrorSession:
                 continue
             idr = is_idr(nals)
             taken_at = mapper.map(unit.pts_ms, unit.arrived_ns)
-            why = self._drop_reason(idr, wait_for_idr or send_codec, taken - taken_at > lead_ns)
+            why = self._drop_reason(idr, wait_for_idr or send_codec, taken - taken_at - lead_ns)
             if why:
                 if not wait_for_idr:
                     _LOGGER.info("Dropping frames up to the next keyframe: %s", why)
                 wait_for_idr = True
+                late_frames = held_ns = 0
                 self._stats.drop()
                 continue
             wait_for_idr = False
@@ -703,7 +743,7 @@ class MirrorSession:
                     _LOGGER.info("Sending %dx%d H.264 (profile %d, level %.1f), avcC %s", info.width, info.height,
                                  info.profile_idc, info.level_idc / 10, avcc.hex())
                 self.report.picture = picture
-                packets.append(codec_packet(avcc, timestamp, *picture))
+                packets.append(codec_packet(avcc, timestamp, *picture, on_arrival=on_arrival))
                 self.report.codec_packets += 1
                 send_codec = False
             payload = join_avcc(nals)
@@ -720,7 +760,19 @@ class MirrorSession:
                 slow_logged = sent
                 _LOGGER.warning("The network took %.0f ms to take a %d KB frame, more than the lead (%d ms)",
                                 (sent - packed) / 1e6, len(data) // 1024, est.plan.lead_ms)
-            self._stats.add(len(data), idr, buffered=self._data.buffered, pipe=max(0, unit.arrived_ns - taken_at),
+            late = sent - taken_at > lead_ns
+            if late:
+                late_frames += 1
+                held_ns += sent - packed
+            elif late_frames:  # on time again: the TV has caught up
+                # Only when the network made them late (not FFmpeg), and once per stall at most.
+                if held_ns > lead_ns and sent - ridden_logged > LOG_SECONDS * NS:
+                    ridden_logged = sent
+                    _LOGGER.info("The network held up for %.0f ms: sent %d frames late instead of dropping them",
+                                 held_ns / 1e6, late_frames)
+                late_frames = held_ns = 0
+            self._stats.add(len(data), idr, buffered=self._data.buffered, late=late,
+                            pipe=max(0, unit.arrived_ns - taken_at),
                             behind=mapper.behind(unit.pts_ms, unit.arrived_ns), queue=taken - unit.arrived_ns,
                             pack=packed - taken, send=sent - packed, age=sent - taken_at)
             self.report.frames_sent = self._stats.frames
@@ -794,14 +846,16 @@ class MirrorSession:
                 await self._xscreen.stop()
                 self._xscreen = None
                 self.virtual_device = ""
-        _LOGGER.info("Mirroring ended: %d frames sent, %d dropped; the TV asked for the time %d times; "
-                     "/feedback answers %s; steps %s", self._stats.frames, self._stats.dropped,
+        _LOGGER.info("Mirroring ended: %d frames sent (%d late), %d dropped; the TV asked for the time %d times; "
+                     "/feedback answers %s; steps %s", self._stats.frames, self._stats.late, self._stats.dropped,
                      self.report.ntp_requests, self.report.feedback or "none", self.report.steps)
         est = self.report.established
         # Remembered only once the TV has taken frames and the time: what was asked for works.
         if (self.remember and est is not None and self.error is None and self._stats.frames
                 and self.report.ntp_requests and self.target.identifier):
-            profile = profiles.MirrorProfile.of(est.plan, self.profile.trailer)
+            # With the TV's own lead: a test value from the Debug menu is never saved.
+            plan = dataclasses.replace(est.plan, lead_ms=self.profile.lead_ms)
+            profile = profiles.MirrorProfile.of(plan, self.profile.trailer)
             info = self.report.info.summary() if self.report.info else ""
             try:
                 await loop.run_in_executor(None, lambda: profiles.save(

@@ -76,6 +76,8 @@ class TvProfile:
     video_buffer: Optional[int] = None  # SO_RCVBUF of the video connection (None: the system's)
     read_kbps: Optional[float] = None  # read the video no faster than this
     stall_after: Optional[int] = None  # stop reading the video after this many frames, keeping it open
+    pause_after: Optional[int] = None  # once, after this many frames, read no video for pause_seconds
+    pause_seconds: float = 0.6  # (as Wi-Fi holds the video up for a moment)
 
 
 TCL = TvProfile()
@@ -89,6 +91,8 @@ class VideoReceived:
     codec_packets: list[tuple[int, float, float, bytes]] = field(default_factory=list)  # (ts, w, h, avcC)
     frames: list[tuple[int, bool, list[int]]] = field(default_factory=list)  # (ts, IDR flag, NAL types)
     arrived: list[int] = field(default_factory=list)  # when each frame came, time.perf_counter_ns()
+    codec_subtypes: list[bytes] = field(default_factory=list)  # [6:8] of each codec packet
+    paused_at: Optional[int] = None  # frames that had come when the TV paused (TvProfile.pause_after)
     heartbeats: int = 0
     annexb: bytearray = field(default_factory=bytearray)
     errors: list[str] = field(default_factory=list)
@@ -353,6 +357,9 @@ class _Handler(AirPlayServerAuth):
             while True:
                 if p.stall_after is not None and len(received.frames) >= p.stall_after:
                     await asyncio.sleep(3600)  # stuck, with the connection open
+                if p.pause_after is not None and received.paused_at is None and len(received.frames) >= p.pause_after:
+                    received.paused_at = len(received.frames)
+                    await asyncio.sleep(p.pause_seconds)  # held up, then reading at full speed again
                 header = await reader.readexactly(128)
                 size, kind, flags = struct.unpack_from("<IBB", header)
                 timestamp = struct.unpack_from("<Q", header, 8)[0]
@@ -363,8 +370,11 @@ class _Handler(AirPlayServerAuth):
                     await asyncio.sleep(max(0.0, began + read * 8 / (p.read_kbps * 1000) - time.perf_counter()))
                 if kind == 1:
                     width, height = struct.unpack_from("<ff", header, 16)
-                    if header[6:8] != b"\x16\x01" or struct.unpack_from("<ff", header, 40) != (width, height):
+                    # 0x14: frames shown as they come (RespectTimestamps, bit 0x02, cleared)
+                    if header[6:8] not in (b"\x16\x01", b"\x14\x01") or (
+                            struct.unpack_from("<ff", header, 40) != (width, height)):
                         received.errors.append(f"codec header {header[:64].hex()}")
+                    received.codec_subtypes.append(bytes(header[6:8]))
                     sps, pps, trailer = _avcc_params(payload)
                     params = b"".join(b"\x00\x00\x00\x01" + nal for nal in sps + pps)
                     received.codec_packets.append((timestamp, width, height, payload))

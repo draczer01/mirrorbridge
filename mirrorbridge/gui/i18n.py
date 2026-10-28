@@ -108,6 +108,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Not mirroring: this PC's own measurements show here while it mirrors.",
         "es": "Sin duplicar: aquí aparecen las mediciones de este equipo mientras duplica la pantalla.",
     },
+    "debug_lead": {"en": "TV wait (test)", "es": "Espera de la TV (prueba)"},
+    "debug_lead_auto": {"en": "Automatic (saved for the TV)", "es": "Automática (la guardada para la TV)"},
+    "debug_keyframes": {"en": "Keyframe every", "es": "Cuadro completo cada"},
+    "debug_on_arrival": {"en": "Show frames on arrival (test)", "es": "Mostrar al llegar (prueba)"},
     "language_menu": {"en": "Language", "es": "Idioma"},
     "quit": {"en": "Quit", "es": "Salir"},
     # Notifications

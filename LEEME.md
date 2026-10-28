@@ -159,6 +159,16 @@ La ventana completa tiene el mismo botón, debajo de **Transmitir**.
   de 200 Hz muestra una hora nueva cada 5 ms). Esc o un clic lo cierra;
 * `%APPDATA%\MirrorBridge\mirroring.json`, donde queda lo que funcionó con la TV.
 
+Junto al *Medidor de latencia*, **Más opciones** > **Depuración** tiene tres opciones para hacer
+pruebas. Empiezan con los valores de siempre y cambian la siguiente duplicación (y `mirror`),
+no *Probar esta TV*: *Espera de la TV (prueba)* le pide a la TV que espere de 60 a 300 ms
+después de capturar cada cuadro antes de mostrarlo, en lugar de lo guardado para esa TV
+(*Automática*; un valor de prueba nunca se guarda); *Cuadro completo cada* manda una imagen
+completa cada 1, 2 (lo normal) o 5 segundos; *Mostrar al llegar (prueba)* le pide a la TV que
+muestre cada cuadro en cuanto llega, en lugar de a su hora. Una espera más corta solo baja el
+retraso si la TV respeta la hora de los cuadros; por Wi-Fi, una más larga aguanta los momentos
+en que la red detiene el video. Al empezar cada sesión, el registro dice cuáles usó.
+
 ### Desde la consola
 
 ```
@@ -198,10 +208,12 @@ Igual que `cast`, `mirror` parte de los ajustes de la app: sin `--monitor`, `--w
   prueban con el tiempo que queda (el informe dice cuáles no alcanzó a probar). Si no funciona,
   manda lo que muestra junto con `mirrorbridge.log`. Antes de un `--probe`, si la TV corta el
   video apenas empieza, se intenta una vez más con el otro final del encabezado H.264.
-* Si la red o la TV no dan abasto, se descartan cuadros hasta el siguiente cuadro clave en
-  lugar de acumularlos: la imagen salta, pero no se atrasa. Si la TV no recibe video durante
-  5 segundos, la sesión termina con un error; si terminas la duplicación desde la TV, la
-  sesión simplemente se detiene.
+* Si la red detiene el video un momento, como el Wi-Fi lo hace de vez en cuando, los cuadros
+  que esperaban se mandan igual, un poco tarde, y la TV se pone al día. Solo si la red o la TV
+  no dan abasto por más de un segundo, más o menos, se descartan cuadros hasta el siguiente
+  cuadro clave en lugar de acumularlos: la imagen salta, pero no se atrasa. Si la TV no recibe
+  video durante 5 segundos, la sesión termina con un error; si terminas la duplicación desde la
+  TV, la sesión simplemente se detiene.
 
 ## Diagnóstico
 

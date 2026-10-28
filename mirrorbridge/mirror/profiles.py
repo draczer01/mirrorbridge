@@ -23,6 +23,7 @@ from .negotiation import CONTROL_FIRST, DEFAULT_LEAD_MS, NTP, ORDERINGS, Plan
 _LOGGER = logging.getLogger(__name__)
 
 FILE_NAME = "mirroring.json"
+MIN_LEAD_MS, MAX_LEAD_MS = 20, 1000  # a lead outside these is not taken
 
 
 @dataclass
@@ -61,7 +62,7 @@ class MirrorProfile:
         if profile.trailer not in TRAILERS:
             profile.trailer = defaults.trailer
         profile.timing = NTP  # PTP is only ever probed (negotiation.py)
-        if not isinstance(profile.lead_ms, int) or not 20 <= profile.lead_ms <= 1000:
+        if not isinstance(profile.lead_ms, int) or not MIN_LEAD_MS <= profile.lead_ms <= MAX_LEAD_MS:
             profile.lead_ms = defaults.lead_ms
         profile.audio = bool(profile.audio)
         return profile

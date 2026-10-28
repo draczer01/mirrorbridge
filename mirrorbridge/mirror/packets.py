@@ -5,7 +5,9 @@ Every message is a 128-byte little-endian header, sent in the clear, then its pa
     [0:4]   payload size (with the 16-byte tag of an encrypted frame)
     [4]     type: 0 video frame, 1 codec packet (avcC), 2 heartbeat, 5 streaming report
     [5]     0x10 on a frame that is an IDR
-    [6:8]   16 01 on an H.264 codec packet, 1e 00 on a heartbeat, 00 00 on a frame
+    [6:8]   16 01 on an H.264 codec packet, 1e 00 on a heartbeat, 00 00 on a frame; on a codec
+            packet, bit 0x02 of [6] (RespectTimestamps) asks the TV to show each frame at its
+            time, and 14 01 to show each one as it comes (a test switch, codec_packet)
     [8:16]  when to show it: the session clock in NTP form, without the 1900 epoch (clock.py)
     [16:24] codec packet: width and height, float32 (again at [40:48] and [56:64])
     [40:48] frame: the timeline it is on (0 for NTP timing)
@@ -34,6 +36,7 @@ TAG_SIZE = 16
 
 VIDEO, CODEC, HEARTBEAT, REPORT = 0, 1, 2, 5
 IDR_FLAG = 0x10
+RESPECT_TIMESTAMPS = 0x02  # in a codec packet's [6]
 _SUBTYPES = {VIDEO: b"\x00\x00", CODEC: b"\x16\x01", HEARTBEAT: b"\x1e\x00", REPORT: b"\x00\x00"}
 _SIZE_OFFSETS = (16, 40, 56)
 
@@ -83,8 +86,14 @@ class Header:
         return cls(kind, size, timestamp, bool(flags & IDR_FLAG), width, height, timeline, bytes(data[6:8]))
 
 
-def codec_packet(avcc: bytes, timestamp: int, width: int, height: int) -> bytes:
-    return Header(CODEC, len(avcc), timestamp, width=float(width), height=float(height)).pack() + avcc
+def codec_packet(avcc: bytes, timestamp: int, width: int, height: int, on_arrival: bool = False) -> bytes:
+    """The avcC with its header. `on_arrival` clears RespectTimestamps, which receivers read
+    from the codec packet: they then show each frame as it comes instead of at its time."""
+    subtype = _SUBTYPES[CODEC]
+    if on_arrival:
+        subtype = bytes([subtype[0] & ~RESPECT_TIMESTAMPS]) + subtype[1:]
+    header = Header(CODEC, len(avcc), timestamp, width=float(width), height=float(height), subtype=subtype)
+    return header.pack() + avcc
 
 
 def heartbeat_packet(timestamp: int) -> bytes:

@@ -25,6 +25,7 @@ RESOLUTIONS = [("720p", 720), ("1080p", 1080), ("1440p", 1440), ("4K", 2160), ("
 FRAMERATES = [24, 30, 60]
 LATENCIES = [("lat_low", "low"), ("lat_balanced", "balanced"), ("lat_smooth", "smooth")]
 BITRATES = [4, 8, 12, 20, 30]
+DEBUG_LEADS = [0, 60, 100, 150, 200, 300]  # More options > Debug > TV wait, in ms; 0 = what is saved for the TV
 
 
 def display_label(mon: ffmpeg.Monitor) -> str:
@@ -157,6 +158,7 @@ class TrayMenu(QObject):
             self._action(more, tr("vdd_remove"), c.extend.remove_driver, enabled=installed and not c.is_active)
         debug = self._submenu(more, tr("debug_menu"))
         self._action(debug, tr("latency_meter"), self._show_latency_meter)
+        self._mirror_switches(debug)
         self._language_menu(self._submenu(menu, language_menu_title()))
         menu.addSeparator()
         self._action(menu, tr("quit"), lambda: self.quit_app())
@@ -224,16 +226,17 @@ class TrayMenu(QObject):
             self._action(sub, name, (lambda _=False, code=code: self.c.set_language(code)),
                          checkable=True, checked=language() == code, group=group)
 
+    def _radio(self, parent: QMenu, title: str, options, current, key: str) -> None:
+        """A submenu of (label, value) choices for the setting `key`, the current one checked."""
+        menu = self._submenu(parent, title)
+        group = QActionGroup(menu)
+        for label, value in options:
+            self._action(menu, label, (lambda _=False, v=value: self.c.update_settings(**{key: v})),
+                         checkable=True, checked=current == value, group=group)
+
     def _quality_menu(self, sub: QMenu) -> None:
         c, s = self.c, self.c.settings
-
-        def radio(parent: QMenu, title: str, options, current, key: str):
-            menu = self._submenu(parent, title)
-            group = QActionGroup(menu)
-            for label, value in options:
-                self._action(menu, label, (lambda _=False, v=value: c.update_settings(**{key: v})),
-                             checkable=True, checked=current == value, group=group)
-
+        radio = self._radio
         radio(sub, tr("resolution"), [(tr("native") if v == 0 else n, v) for n, v in RESOLUTIONS],
               s.output_height, "output_height")
         radio(sub, tr("framerate"), [(f"{f} fps", f) for f in FRAMERATES], s.framerate, "framerate")
@@ -242,6 +245,19 @@ class TrayMenu(QObject):
               "video_bitrate_kbps")
         radio(sub, tr("encoder"), [(tr("auto_encoder"), "auto")] +
               [(ffmpeg.ENCODER_LABELS[e], e) for e in c.encoders], s.encoder, "encoder")
+
+    def _mirror_switches(self, debug: QMenu) -> None:
+        """Mirror screen's test switches, for the sessions after they are set (the mirror command
+        too; Test this TV leaves them out): how long the TV waits to show a frame, how often a
+        keyframe comes, and frames shown as they come instead of at their time."""
+        s = self.c.settings
+        debug.addSeparator()
+        self._radio(debug, tr("debug_lead"), [(f"{ms} ms" if ms else tr("debug_lead_auto"), ms) for ms in DEBUG_LEADS],
+                    s.mirror_lead_ms, "mirror_lead_ms")
+        self._radio(debug, tr("debug_keyframes"), [(f"{n} s", n) for n in ffmpeg.MIRROR_KEYFRAME_CHOICES],
+                    ffmpeg.mirror_keyframe_seconds(s.mirror_keyframe_seconds), "mirror_keyframe_seconds")
+        self._action(debug, tr("debug_on_arrival"), lambda on: self.c.update_settings(mirror_on_arrival=on),
+                     checkable=True, checked=s.mirror_on_arrival)
 
     # -- actions -----------------------------------------------------------
 

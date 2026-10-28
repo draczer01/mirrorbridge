@@ -1,6 +1,7 @@
 """More options > Debug > Latency meter: a big clock on every screen, closed with Esc, which shows
-the last "Mirroring:" line of the log. Qt runs offscreen, on a controller that neither scans the
-network nor tests encoders."""
+the last "Mirroring:" line of the log; and next to it Mirror screen's test switches (the TV's wait,
+how often a keyframe comes, frames shown on arrival). Qt runs offscreen, on a controller that
+neither scans the network nor tests encoders."""
 
 import logging
 import os
@@ -34,10 +35,22 @@ def controller(tmp_path, monkeypatch):
     i18n.set_language("en")
 
 
-def _latency_action(tray):
+def _debug(tray) -> dict:
     more = next(a.menu() for a in tray.menu.actions() if a.text() == i18n.tr("more"))
     debug = next(a.menu() for a in more.actions() if a.text() == i18n.tr("debug_menu"))
-    return next(a for a in debug.actions() if a.text() == i18n.tr("latency_meter"))
+    return {a.text(): a for a in debug.actions() if not a.isSeparator()}
+
+
+def _latency_action(tray):
+    return _debug(tray)[i18n.tr("latency_meter")]
+
+
+def _choices(item) -> dict:
+    return {a.text(): a for a in item.menu().actions()}
+
+
+def _checked(item) -> list[str]:
+    return [text for text, action in _choices(item).items() if action.isChecked()]
 
 
 def test_the_clock_shows_seconds_and_milliseconds():
@@ -150,3 +163,44 @@ def test_the_menu_is_in_spanish_too(controller):
     tray = TrayMenu(controller, lambda: None, lambda: None)
     tray._rebuild()  # pylint: disable=protected-access
     assert _latency_action(tray).text() == "Medidor de latencia"
+    items = _debug(tray)
+    assert list(items) == ["Medidor de latencia", "Espera de la TV (prueba)", "Cuadro completo cada",
+                           "Mostrar al llegar (prueba)"]
+    assert list(_choices(items["Espera de la TV (prueba)"])) == [
+        "Automática (la guardada para la TV)", "60 ms", "100 ms", "150 ms", "200 ms", "300 ms"]
+    assert _checked(items["Cuadro completo cada"]) == ["2 s"]
+
+
+def test_mirror_screens_test_switches_are_next_to_the_latency_meter(controller):
+    """They start from the defaults, and each choice is saved for the next Mirror screen."""
+    from mirrorbridge.gui.tray import TrayMenu
+
+    tray = TrayMenu(controller, lambda: None, lambda: None)
+    tray._rebuild()  # pylint: disable=protected-access
+    items = _debug(tray)
+    assert list(items) == ["Latency meter", "TV wait (test)", "Keyframe every", "Show frames on arrival (test)"]
+    waits, keyframes, arrival = items["TV wait (test)"], items["Keyframe every"], items["Show frames on arrival (test)"]
+    assert list(_choices(waits)) == ["Automatic (saved for the TV)", "60 ms", "100 ms", "150 ms", "200 ms", "300 ms"]
+    assert _checked(waits) == ["Automatic (saved for the TV)"]
+    assert list(_choices(keyframes)) == ["1 s", "2 s", "5 s"] and _checked(keyframes) == ["2 s"]
+    assert arrival.isCheckable() and not arrival.isChecked()
+
+    _choices(waits)["200 ms"].trigger()
+    _choices(keyframes)["5 s"].trigger()
+    arrival.trigger()
+    s = controller.settings
+    assert (s.mirror_lead_ms, s.mirror_keyframe_seconds, s.mirror_on_arrival) == (200, 5, True)
+    saved = Settings.load()
+    assert (saved.mirror_lead_ms, saved.mirror_keyframe_seconds, saved.mirror_on_arrival) == (200, 5, True)
+
+    tray._rebuild()  # pylint: disable=protected-access
+    items = _debug(tray)
+    assert _checked(items["TV wait (test)"]) == ["200 ms"] and _checked(items["Keyframe every"]) == ["5 s"]
+    assert items["Show frames on arrival (test)"].isChecked()
+    _choices(items["TV wait (test)"])["Automatic (saved for the TV)"].trigger()
+    items["Show frames on arrival (test)"].trigger()
+    assert (s.mirror_lead_ms, s.mirror_on_arrival) == (0, False)
+
+    s.mirror_keyframe_seconds = 3  # a settings.json edited by hand: 2 s is what is used, and shown
+    tray._rebuild()  # pylint: disable=protected-access
+    assert _checked(_debug(tray)["Keyframe every"]) == ["2 s"]

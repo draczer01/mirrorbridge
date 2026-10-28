@@ -16,9 +16,11 @@ For each frame sent, the stages between FFmpeg and the network:
 each as median (p50) and 95th percentile (p95), in ms. The fixed delay of capture and encoding
 themselves is not in any of them: it cannot be seen from here. Also: the frame rate FFmpeg
 delivers (whether sent or dropped) against the one asked for, with a warning when it falls short, the
-bitrate, the most bytes the video connection held unsent, keyframes, dropped frames and how
-often the TV asked for the time. The TV shows a frame its lead (latencyMs) after it was taken,
-so an age that comes near the lead means frames arrive too late to be shown smoothly.
+bitrate, the most bytes the video connection held unsent, keyframes, dropped frames, frames sent
+late and how often the TV asked for the time. The TV shows a frame its lead (latencyMs) after it
+was taken, so an age that comes near the lead means frames arrive too late to be shown smoothly;
+"late" counts the frames sent past their lead (a network that held the video up for a moment,
+ridden out instead of dropping frames up to the next keyframe).
 """
 
 from __future__ import annotations
@@ -60,6 +62,7 @@ class StageTimes:
         self.big_keyframes = 0
         self.largest_keyframe = 0
         self.dropped = 0
+        self.late = 0  # frames sent past their lead
         self.slow_windows = 0  # windows in which FFmpeg delivered too few frames
         self._window: dict[str, list[float]] = {stage: [] for stage in STAGES}
         self._all: dict[str, deque] = {stage: deque(maxlen=KEEP) for stage in STAGES}
@@ -84,11 +87,13 @@ class StageTimes:
         self._frame_seen()
         self._window_arrived += 1
 
-    def add(self, size: int, keyframe: bool, buffered: int = 0, **stages: int) -> None:
-        """One frame sent: its size in bytes, what the connection still held after it, and
-        its stages, in ns (names from STAGES)."""
+    def add(self, size: int, keyframe: bool, buffered: int = 0, late: bool = False, **stages: int) -> None:
+        """One frame sent: its size in bytes, what the connection still held after it, whether
+        it went past its lead, and its stages, in ns (names from STAGES)."""
         self._frame_seen()
         self.frames += 1
+        if late:
+            self.late += 1
         self.bytes += size
         self._window_frames += 1
         self._window_bytes += size
@@ -127,11 +132,11 @@ class StageTimes:
             self._ntp_requests = ntp_requests
         _LOGGER.info(
             "Mirroring: %.1f fps (of %d), %.1f Mbit/s; ms p50/p95: %s (after capture and encoding); lead %d ms; "
-            "up to %d KB waiting to go; keyframes %d (largest %d KB%s); dropped %d%s",
+            "up to %d KB waiting to go; keyframes %d (largest %d KB%s); dropped %d, late %d%s",
             delivered, self.fps, self._window_bytes * 8 / seconds / 1e6, ", ".join(parts) or "no frames",
             self.lead_ms, self._window_buffered // 1024, self.keyframes, self.largest_keyframe // 1024,
             f", {self.big_keyframes} over {BIG_KEYFRAME_FRAMES} frames' share of the bitrate" if self.big_keyframes
-            else "", self.dropped, timing,
+            else "", self.dropped, self.late, timing,
         )
         if self.fps and seconds >= 1 and delivered < SLOW_FPS * self.fps:
             self.slow_windows += 1
@@ -160,5 +165,5 @@ class StageTimes:
         out: dict = {stage: (round(percentile(list(values), 0.5), 2), round(percentile(list(values), 0.95), 2))
                      for stage, values in self._all.items() if values}
         out.update(frames=self.frames, bytes=self.bytes, keyframes=self.keyframes, dropped=self.dropped,
-                   largest_keyframe=self.largest_keyframe, slow_windows=self.slow_windows)
+                   late=self.late, largest_keyframe=self.largest_keyframe, slow_windows=self.slow_windows)
         return out

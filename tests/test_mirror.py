@@ -20,7 +20,8 @@ from mirrorbridge.mirror.control import ReceiverInfo, Target, parse_features, se
 from mirrorbridge.mirror.datachannel import DataChannel
 from mirrorbridge.mirror.errors import no_timing, refused
 from mirrorbridge.mirror.negotiation import CONTROL_FIRST, MEDIA_FIRST, PTP, Plan
-from mirrorbridge.mirror.session import canvas_limit, choose_canvas, choose_fps, send_buffer
+from mirrorbridge.mirror.session import (catch_up_bytes, canvas_limit, choose_canvas, choose_fps, lead_override,
+                                         send_buffer)
 from mirrorbridge.mirror.source import DESKTOP, TEST_PATTERN, FrameQueue, Unit, build_command
 
 # What x264 wrote for a 640x360 test pattern (High, level 3.0), and the record the TV got for it.
@@ -146,6 +147,16 @@ def test_codec_header_layout():
         assert header[offset:offset + 8] == bytes.fromhex("0000f044 00008744")  # 1920.0f, 1080.0f
     parsed = packets.Header.parse(header)
     assert (parsed.kind, parsed.size, parsed.timestamp, parsed.width, parsed.height) == (1, 44, 5 << 32, 1920, 1080)
+
+
+def test_codec_packets_can_ask_for_frames_on_arrival():
+    """More options > Debug > Show frames on arrival clears RespectTimestamps (0x02 of [6]), and
+    nothing else."""
+    at_their_time = packets.codec_packet(AVCC_640x360, 5 << 32, 640, 360)
+    on_arrival = packets.codec_packet(AVCC_640x360, 5 << 32, 640, 360, on_arrival=True)
+    assert at_their_time[6:8] == bytes.fromhex("1601") and on_arrival[6:8] == bytes.fromhex("1401")
+    assert on_arrival[:6] + on_arrival[8:] == at_their_time[:6] + at_their_time[8:]
+    assert packets.Header.parse(on_arrival).subtype == bytes.fromhex("1401")
 
 
 def test_frame_and_heartbeat_headers():
@@ -346,6 +357,18 @@ def test_video_send_buffers_hold_about_two_frames():
     assert send_buffer(100000, 10) == 256 * 1024  # nor more
 
 
+def test_a_second_of_the_bitrate_may_wait_for_the_network_before_frames_are_dropped():
+    assert catch_up_bytes(8000, 24) == 1_000_000  # 8 Mbit/s for CATCH_UP_MS (1 s)
+    assert catch_up_bytes(100, 30) == send_buffer(100, 30)  # never less than the send buffers
+
+
+def test_the_debug_menus_tv_wait_stays_within_what_a_profile_takes():
+    assert lead_override(Settings()) == 0  # automatic: the TV's own
+    assert lead_override(Settings(mirror_lead_ms=60)) == 60 and lead_override(Settings(mirror_lead_ms=300)) == 300
+    assert lead_override(Settings(mirror_lead_ms=5)) == 20 and lead_override(Settings(mirror_lead_ms=5000)) == 1000
+    assert lead_override(Settings(mirror_lead_ms="fast")) == 0 and lead_override(Settings(mirror_lead_ms=-1)) == 0
+
+
 # -- what is asked, and of whom ------------------------------------------------------------------------
 
 
@@ -431,6 +454,30 @@ def test_mirror_encoder_args_hold_nothing_back(encoder, expected):
     assert args[args.index("-maxrate") + 1] == "6000k"
 
 
+@pytest.mark.parametrize("encoder", ["h264_nvenc", "libx264"])
+def test_the_keyframe_interval_reaches_the_encoder(encoder):
+    args = ffmpeg.mirror_encoder_args(encoder, 6000, 30, keyframe_seconds=5)
+    assert args[args.index("-g") + 1] == "150"
+    assert args[args.index("-force_key_frames") + 1] == "expr:gte(t,n_forced*5)"
+    if encoder == "libx264":
+        assert args[args.index("-x264-params") + 1] == "keyint=150:min-keyint=150:scenecut=0"
+    one = ffmpeg.mirror_encoder_args(encoder, 6000, 30, keyframe_seconds=1)
+    assert one[one.index("-g") + 1] == "30" and one[one.index("-force_key_frames") + 1] == "expr:gte(t,n_forced*1)"
+    # 1, 2 or 5 s; anything else (a settings.json edited by hand) is the 2 s default
+    assert ffmpeg.mirror_encoder_args(encoder, 6000, 30, keyframe_seconds=3) == ffmpeg.mirror_encoder_args(
+        encoder, 6000, 30)
+    assert [ffmpeg.mirror_keyframe_seconds(v) for v in (1, 2, 5, 0, 3, "5", None, 2.0)] == [1, 2, 5, 2, 2, 2, 2, 2]
+
+
+def test_ffmpeg_for_mirroring_takes_the_keyframe_setting(monkeypatch):
+    monkeypatch.setattr(source, "_version", lambda ff: (7, 1))
+    settings = Settings(mirror_keyframe_seconds=1)
+    cmd = build_command("ffmpeg", settings, source=TEST_PATTERN, encoder="h264_nvenc", width=640, height=360, fps=30)
+    assert cmd[cmd.index("-g") + 1] == "30" and "expr:gte(t,n_forced*1)" in cmd
+    cmd = build_command("ffmpeg", Settings(), source=TEST_PATTERN, encoder="libx264", width=640, height=360, fps=30)
+    assert cmd[cmd.index("-g") + 1] == "60" and "keyint=60:min-keyint=60:scenecut=0" in cmd
+
+
 def test_mirror_command_test_pattern_and_desktop(monkeypatch):
     settings = Settings(video_bitrate_kbps=4000)
     monkeypatch.setattr(source, "_version", lambda ff: (7, 1))
@@ -487,11 +534,14 @@ def test_stage_times_percentiles_and_summary(caplog):
         times.add(1000, keyframe=i == 1, buffered=i * 1024, pipe=i * 1_000_000, send=500_000)
     times.add(400_000, keyframe=True, pipe=0, send=0)  # far over 8 frames' share of 8 Mbit/s
     times.drop()
+    times.add(1000, keyframe=False, late=True, age=250_000_000)  # a frame the network held up past its lead
     assert stats.percentile([float(i) for i in range(1, 101)], 0.5) == 51.0
     times.log_window(ntp_requests=4)
-    assert "pipe 50.0/95.0" in caplog.text and "dropped 1" in caplog.text and "up to 100 KB waiting" in caplog.text
+    assert "pipe 50.0/95.0" in caplog.text and "dropped 1, late 1" in caplog.text
+    assert "up to 100 KB waiting" in caplog.text
     summary = times.summary()
-    assert summary["frames"] == 101 and summary["keyframes"] == 2 and summary["send"] == (0.5, 0.5)
+    assert summary["frames"] == 102 and summary["keyframes"] == 2 and summary["send"] == (0.5, 0.5)
+    assert summary["dropped"] == 1 and summary["late"] == 1
     assert times.big_keyframes == 1 and summary["largest_keyframe"] == 400_000
     times.log_window(ntp_requests=9)
     assert "the TV asked for the time 5 times" in caplog.text
