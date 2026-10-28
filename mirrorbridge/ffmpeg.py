@@ -170,23 +170,25 @@ def has_input_format(ffmpeg: str, name: str) -> bool:
     return any(name in line.split()[1:2] for line in out.splitlines())
 
 
-_WORKING_ENCODERS: set[tuple[str, str]] = set()
+_WORKING_ENCODERS: set[tuple[str, str, bool]] = set()
 
 
-def encoder_works(ffmpeg: str, encoder: str) -> bool:
+def encoder_works(ffmpeg: str, encoder: str, mirror: bool = False) -> bool:
     """Encode a few real frames; listing in `-encoders` does not mean the GPU exists.
 
     Only successes are cached: a GPU encoder that is busy (OBS, ShadowPlay) or slow to
-    start right after logon gets probed again on the next cast.
+    start right after logon gets probed again on the next cast. mirror=True tries the
+    options of screen mirroring (mirror_encoder_args) instead of those of a cast.
     """
-    if (ffmpeg, encoder) in _WORKING_ENCODERS:
+    if (ffmpeg, encoder, mirror) in _WORKING_ENCODERS:
         return True
+    # Same options as a real cast, so an option the driver rejects shows up here.
+    options = mirror_encoder_args(encoder, 8000, 30) if mirror else _encoder_args(encoder, Settings(), gop=30)
     args = [
         ffmpeg, "-hide_banner", "-loglevel", "error",
         "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30",
         "-frames:v", "5", "-pix_fmt", "nv12" if encoder != "libx264" else "yuv420p",
-        # Same options as a real cast, so an option the driver rejects shows up here.
-        *_encoder_args(encoder, Settings(), gop=30), "-f", "null", "-",
+        *options, "-f", "null", "-",
     ]
     try:
         result = _run(args, timeout=20)
@@ -195,7 +197,7 @@ def encoder_works(ffmpeg: str, encoder: str) -> bool:
     if result.returncode != 0:
         _LOGGER.debug("Encoder %s unusable: %s", encoder, result.stderr.strip()[-300:])
         return False
-    _WORKING_ENCODERS.add((ffmpeg, encoder))
+    _WORKING_ENCODERS.add((ffmpeg, encoder, mirror))
     return True
 
 
@@ -203,13 +205,13 @@ def available_encoders(ffmpeg: str) -> list[str]:
     return [enc for enc in ENCODER_PREFERENCE if encoder_works(ffmpeg, enc)]
 
 
-def pick_encoder(ffmpeg: str, wanted: str) -> str:
+def pick_encoder(ffmpeg: str, wanted: str, mirror: bool = False) -> str:
     if wanted != "auto":
-        if encoder_works(ffmpeg, wanted):
+        if encoder_works(ffmpeg, wanted, mirror):
             return wanted
         _LOGGER.warning("Encoder %s does not work on this machine, auto-selecting", wanted)
     for enc in ENCODER_PREFERENCE:
-        if encoder_works(ffmpeg, enc):
+        if encoder_works(ffmpeg, enc, mirror):
             return enc
     raise RuntimeError(Text("no_encoder", "No working H.264 encoder found in this FFmpeg build"))
 
@@ -385,6 +387,38 @@ def _encoder_args(encoder: str, settings: Settings, gop: int) -> list[str]:
     return ["-c:v", encoder] + specific + rate + common
 
 
+# Screen mirroring (mirrorbridge.mirror) shows each frame about 100 ms after it was captured, so
+# the encoder may hold none back: no B-frames, no lookahead, no frames in flight, CBR with a VBV
+# of about one frame (which also keeps a keyframe from arriving as one big burst), and an IDR at
+# the start and then every MIRROR_KEYFRAME_SECONDS.
+MIRROR_KEYFRAME_SECONDS = 2
+MIRROR_VBV_FRAMES = 1.0
+
+
+def mirror_encoder_args(encoder: str, kbps: int, fps: int, vbv_frames: float = MIRROR_VBV_FRAMES) -> list[str]:
+    gop = max(1, round(fps * MIRROR_KEYFRAME_SECONDS))
+    bufsize = max(1, round(kbps * vbv_frames / max(1, fps)))
+    rate = ["-b:v", f"{kbps}k", "-maxrate", f"{kbps}k", "-bufsize", f"{bufsize}k"]
+    common = ["-g", str(gop), "-bf", "0", "-force_key_frames", f"expr:gte(t,n_forced*{MIRROR_KEYFRAME_SECONDS})"]
+    if encoder == "h264_nvenc":
+        # -delay 0: NVENC otherwise keeps about 3 frames in flight (50 ms at 60 fps).
+        specific = ["-preset", "p4", "-tune", "ll", "-rc", "cbr", "-profile:v", "high", "-zerolatency", "1",
+                    "-delay", "0", "-forced-idr", "1"]
+    elif encoder == "h264_qsv":
+        # -async_depth 1: Quick Sync works 4 frames ahead by default.
+        specific = ["-preset", "veryfast", "-look_ahead", "0", "-async_depth", "1", "-low_delay_brc", "1",
+                    "-forced_idr", "1", "-profile:v", "high"]
+    elif encoder == "h264_amf":
+        specific = ["-usage", "ultralowlatency", "-quality", "speed", "-rc", "cbr", "-latency", "1",
+                    "-enforce_hrd", "1", "-profile:v", "high"]
+    elif encoder == "h264_mf":
+        specific = ["-rate_control", "cbr", "-scenario", "display_remoting", "-hw_encoding", "1"]
+    else:
+        specific = ["-preset", "veryfast", "-tune", "zerolatency", "-profile:v", "high",
+                    "-x264-params", f"keyint={gop}:min-keyint={gop}:scenecut=0"]
+    return ["-c:v", encoder] + specific + rate + common
+
+
 def build_command(
     ffmpeg: str,
     settings: Settings,
@@ -462,12 +496,13 @@ def build_command(
     return cmd
 
 
-def popen(cmd: list[str]) -> subprocess.Popen:
+def popen(cmd: list[str], stdout: int = subprocess.DEVNULL) -> subprocess.Popen:
+    """Start FFmpeg; stdout=subprocess.PIPE to read what it writes to pipe:1."""
     _LOGGER.debug("Starting: %s", subprocess.list2cmdline(cmd))
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,  # 'q' on stdin = graceful stop
-        stdout=subprocess.DEVNULL,
+        stdout=stdout,
         stderr=subprocess.PIPE,
         creationflags=_NO_WINDOW,
         env={**os.environ, "AV_LOG_FORCE_NOCOLOR": "1"},
