@@ -103,9 +103,12 @@ class DataChannel:
         self._writer.close()
         try:
             await asyncio.wait_for(self._writer.wait_closed(), seconds)
-        except (OSError, asyncio.TimeoutError, ConnectionError):
+        except asyncio.TimeoutError:
+            # Only then: once a close has sent what was buffered, asyncio's transport has let go
+            # of its loop, and abort() would raise.
+            self._writer.transport.abort()  # what is left is dropped
+        except (OSError, ConnectionError):
             pass
-        self._writer.transport.abort()  # nothing if it closed; else what is left is dropped
 
     def __repr__(self) -> str:
         peer: Optional[tuple] = self._writer.get_extra_info("peername")

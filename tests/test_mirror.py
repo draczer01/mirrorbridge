@@ -16,6 +16,7 @@ from mirrorbridge import ffmpeg
 from mirrorbridge.config import Settings
 from mirrorbridge.mirror import clock, flv, h264, packets, profiles, source, stats
 from mirrorbridge.mirror.control import ReceiverInfo, Target, parse_features, sender_id
+from mirrorbridge.mirror.datachannel import DataChannel
 from mirrorbridge.mirror.errors import no_timing, refused
 from mirrorbridge.mirror.negotiation import CONTROL_FIRST, MEDIA_FIRST, PTP, Plan
 from mirrorbridge.mirror.session import canvas_limit, choose_canvas, choose_fps, send_buffer
@@ -414,7 +415,7 @@ def test_mirror_command_test_pattern_and_desktop(monkeypatch):
     assert cmd[cmd.index("-vf") + 1] == "format=yuv420p" and "-an" in cmd
     # FFmpeg holds at most 2 captured frames, and paces the test pattern from its first frame.
     assert cmd[cmd.index("-thread_queue_size") + 1] == "2"
-    assert cmd[cmd.index("-re"):cmd.index("-re") + 3] == ["-re", "-readrate_initial_burst", "0"]
+    assert cmd[cmd.index("-re"):cmd.index("-re") + 3] == ["-re", "-readrate_initial_burst", "0.001"]
     monkeypatch.setattr(source, "_version", lambda ff: (6, 0))
     cmd = build_command("ffmpeg", settings, source=TEST_PATTERN, encoder="libx264", width=640, height=360, fps=30)
     assert "-readrate_initial_burst" not in cmd  # an FFmpeg that does not know it
@@ -497,3 +498,24 @@ def test_stage_times_count_what_ffmpeg_delivers_not_what_the_tv_takes(caplog, mo
     times.log_last()
     assert "Mirroring: 30.5 fps (of 30)" in caplog.text and "cannot keep up" not in caplog.text
     assert times.frames == 6 and times.slow_windows == 0
+
+
+async def test_the_video_connection_closes_cleanly_once_its_buffer_went_out():
+    """A close with video still buffered sends it, and then asyncio's transport lets go of its
+    loop: the connection must not be aborted after that (it raised AttributeError)."""
+    received = bytearray()
+
+    async def tv(reader, writer):
+        received.extend(await reader.read())
+        writer.close()
+
+    server = await asyncio.start_server(tv, "127.0.0.1", 0)
+    try:
+        data = await DataChannel.open("127.0.0.1", server.sockets[0].getsockname()[1], buffer=16384)
+        data.write(b"x" * 2_000_000)  # more than the socket takes at once: the rest waits in asyncio
+        assert data.buffered > 0
+        await data.close()
+    finally:
+        server.close()
+        await server.wait_closed()
+    assert len(received) == 2_000_000

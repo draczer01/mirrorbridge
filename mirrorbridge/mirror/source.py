@@ -67,12 +67,13 @@ def _version(ff: str) -> tuple[int, int]:
 
 def _paced(video_in: list[str], ff: str) -> list[str]:
     """With -re, FFmpeg 6.1 and later read the first half second of input at once: as many
-    frames, stamped a few ms apart, then the real pace. -readrate_initial_burst 0 makes the
-    first frames come at the pace of the others too."""
+    frames, stamped a few ms apart, then the real pace. A tiny -readrate_initial_burst makes the
+    first frames come at the pace of the others too (0 does not: FFmpeg takes it as "use the
+    default", half a second)."""
     if "-re" not in video_in or _version(ff) < (6, 1):
         return video_in
     at = video_in.index("-re") + 1
-    return video_in[:at] + ["-readrate_initial_burst", "0"] + video_in[at:]
+    return video_in[:at] + ["-readrate_initial_burst", "0.001"] + video_in[at:]
 
 
 def build_command(

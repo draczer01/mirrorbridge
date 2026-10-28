@@ -374,7 +374,7 @@ async def test_two_seconds_of_test_pattern_reach_the_tv_and_decode(tv, tmp_path,
     assert max(ahead) <= 100 * NS // 1000 and statistics.median(ahead) > 40 * NS // 1000
     assert sum(1 for a in ahead if a > 40 * NS // 1000) >= 0.9 * len(ahead)
     # Paced from the first frame: no burst of frames stamped a few ms apart at the start.
-    assert statistics.median(b[0] - a[0] for a, b in zip(video.frames[:10], video.frames[1:11])) > 20 << 32 // 1000
+    assert statistics.median(b[0] - a[0] for a, b in zip(video.frames[:10], video.frames[1:11])) > (20 << 32) // 1000
     frames, size = _decode(ff, bytes(video.annexb), tmp_path)
     assert frames == len(video.frames) and size == "640x360"
 
@@ -517,7 +517,7 @@ async def test_a_slow_tv_gets_fewer_frames_not_later_ones(tv):
     that a TV that reads slowly pushes back at once and frames are dropped rather than queued."""
     _ffmpeg()
     tv.reconfigure(read_kbps=60, video_buffer=8192)
-    session = MirrorSession(tv.target(), SETTINGS, source=TEST_PATTERN, seconds=4, remember=False)
+    session = MirrorSession(tv.target(), SETTINGS, source=TEST_PATTERN, seconds=8, remember=False)
     await asyncio.wait_for(session.run(), 60)
     (video,) = tv.videos
     assert session.report.latency["dropped"] > 0 and session.error is None
