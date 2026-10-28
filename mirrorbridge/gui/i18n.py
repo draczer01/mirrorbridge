@@ -46,6 +46,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Pair with this TV first: {menu_pair}.",
         "es": "Primero empareja esta TV: {menu_pair}.",
     },
+    "mirror_not_offered": {
+        "en": "This receiver does not say that it takes screen mirroring.",
+        "es": "Este receptor no indica que admita la duplicación de pantalla.",
+    },
     "device_menu": {"en": "Device", "es": "Dispositivo"},
     "searching": {"en": "Searching…", "es": "Buscando…"},
     "no_devices": {"en": "No devices found", "es": "No se encontraron dispositivos"},
@@ -158,6 +162,21 @@ _STRINGS: dict[str, dict[str, str]] = {
               "MirrorBridge, elige Permitir. No se envía nada de la pantalla de este equipo.\n\nAl final, "
               "MirrorBridge dice qué funcionó y dónde está el informe: mándalo con tu reporte del problema y di "
               "si apareció la imagen de prueba en movimiento.",
+    },
+    # The same, for a TV whose screen mirroring test is skipped ({why}: probe_mirror_fairplay...)
+    "probe_intro_no_mirror": {
+        "en": "MirrorBridge will try three ways of sending {device} a video, one after the other, for about "
+              "two minutes in all. Watch the TV: it may show Apple's test video, then MirrorBridge's test "
+              "pattern. If the TV asks whether to allow MirrorBridge, choose Allow. Nothing from this PC's "
+              "screen is sent. The fourth test, screen mirroring, is skipped: {why}.\n\nAt the end "
+              "MirrorBridge says what worked, and where the report is: please send that report with your bug "
+              "report.",
+        "es": "MirrorBridge probará tres formas de enviar un video a {device}, una tras otra, durante unos dos "
+              "minutos en total. Mira la TV: puede mostrar el video de prueba de Apple y luego la imagen de "
+              "prueba de MirrorBridge. Si la TV pregunta si permite MirrorBridge, elige Permitir. No se envía "
+              "nada de la pantalla de este equipo. La cuarta prueba, la duplicación de pantalla, se omite: "
+              "{why}.\n\nAl final, MirrorBridge dice qué funcionó y dónde está el informe: mándalo con tu "
+              "reporte del problema.",
     },
     "probe_start": {"en": "Start the test", "es": "Empezar la prueba"},
     "status_probing": {"en": "Testing {device}: {step}…", "es": "Probando {device}: {step}…"},
@@ -479,6 +498,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Screen mirroring did not work with {device}. Please report this TV, with mirrorbridge.log.",
         "es": "La duplicación de pantalla no funcionó con {device}. Avisa de esta TV y manda mirrorbridge.log.",
     },
+    "mirror_profile": {
+        "en": "{ordering}, {audio}, {timing} timing, avcC ending {trailer}, lead {lead} ms",
+        "es": "{ordering}, {audio}, sincronización {timing}, final del avcC {trailer}, adelanto de {lead} ms",
+    },
+    "mirror_with_audio": {"en": "with the audio stream", "es": "con el flujo de audio"},
+    "mirror_without_audio": {"en": "without the audio stream", "es": "sin el flujo de audio"},
     "mirror_probe_time_up": {
         "en": "The screen mirroring test was stopped after {seconds} s, before it found a way that works.",
         "es": "La prueba de duplicación de pantalla se detuvo a los {seconds} s, antes de encontrar una forma que "
@@ -713,6 +738,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "la TV necesita FairPlay para duplicar la pantalla, como los Apple TV y los Mac, y MirrorBridge "
               "todavía no lo tiene",
     },
+    "probe_mirror_unsupported": {
+        "en": "the TV does not say that it takes screen mirroring",
+        "es": "la TV no indica que admita la duplicación de pantalla",
+    },
     "probe_mirror_unpaired": {
         "en": "MirrorBridge is not paired with this TV, and screen mirroring needs it: use {menu_pair} first",
         "es": "MirrorBridge no está emparejado con esta TV, y la duplicación de pantalla lo necesita: usa primero "
@@ -723,6 +752,12 @@ _STRINGS: dict[str, dict[str, str]] = {
               "pattern went to it, and it asked for the time {times} times. What worked: {how}",
         "es": "la TV aceptó la sesión de duplicación de pantalla y mantuvo abierto el video: recibió {frames} "
               "fotogramas de la imagen de prueba y pidió la hora {times} veces. Lo que funcionó: {how}",
+    },
+    "probe_mirror_cut": {
+        "en": "the TV accepted the screen mirroring session, but the test ran out of time before the video check "
+              "ended: {error}",
+        "es": "la TV aceptó la sesión de duplicación de pantalla, pero a la prueba se le acabó el tiempo antes de "
+              "terminar de comprobar el video: {error}",
     },
     "probe_mirror_no_video": {
         "en": "the TV accepted the screen mirroring session, but did not keep the video open: {error}",
@@ -818,6 +853,12 @@ _STRINGS: dict[str, dict[str, str]] = {
               "open.",
         "es": "{conclusion} {menu_mirror} debería funcionar en esta TV: aceptó la duplicación de pantalla y mantuvo "
               "abierto el video.",
+    },
+    "probe_mirror_not_working": {
+        "en": "{conclusion} {menu_mirror} did not work on this TV in the test: please send the report, and say "
+              "whether the moving test pattern appeared on the TV.",
+        "es": "{conclusion} {menu_mirror} no funcionó en esta TV durante la prueba: manda el informe y di si "
+              "apareció la imagen de prueba en movimiento en la TV.",
     },
     "probe_mirror_only": {
         "en": "{device} did not take the video it was sent to cast, but {menu_mirror} should work on this TV: it "

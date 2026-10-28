@@ -1,5 +1,6 @@
-"""Mirror screen in the tray menu (and the window): offered for a paired TV that does not need
-FairPlay, run as a cast is run, shown and stopped as a cast is, and one session at a time.
+"""Mirror screen in the tray menu (and the window): offered for a paired TV that offers screen
+mirroring and does not need FairPlay, run as a cast is run, shown and stopped as a cast is, and
+one session at a time.
 
 The sessions go to the TCL 55QM7L of fake_mirror_tv.py, which runs on the controller's own
 asyncio loop. Qt runs offscreen, on a controller that neither scans the network nor tests
@@ -24,6 +25,8 @@ from mirrorbridge.session import State
 
 TCL_TXT = {"features": "0x7F8AD0,0x38BCF46", "srcvers": "377.40.00", "model": "55QM7L", "manufacturer": "TCL"}
 APPLE_TV_TXT = {"features": "0x4A7FDFD5,0xBC157FDE", "srcvers": "690.7.1", "model": "AppleTV11,1"}  # bit 14
+NO_SCREEN_TXT = {**TCL_TXT, "features": "0x7F8A50,0x38BCF46"}  # the TCL's, without bit 7 (screen mirroring)
+SPEAKER_TXT = {"features": "0x445F8A00,0x1C340", "model": "Era 100", "manufacturer": "Sonos"}  # audio only
 MIRROR = "Mirror screen (low latency, experimental)"
 
 _APP = None  # one QApplication for every test here; it must outlive them
@@ -182,6 +185,24 @@ def test_an_apple_tv_is_told_mirroring_is_coming(controller):
     assert not controller.is_active
 
 
+@pytest.mark.parametrize("txt", [NO_SCREEN_TXT, SPEAKER_TXT], ids=["no-bit-7", "speaker"])
+def test_a_receiver_that_does_not_mirror_is_not_offered_it(controller, txt):
+    from mirrorbridge.gui.window import MainWindow
+
+    _choose(controller, _device(txt=txt, name="Kitchen"))
+    item = _items(_tray(controller))[MIRROR]
+    assert not item.isEnabled() and item.toolTip() == "This receiver does not say that it takes screen mirroring."
+    window = MainWindow(controller)
+    assert not window.mirror_btn.isEnabled() and window.mirror_btn.toolTip() == item.toolTip()
+    controller.start_mirror()
+    assert not controller.is_active and controller.session is None
+    _choose(controller, _device(txt=txt, name="Kitchen", credentials=None))  # not "pair first": it would not help
+    assert _items(_tray(controller))[MIRROR].toolTip() == item.toolTip()
+    controller.set_language("es")
+    assert _items(_tray(controller))["Duplicar pantalla (baja latencia, experimental)"].toolTip() == (
+        "Este receptor no indica que admita la duplicación de pantalla.")
+
+
 def test_mirror_screen_in_spanish(controller):
     from mirrorbridge.gui.window import MainWindow
 
@@ -281,6 +302,37 @@ def test_a_failed_mirror_is_reported_as_a_failed_cast_is(controller, tv):
     assert window.status_label.text() == f"Falló: {error}"
     assert controller.cast_state == State.FAILED and controller.status()[0] == "idle"
     _until(lambda: _tasks(controller) == before, 5)
+
+
+def test_mirror_screen_goes_on_with_gdi_capture_when_ddagrab_fails(controller, tv, monkeypatch):
+    """As a cast does on a PC whose graphics driver refuses Desktop Duplication: FFmpeg's first
+    choice ends before its first frame, and the session the TV set up goes on with GDI capture."""
+    from mirrorbridge.mirror import session as mirror_session
+
+    _ffmpeg()
+    build = mirror_session.build_command
+
+    def command(ff, settings, *, backend="", **kw):
+        if backend == "ddagrab":  # FFmpeg ends at once, as when DXGI says no
+            return [ff, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "nullsrc", "-vf", "ddagrab_refused",
+                    "-f", "flv", "pipe:1"]
+        return build(ff, settings, backend="test" if backend == "gdigrab" else backend, **kw)  # GDI's picture
+
+    monkeypatch.setattr(ffmpeg, "pick_capture_backend", lambda *args: "ddagrab")
+    monkeypatch.setattr(mirror_session, "build_command", command)
+    _choose(controller, _device(tv.port))
+    notes, states = [], []
+    controller.notify.connect(lambda *note: notes.append(note))
+    controller.cast_state_changed.connect(lambda state, message: states.append((state, str(message))))
+    controller.start_mirror()
+    _until(lambda: controller.cast_state == State.CASTING, 30)
+    starting = [message for state, message in states if state == State.STARTING]
+    assert starting[-2:] == ["x264 (CPU) via ddagrab", "x264 (CPU) via gdigrab"]
+    _until(lambda: tv.videos and len(tv.videos[0].frames) >= 5, 15)
+    controller.stop_cast()
+    _until(lambda: controller.session_future is None, 30)
+    assert notes == [("Mirroring to TCL 55QM7L", "", False), ("Screen mirroring stopped", "", False)]
+    assert controller.cast_state == State.STOPPED and tv.records == 1 and tv.teardowns == 1
 
 
 def test_a_tv_that_ends_mirroring_says_so(controller, tv):

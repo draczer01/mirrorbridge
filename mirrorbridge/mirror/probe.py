@@ -5,17 +5,21 @@ limit of its own and each SETUP on a fresh pair-verified connection:
 
 1. whether the TV needs FairPlay (an Apple TV or a Mac: nothing more is tried);
 2. pair-verify and GET /info;
-3. the SETUP shapes that `variants` names (both orderings, with and without the silent audio
-   stream, and PTP timing, to learn whether the TV gives a ClockID), each torn down at once;
-4. a few seconds of the test pattern with the shape that worked, through a whole session: the
+3. the SETUP shapes, the saved (or default) one first, until the TV takes one, each torn down
+   at once;
+4. a few seconds of the test pattern with the shape it took, through a whole session: the
    video connection, RECORD, /feedback, the TV asking for the time, frames; if the TV drops the
-   video connection, again with the other way of ending the avcC record ("trailer"). Without
-   the test pattern, the video connection is only held open for a moment, and the TV must
-   still ask for the time.
+   video connection, again with the other way of ending the avcC record ("trailer"), then with
+   the other ordering. Without the test pattern, the video connection is only held open for a
+   moment, and the TV must still ask for the time. What worked is saved for the device
+   (profiles.py) there and then, so the next session asks for it at once;
+5. for the report, the rest of what `variants` names, in the time left: the shape that worked
+   without (or with) the silent audio stream, PTP timing (does the TV give a ClockID), and the
+   other ordering.
 
-What worked is saved for the device (profiles.py), so the next session asks for it at once.
-Whatever happens, every session the probe set up is torn down, also when the probe is given a
-time limit in all (Test this TV gives it one) and runs out of it.
+The test pattern comes as soon as the TV has taken a SETUP, so that a time limit in all (Test
+this TV gives one) goes on what the person watches the TV for, and on what Mirror screen needs.
+Whatever happens, every session the probe set up is torn down, also when that limit runs out.
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ from typing import Callable, Iterable, Optional
 
 from ..airplay_patch import format_steps
 from ..config import Settings
+from ..session import State
 from ..text import Text
 from . import profiles
 from .clock import NtpResponder, bind_udp
@@ -55,6 +60,7 @@ STREAM_SETUP_SECONDS = 75  # a stream check's time on top of the seconds it stre
 DATA_HOLD_SECONDS = 2.0  # without the test pattern: how long the video connection is held open
 TIMING_WAIT_SECONDS = 5.0  # and then how much longer the TV may take to ask for the time
 MAX_STREAM_CHECKS = 3
+FIT_MARGIN_SECONDS = 2.0  # with a time limit, a step for the report starts only with this to spare
 
 
 @dataclass
@@ -96,6 +102,7 @@ class StreamCheck:
     report: Optional[SessionReport] = None
     note: str = ""  # in short why it failed (English, for lines())
     error: Optional[str] = None  # why it failed, a Text
+    stopped: bool = False  # the probe's time limit ran out while it went
 
     def line(self) -> str:
         report = self.report
@@ -116,7 +123,7 @@ class StreamCheck:
         latency = {k: v for k, v in report.latency.items() if isinstance(v, tuple)}
         if latency:
             parts.append("ms p50/p95 " + ", ".join(f"{stage} {p50}/{p95}" for stage, (p50, p95) in latency.items()))
-        verdict = "ok" if self.worked else f"failed: {self.note or self.error}"
+        verdict = "ok" if self.worked else self.note if self.stopped else f"failed: {self.note or self.error}"
         return f"{head}: {verdict}; " + "; ".join(parts) + f" [{format_steps(report.steps)}]"
 
 
@@ -139,6 +146,7 @@ class ProbeResult:
     profile: Optional[profiles.MirrorProfile] = None
     saved: Optional[Path] = None
     error: Optional[str] = None  # why it did not work, a Text
+    not_tried: list[str] = field(default_factory=list)  # what `variants` named, left out for lack of time
     seconds: float = 0.0
 
     @property
@@ -185,6 +193,8 @@ class ProbeResult:
             retry = {None: "", True: "; NTP on a fresh pair-verify: ok", False: "; NTP on a fresh pair-verify: failed"}
             out.append(f"PTP: {self.ptp}{retry[self.ntp_after_ptp]}")
         out += [check.line() for check in self.streams]
+        if self.not_tried:
+            out.append("Not tried, for lack of time: " + "; ".join(self.not_tried))
         if self.saved is not None:
             out.append(f"Saved to {self.saved}")
         out.append(str(self.conclusion()))
@@ -202,7 +212,8 @@ def _short(ex: MirrorError) -> str:
 
 class _Probe:
     def __init__(self, target: Target, settings: Settings, *, seconds: float, send_test_pattern: bool,
-                 variants: Iterable[str], save: bool, progress: Callable[[str], None]) -> None:
+                 variants: Iterable[str], save: bool, progress: Callable[[str], None],
+                 on_pattern: Callable[[], None], deadline: Optional[float]) -> None:
         self.target = target
         self.settings = settings
         self.seconds = seconds
@@ -210,12 +221,16 @@ class _Probe:
         self.variants = set(variants)
         self.save = save
         self.progress = progress
+        self.on_pattern = on_pattern
+        self.deadline = deadline  # time.monotonic() when the time limit runs out, None without one
         self.start = profiles.load(target.identifier) or profiles.MirrorProfile()
         self.result = ProbeResult(target.name, f"{target.address}:{target.port}", fairplay=target.needs_fairplay,
                                   features=target.features, srcvers=target.srcvers)
         self.negotiator = Negotiator(target, timing_port=0, audio_port=0)
         self.transports: list[asyncio.BaseTransport] = []
-        self.responder: Optional[NtpResponder] = None  # the timing port the SETUPs name (without the test pattern)
+        self.responder: Optional[NtpResponder] = None  # the timing port the SETUPs name
+        self.local_ip = ""  # this PC's address towards the TV
+        self.slowest = 0.0  # the longest a SETUP shape has taken so far, in s
 
     def say(self, line: str) -> None:
         _LOGGER.info("Probe: %s", line)
@@ -223,6 +238,12 @@ class _Probe:
             self.progress(line)
         except Exception:  # pylint: disable=broad-except
             _LOGGER.exception("Probe progress callback failed")
+
+    def _pattern_shown(self) -> None:
+        try:
+            self.on_pattern()
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.exception("Probe callback failed")
 
     async def run(self) -> ProbeResult:
         result = self.result
@@ -232,28 +253,59 @@ class _Probe:
         try:
             if not await self._info():
                 return result
-            working = await self._setups()
-            if not working:
+            plans = self._plans()
+            plan = await self._first(plans)
+            if plan is None:
                 return result
-            if self.send_test_pattern:
-                self._close_udp()  # the sessions bind their own ports, from the first of the range
-            await self._streams(working)
+            plan = await self._streams(plan, plans)
+            await self._rest(plan, plans)
         finally:
             self._close_udp()
             self.negotiator.close()
-        if result.profile is not None and self.save and self.target.identifier:
-            info = result.info.summary() if result.info else ""
-            try:
-                result.saved = profiles.save(self.target.identifier, result.profile, name=self.target.name, info=info)
-            except OSError as ex:
-                _LOGGER.warning("Could not save how to mirror to %s: %s", self.target.name, ex)
         return result
+
+    def ran_out(self, limit: float) -> None:
+        """The time limit stopped the probe: a stream check under way says how far it got."""
+        result = self.result
+        check = result.streams[-1] if result.streams else None
+        if check is not None and not check.worked and check.error is None:
+            check.stopped = True
+            check.note = (f"stopped by the time limit after {check.report.frames_sent if check.report else 0} "
+                          "frames")
+            check.error = time_up(limit)
+        if result.profile is None:
+            result.error = time_up(limit)
+
+    def _save(self) -> None:
+        """What worked, for the device's next session (Mirror screen's too), as soon as it is known."""
+        result = self.result
+        if result.profile is None or not self.save or not self.target.identifier:
+            return
+        info = result.info.summary() if result.info else ""
+        try:
+            result.saved = profiles.save(self.target.identifier, result.profile, name=self.target.name, info=info)
+        except OSError as ex:
+            _LOGGER.warning("Could not save how to mirror to %s: %s", self.target.name, ex)
+
+    async def _bind_udp(self) -> None:
+        """The timing port (answered by an NtpResponder) and the audio control port the SETUPs name."""
+        transport, responder = await bind_udp(NtpResponder, self.local_ip)
+        self.transports.append(transport)
+        self.responder = responder
+        self.negotiator.timing_port = responder.port
+        transport, _ = await bind_udp(asyncio.DatagramProtocol, self.local_ip, taken=(responder.port,))
+        self.transports.append(transport)
+        self.negotiator.audio_port = transport.get_extra_info("sockname")[1]
 
     def _close_udp(self) -> None:
         for transport in self.transports:
             transport.close()
         self.transports.clear()
         self.responder = None
+
+    def _fits(self, setups: int) -> bool:
+        """Whether `setups` more SETUP shapes fit in the time limit, at the pace the TV has answered."""
+        return self.deadline is None or time.monotonic() + setups * self.slowest + FIT_MARGIN_SECONDS < self.deadline
 
     # -- 2. pair-verify and /info -----------------------------------------------------------------
 
@@ -262,13 +314,8 @@ class _Probe:
         try:
             channel = await asyncio.wait_for(self.negotiator.connect(), INFO_STEP_SECONDS)
             self.result.pair_verify = "ok"
-            transport, responder = await bind_udp(NtpResponder, channel.local_ip)
-            self.transports.append(transport)
-            self.responder = responder
-            self.negotiator.timing_port = responder.port
-            transport, _ = await bind_udp(asyncio.DatagramProtocol, channel.local_ip, taken=(responder.port,))
-            self.transports.append(transport)
-            self.negotiator.audio_port = transport.get_extra_info("sockname")[1]
+            self.local_ip = channel.local_ip
+            await self._bind_udp()
             self.result.info = await asyncio.wait_for(channel.info(), INFO_STEP_SECONDS)
         except MirrorError as ex:
             if self.result.pair_verify == "ok":  # no /info: SETUP may work all the same
@@ -302,8 +349,11 @@ class _Probe:
 
     async def _attempt(self, plan: Plan) -> SetupAttempt:
         attempt = SetupAttempt(plan)
+        if not self.transports:  # a stream check closed them
+            await self._bind_udp()
         self.negotiator.steps = attempt.steps
         established = None
+        started = time.monotonic()
         try:
             established = await asyncio.wait_for(self._establish(plan), SETUP_STEP_SECONDS)
         except MirrorError as ex:
@@ -320,6 +370,8 @@ class _Probe:
             if established is not None:
                 await self.negotiator.teardown(established.uri)
             self.negotiator.close()
+        self.slowest = max(self.slowest, time.monotonic() - started)
+        self.result.setups.append(attempt)
         self.say(attempt.line())
         return attempt
 
@@ -327,31 +379,45 @@ class _Probe:
         await self.negotiator.connect()
         return await self.negotiator.establish(plan)
 
-    async def _setups(self) -> list[Plan]:
-        """Try the shapes; returns those that worked, the best first."""
-        working: list[Plan] = []
-        for plan in self._plans():
+    async def _first(self, plans: list[Plan]) -> Optional[Plan]:
+        """The shapes in turn, each leaving `plans`, until the TV takes one: that shape as the
+        TV took it (the ordering and timing used), None if it took none."""
+        while plans:
+            plan = plans.pop(0)
             self.say(f"SETUP {plan.describe()}")
             attempt = await self._attempt(plan)
-            self.result.setups.append(attempt)
             if attempt.worked and attempt.established is not None:
-                used = dataclasses.replace(attempt.established.plan, fallback=True)
-                if used not in working:
-                    working.append(used)
-            elif attempt.steps.get("pair-verify") not in (None, "ok"):
+                return dataclasses.replace(attempt.established.plan, fallback=True)
+            if attempt.steps.get("pair-verify") not in (None, "ok"):
                 self.result.error = attempt.error  # the pairing is gone: nothing else will work
-                break
-        if TIMING in self.variants and working:
-            await self._ptp(working[0])
-        if not working and self.result.error is None:
-            failed = self.result.setups[-1] if self.result.setups else None
-            self.result.error = failed.error if failed else None
-        return working
+                return None
+        failed = self.result.setups[-1] if self.result.setups else None
+        self.result.error = failed.error if failed else None
+        return None
+
+    async def _rest(self, plan: Plan, plans: list[Plan]) -> None:
+        """For the report, while time is left: `plan` (what the TV took) with the audio stream
+        the other way round, then PTP, then the other ordering, as far as `variants` names them."""
+        steps = [(other, False) for other in plans if other.ordering == plan.ordering]
+        if TIMING in self.variants:
+            steps.append((dataclasses.replace(plan, timing=PTP, fallback=True), True))
+        steps += [(other, False) for other in plans if other.ordering != plan.ordering]
+        for shape, ptp in steps:
+            if not self._fits(2 if ptp else 1):  # PTP takes a second SETUP when the TV gives no ClockID
+                self.say(f"SETUP {shape.describe()}: not tried, for lack of time")
+                self.result.not_tried.append(f"SETUP {shape.describe()}")
+                continue
+            if ptp:
+                await self._ptp(shape)
+                continue
+            self.say(f"SETUP {shape.describe()}")
+            attempt = await self._attempt(shape)
+            if attempt.steps.get("pair-verify") not in (None, "ok"):
+                return  # the pairing is gone: nothing else will work
 
     async def _ptp(self, plan: Plan) -> None:
         self.say("SETUP with PTP timing, to see whether the TV gives a ClockID")
-        attempt = await self._attempt(dataclasses.replace(plan, timing=PTP, fallback=True))
-        self.result.setups.append(attempt)
+        attempt = await self._attempt(plan)
         clock = attempt.steps.get("ptp clock")
         if clock is None:
             self.result.ptp = f"refused ({format_steps(attempt.steps)})"
@@ -364,38 +430,67 @@ class _Probe:
 
     # -- 4. the video ------------------------------------------------------------------------------
 
-    def _checks(self, working: list[Plan]) -> list[tuple[Plan, str]]:
+    def _trailers(self) -> list[str]:
+        """The avcC endings to try: the saved (or default) one, then, if `variants` names it, the other."""
         trailers = [self.start.trailer] + [t for t in TRAILERS if t != self.start.trailer]
         if TRAILER not in self.variants or not self.send_test_pattern:
-            trailers = trailers[:1]
-        checks = [(working[0], trailer) for trailer in trailers]
-        checks += [(plan, trailers[0]) for plan in working[1:] if plan.ordering != working[0].ordering]
-        return checks[:MAX_STREAM_CHECKS]
+            return trailers[:1]
+        return trailers
 
-    async def _streams(self, working: list[Plan]) -> None:
-        for plan, trailer in self._checks(working):
-            check = await (self._stream(plan, trailer) if self.send_test_pattern else self._hold(plan, trailer))
-            self.result.streams.append(check)
+    async def _streams(self, plan: Plan, plans: list[Plan]) -> Plan:
+        """The video with `plan`; if the TV drops it, with the other avcC ending, then with the
+        other ordering. Returns the shape that worked (saved there and then), else `plan`."""
+        trailers = self._trailers()
+        checks = [(plan, trailer) for trailer in trailers]
+        while checks and len(self.result.streams) < MAX_STREAM_CHECKS:
+            shape, trailer = checks.pop(0)
+            check = StreamCheck(shape, trailer)
+            self.result.streams.append(check)  # there already if the time limit stops it
+            await (self._stream(check) if self.send_test_pattern else self._hold(check))
             self.say(check.line())
             if check.worked:
-                profile = profiles.MirrorProfile.of(plan, trailer)
-                self.result.profile = profile
-                return
+                self.result.profile = profiles.MirrorProfile.of(shape, trailer)
+                self._save()
+                return shape
             report = check.report
             dropped = report is not None and (report.data_closed_after is not None or report.data_channel != "open")
             if not dropped:
                 # Not something another avcC ending or ordering changes (the time, the encoder...).
                 self.result.error = check.error
-                return
+                return plan
+            if not checks:
+                other = await self._other_ordering(shape, plans)
+                if other is not None:
+                    checks.append((other, trailers[0]))
         last = self.result.streams[-1] if self.result.streams else None
         self.result.error = last.error if last is not None else None
+        return plan
 
-    async def _stream(self, plan: Plan, trailer: str) -> StreamCheck:
+    async def _other_ordering(self, plan: Plan, plans: list[Plan]) -> Optional[Plan]:
+        """For a TV that drops the video: the other ordering, if `variants` names it, it is
+        still to be tried, and the TV takes it (as the TV took it)."""
+        other = next((shape for shape in plans if shape.ordering != plan.ordering and shape.audio == plan.audio), None)
+        if ORDERING not in self.variants or other is None:
+            return None
+        plans.remove(other)
+        self.say(f"SETUP {other.describe()}")
+        attempt = await self._attempt(other)
+        if attempt.worked and attempt.established is not None:
+            return dataclasses.replace(attempt.established.plan, fallback=True)
+        return None
+
+    async def _stream(self, check: StreamCheck) -> None:
         """A whole session of the test pattern, `self.seconds` long."""
-        check = StreamCheck(plan, trailer)
+        plan, trailer = check.plan, check.trailer
+        self._close_udp()  # the session binds its own ports, from the first of the range
         self.say(f"{self.seconds:g} s of the test pattern: {plan.describe()}, avcC ending {trailer}")
         profile = profiles.MirrorProfile(plan.ordering, plan.audio, NTP, trailer, plan.lead_ms)
-        session = MirrorSession(self.target, self.settings, source=TEST_PATTERN, profile=profile,
+
+        def status(state: State, _message: str) -> None:
+            if state == State.CASTING:  # its first frame went to the TV: the time to look
+                self._pattern_shown()
+
+        session = MirrorSession(self.target, self.settings, status, source=TEST_PATTERN, profile=profile,
                                 seconds=self.seconds, remember=False)
         check.report = session.report
         try:
@@ -406,9 +501,11 @@ class _Probe:
         except Exception as ex:  # pylint: disable=broad-except
             _LOGGER.debug("Probe stream failed", exc_info=True)
             check.error = message_of(ex)
-        report = check.report = session.report  # a new one if the session was set up again
+        finally:
+            check.report = session.report  # as it ended, also when the time limit stopped it
+        report = check.report
         if check.error is not None:
-            return check
+            return
         if not report.frames_sent:
             check.note = "no frames went to the TV"
             check.error = Text("mirror_no_frames", "No video went to {device}: FFmpeg made no frame in {seconds} s.",
@@ -418,14 +515,14 @@ class _Probe:
             check.error = message_of(no_timing(report.timing_port, report.steps))
         else:
             check.worked = True
-        return check
 
-    async def _hold(self, plan: Plan, trailer: str) -> StreamCheck:
+    async def _hold(self, check: StreamCheck) -> None:
         """Without the test pattern: set up, open the video connection, hold it while the TV
         asks for the time, tear down."""
-        check = StreamCheck(plan, trailer, report=SessionReport(trailer=trailer))
-        report = check.report
-        assert report is not None
+        plan = check.plan
+        report = check.report = SessionReport(trailer=check.trailer)
+        if not self.transports:
+            await self._bind_udp()
         self.negotiator.steps = report.steps
         responder = self.responder
         asked = responder.requests if responder is not None else 0
@@ -440,7 +537,7 @@ class _Probe:
                 report.data_channel = f"refused ({answer_of(ex)})"
                 check.note = f"the TV did not take the video connection ({answer_of(ex)})"
                 check.error = message_of(data_refused(established.data_port, answer_of(ex), report.steps))
-                return check
+                return
             report.data_channel = "open"
             try:
                 await self.negotiator.record(established)
@@ -464,7 +561,6 @@ class _Probe:
             if established is not None:
                 await self.negotiator.teardown(established.uri)
             self.negotiator.close()
-        return check
 
     async def _timing_seen(self, check: StreamCheck, asked: int) -> bool:
         """Whether the TV asked for the time during this check (waiting a little for it)."""
@@ -500,19 +596,23 @@ async def probe_mirroring(
     save: bool = True,
     progress: Optional[Callable[[str], None]] = None,
     limit: Optional[float] = None,
+    on_pattern: Optional[Callable[[], None]] = None,
 ) -> ProbeResult:
     """Find out how `target` takes screen mirroring; see the module's docstring.
 
     `variants` picks what is tried besides the saved (or default) way (ALL_VARIANTS: ORDERING,
     AUDIO, TIMING, TRAILER). Without `send_test_pattern` no video is sent: the video connection
-    is only opened and held for a moment. `progress` gets a line per step as it goes. What
-    worked is saved for the device when `save` (and the target has an identifier). With a
-    `limit`, the probe takes at most that many seconds in all: then the step under way is
+    is only opened and held for a moment. `progress` gets a line per step as it goes, and
+    `on_pattern` is called when the test pattern's first frame has gone to the TV: the moment
+    to look at it. What worked is saved for the device when `save` (and the target has an
+    identifier). With a `limit`, the probe takes at most that many seconds in all: the steps
+    for the report only start if they fit, and when the limit runs out the step under way is
     stopped and torn down, and the result says what was found until then.
     """
     started = time.monotonic()
     probe = _Probe(target, settings or Settings.load(), seconds=seconds, send_test_pattern=send_test_pattern,
-                   variants=variants, save=save, progress=progress or (lambda line: None))
+                   variants=variants, save=save, progress=progress or (lambda line: None),
+                   on_pattern=on_pattern or (lambda: None), deadline=None if limit is None else started + limit)
     task = asyncio.ensure_future(probe.run())
     try:
         await asyncio.wait({task}, timeout=limit)
@@ -523,8 +623,7 @@ async def probe_mirroring(
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)  # what was under way is torn down
             result = probe.result
-            if result.profile is None:
-                result.error = time_up(limit or 0)
+            probe.ran_out(limit or 0)
     finally:
         if not task.done():  # the probe itself was cancelled
             task.cancel()

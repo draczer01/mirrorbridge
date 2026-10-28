@@ -518,14 +518,23 @@ class Controller(QObject):
     # -- Mirror screen -----------------------------------------------------
 
     @staticmethod
-    def can_mirror(device: Optional[Device]) -> bool:
-        """Mirror screen (experimental) needs the pairing MirrorBridge saved for the TV, whose
-        pair-verify keys the video, and a TV that does not need FairPlay (Apple TVs and Macs do)."""
-        return bool(device and device.is_paired and not mirror.Target.from_device(device).needs_fairplay)
+    def _mirrors(device: Device) -> bool:
+        """The receiver takes video and says it takes screen mirroring (or does not say)."""
+        return device.can_cast_video and mirror.Target.from_device(device).offers_mirroring
 
-    @staticmethod
-    def mirror_tip(device: Optional[Device]) -> str:
+    @classmethod
+    def can_mirror(cls, device: Optional[Device]) -> bool:
+        """Mirror screen (experimental) needs a receiver that mirrors, the pairing MirrorBridge
+        saved for it, whose pair-verify keys the video, and a TV that does not need FairPlay
+        (Apple TVs and Macs do)."""
+        return bool(device and cls._mirrors(device) and device.is_paired
+                    and not mirror.Target.from_device(device).needs_fairplay)
+
+    @classmethod
+    def mirror_tip(cls, device: Optional[Device]) -> str:
         """What Mirror screen does, or why it cannot start with `device`: its tooltip."""
+        if device is not None and not cls._mirrors(device):
+            return tr("mirror_not_offered")
         if device is not None and mirror.Target.from_device(device).needs_fairplay:
             return tr("mirror_apple_tv")
         if device is not None and not device.is_paired:
@@ -634,8 +643,10 @@ class Controller(QObject):
         if device.needs_pairing or device.needs_password:
             self.pair(device, then=self.test_tv)
             return
-        box = QMessageBox(QMessageBox.Question, tr("probe_title", device=device.name),
-                          tr("probe_intro", device=device.name), parent=self._parent())
+        skipped = probe.mirroring_skipped(device)  # then the person has no moving pattern to watch for
+        intro = (tr("probe_intro", device=device.name) if skipped is None
+                 else tr("probe_intro_no_mirror", device=device.name, why=say(skipped)))
+        box = QMessageBox(QMessageBox.Question, tr("probe_title", device=device.name), intro, parent=self._parent())
         start = box.addButton(tr("probe_start"), QMessageBox.AcceptRole)
         box.addButton(tr("cancel"), QMessageBox.RejectRole)
         self.bring_to_front(box)
@@ -644,9 +655,12 @@ class Controller(QObject):
             return
 
         def progress(number: int, total: int, _name: str) -> None:  # on the asyncio loop
-            watch = probe.watch_hint(probe.TESTS[number - 1])
-            step = tr("probe_step_watch" if watch else "probe_step", number=number, total=total)
-            self.bridge.call(lambda: self._on_probe_step(step, watch))
+            step = tr("probe_step", number=number, total=total)
+            self.bridge.call(lambda: self._on_probe_step(step))
+
+        def watch(hint: Text) -> None:  # on the asyncio loop, as the mirroring test's pattern reaches the TV
+            step = tr("probe_step_watch", number=probe.TESTS.index(probe.MIRROR) + 1, total=len(probe.TESTS))
+            self.bridge.call(lambda: self._on_probe_step(step, hint))
 
         def finished(report: probe.ProbeReport) -> None:
             ended()
@@ -670,7 +684,8 @@ class Controller(QObject):
         async def run() -> probe.ProbeReport:
             # Cancelling the future itself would end it at once, while the test still stops the
             # video on the TV: the test is cancelled here instead, and the future ends with it.
-            test = asyncio.ensure_future(probe.run(self.manager, device, self.settings, progress=progress))
+            test = asyncio.ensure_future(probe.run(self.manager, device, self.settings, progress=progress,
+                                                   watch=watch))
             stopped = asyncio.ensure_future(stop.wait())
             try:
                 await asyncio.wait({test, stopped}, return_when=asyncio.FIRST_COMPLETED)

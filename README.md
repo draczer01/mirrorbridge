@@ -183,18 +183,19 @@ tried on a real TV.
 1. Choose the TV under **Device** and pair it, as for a cast (**Start casting** once, or
    *Device > Pair with PIN…*).
 2. Once, run **More options > Test this TV…**. Its last test mirrors a moving test pattern
-   for about 10 seconds: watch the TV for it. What worked is saved for the TV, so Mirror screen
-   asks for it straight away (see *Reporting a TV that does not work* under Troubleshooting).
+   for about 10 seconds: when a notification says *Watch the TV now*, look for it. What worked
+   is saved for the TV, so Mirror screen asks for it straight away (see *Reporting a TV that
+   does not work* under Troubleshooting).
 3. Choose **Mirror screen (low latency, experimental)**, right under *Start casting*. As for a
    cast, the tray icon's tooltip says *Connecting to the TV…*, then *Mirroring to (your TV)*,
    and a notification says when it starts, when it stops, and why if it fails.
    **Stop mirroring** (where *Stop casting* is) or **Quit** ends it.
 
-Mirror screen is greyed out until MirrorBridge is paired with the TV (its tooltip says so), and
-for Apple TVs and Macs, whose screen mirroring needs FairPlay: support for them is coming in a
-later version, and they cast as before. One thing runs at a time: while a cast, Mirror screen
-or *Test this TV* runs, the others are greyed out until it stops. The full window has the same
-*Mirror screen* button, under *Start casting*.
+Mirror screen is greyed out until MirrorBridge is paired with the TV (its tooltip says so), for
+receivers that do not offer screen mirroring, and for Apple TVs and Macs, whose screen mirroring
+needs FairPlay: support for them is coming in a later version, and they cast as before. One
+thing runs at a time: while a cast, Mirror screen or *Test this TV* runs, the others are greyed
+out until it stops. The full window has the same *Mirror screen* button, under *Start casting*.
 
 **What to send back** after trying it on your TV:
 
@@ -221,16 +222,20 @@ MirrorBridge.exe mirror --test-pattern --seconds 30   # a moving test pattern in
   mirroring, which MirrorBridge does not have, so they are turned down at once.
 * It mirrors what *What to cast* names (a display or a window, not the virtual screen) at the
   TV's screen size, up to 1080p or the *Quality > Resolution* setting, with the encoder, frame
-  rate and bitrate of the *Quality* menu. There is no sound yet.
+  rate and bitrate of the *Quality* menu. There is no sound yet. If FFmpeg cannot capture or
+  encode at the start (the graphics driver refuses ddagrab, the GPU encoder is busy), it goes
+  on with GDI capture, then with x264 (CPU), as a cast does.
 * The TV asks the PC for the time over UDP: allow MirrorBridge, or inbound UDP ports
   7880-7889, in Windows Firewall on private networks, or the TV shows nothing.
 * TVs differ in the order they want the session set up in, whether they need an (empty) audio
   stream, whether they offer PTP timing, and how they want the H.264 header to end.
   `mirror --probe` tries each, prints what the TV answered, and saves what worked in
   `%APPDATA%\MirrorBridge\mirroring.json`, which Mirror screen and every `mirror` after it ask
-  for first; the last test of *Test this TV* does the same, without the "no audio stream"
-  shape. If screen mirroring fails, please send that output with `mirrorbridge.log`. Before a
-  probe, a TV that drops the video at once gets one more try with the other H.264 header ending.
+  for first. The last test of *Test this TV* does the same in 75 seconds: the test pattern goes
+  as soon as the TV takes a SETUP, and the other shapes are tried in the time left (the report
+  names any it had no time for). If screen mirroring fails, please send that output with
+  `mirrorbridge.log`. Before a probe, a TV that drops the video at once gets one more try with
+  the other H.264 header ending.
 * When the network or the TV cannot keep up, frames are dropped up to the next keyframe
   instead of piling up, so the picture skips but stays current. A TV that takes no video for
   5 seconds ends the session with an error; ending mirroring on the TV just stops it.
@@ -318,10 +323,11 @@ the Parsec app, keeps the driver awake). The downloaded driver installer stays i
   Apple's public test video, the play queue with the same video, the play queue with a short
   cast of MirrorBridge's own test pattern from this PC, and last screen mirroring with a
   moving test pattern for about 10 seconds (nothing from your screen in any of them). Watch
-  the TV for that moving pattern during the last test; a TV that needs FairPlay (an Apple TV)
-  skips it. Then MirrorBridge says what each one did (for screen mirroring, whether the TV
-  accepted the session and kept the video open, and which SETUP order, H.264 header ending and
-  timing worked, which it saves for Mirror screen), whether Mirror screen should work, and
+  the TV for that moving pattern when a notification says *Watch the TV now*; a TV that needs
+  FairPlay (an Apple TV), or that MirrorBridge is not paired with, skips that test. Then
+  MirrorBridge says what each one did (for screen mirroring, whether the TV accepted the
+  session and kept the video open, and which SETUP order, H.264 header ending and timing
+  worked, which it saves for Mirror screen), whether Mirror screen should work, and
   where its report is: `%APPDATA%\MirrorBridge\probe-<date>-<time>.log` (*Open log folder* in
   the result). Send that file with `mirrorbridge.log`, and say whether the moving test pattern
   appeared. It shows what the TV advertises, what it answered to each AirPlay request, what it

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..config import app_data_dir
+from ..text import Text
 from .h264 import DEFAULT_TRAILER, TRAILERS
 from .negotiation import CONTROL_FIRST, DEFAULT_LEAD_MS, NTP, ORDERINGS, Plan
 
@@ -41,8 +42,14 @@ class MirrorProfile:
     def of(cls, plan: Plan, trailer: str) -> "MirrorProfile":
         return cls(plan.ordering, plan.audio, plan.timing, trailer, plan.lead_ms, time.strftime("%Y-%m-%d %H:%M"))
 
-    def describe(self) -> str:
-        return f"{self.plan().describe()}, avcC ending {self.trailer}, lead {self.lead_ms} ms"
+    def describe(self) -> Text:
+        """What is asked for, as Plan.describe() says it, and how the video goes (a Text: Test this
+        TV shows it in the user's language)."""
+        audio = (Text("mirror_with_audio", "with the audio stream") if self.audio
+                 else Text("mirror_without_audio", "without the audio stream"))
+        return Text("mirror_profile", "{ordering}, {audio}, {timing} timing, avcC ending {trailer}, lead {lead} ms",
+                    ordering=self.ordering, audio=audio, timing=self.timing.upper(), trailer=self.trailer,
+                    lead=self.lead_ms)
 
     @classmethod
     def from_dict(cls, raw: dict) -> "MirrorProfile":

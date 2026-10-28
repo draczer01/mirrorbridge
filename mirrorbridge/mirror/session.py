@@ -13,7 +13,9 @@ the messages and errors being Texts.
 Delay comes first. A frame that cannot help the TV is not sent: when the TV (or the network)
 takes the video slower than it comes, frames are dropped up to the next keyframe, and a TV
 that takes nothing for VIDEO_STALL_SECONDS ends the session. So does FFmpeg giving no picture
-(FIRST_FRAME_SECONDS, FRAME_GAP_SECONDS); setting up has START_SECONDS in all.
+(FIRST_FRAME_SECONDS, FRAME_GAP_SECONDS); setting up has START_SECONDS in all. FFmpeg ending
+before its first frame (the driver refuses ddagrab, the GPU encoder is out of sessions) does
+not: the session goes on with GDI capture, then with the CPU encoder, as a cast does.
 
 A TV that drops the video connection before the second keyframe of a first session (nothing
 saved for it yet) may not take the avcC ending it was sent: the session is set up once more
@@ -167,6 +169,9 @@ class MirrorSession:
         self._send_buffer = MIN_SEND_BUFFER
         self._feedback: Optional[Feedback] = None
         self._ffmpeg: Optional[FFmpegSource] = None
+        self._capture: tuple = ()  # FFmpeg, the display and the window's region, for each way below
+        self._sources: list[tuple[str, str]] = []  # the ways of capturing and encoding still to try
+        self._using = ("", "")  # the way FFmpeg runs now: (capture backend, encoder)
         self._cipher: Optional[VideoCipher] = None
         self._frames: Optional[FrameQueue] = None
         self._stats = StageTimes()
@@ -286,17 +291,32 @@ class MirrorSession:
             raise refused(None, self.report.steps, "setup") from ex
         est = self.report.established
         assert est is not None
-        width, height = self.report.canvas or FALLBACK_CANVAS
-        fps = self.report.fps
+        self._stats = StageTimes(kbps=s.video_bitrate_kbps, fps=self.report.fps, lead_ms=est.plan.lead_ms)
+        self._frames = FrameQueue(self.report.fps * QUEUE_SECONDS)
+        # If the first choice dies before its first frame (driver refuses ddagrab, GPU encoder out
+        # of sessions), _pump goes on with GDI capture and then with the CPU encoder.
+        self._capture = (ff, monitor, region)
+        self._sources = [(backend, encoder)]
+        if backend == "ddagrab":
+            self._sources.append(("gdigrab", encoder))
+        if encoder != "libx264":
+            self._sources.append((self._sources[-1][0], "libx264"))
+        self._start_source()
 
-        cmd = build_command(ff, s, source=self.source, encoder=encoder, width=width, height=height, fps=fps,
-                            backend=backend, monitor=monitor, region=region)
+    def _start_source(self) -> None:
+        """FFmpeg with the next way of capturing and encoding, its frames into the frame queue."""
+        loop = asyncio.get_running_loop()
+        ff, monitor, region = self._capture
+        backend, encoder = self._using = self._sources.pop(0)
+        width, height = self.report.canvas or FALLBACK_CANVAS
+        cmd = build_command(ff, self.settings, source=self.source, encoder=encoder, width=width, height=height,
+                            fps=self.report.fps, backend=backend, monitor=monitor, region=region)
+        self.report.encoder = encoder
         label = ffmpeg.ENCODER_LABELS.get(encoder, encoder)
         self._set(State.STARTING, Text("encoder_via", "{encoder} via {backend}", encoder=label,
                                        backend="testsrc" if self.source == TEST_PATTERN else backend))
-        self._stats = StageTimes(kbps=s.video_bitrate_kbps, fps=fps, lead_ms=est.plan.lead_ms)
-        frames = self._frames = FrameQueue(fps * QUEUE_SECONDS)
-        stats = self._stats
+        frames, stats = self._frames, self._stats
+        assert frames is not None
 
         def take(unit: Optional[Unit]) -> None:
             if unit is not None and unit.kind == FRAME:
@@ -311,6 +331,16 @@ class MirrorSession:
 
         self._ffmpeg = FFmpegSource(cmd, hand_over)
         self._ffmpeg.start()
+
+    async def _next_source(self) -> None:
+        """FFmpeg ended before its first frame: the next way of capturing and encoding, on the
+        session as it is (the TV is waiting for its first frame)."""
+        failed = self._ffmpeg
+        assert failed is not None
+        await asyncio.get_running_loop().run_in_executor(None, self._stop_ffmpeg, failed)
+        backend, encoder = self._using
+        _LOGGER.warning("%s with %s failed, trying the next option. %s", backend, encoder, failed.errors())
+        self._start_source()
 
     async def _set_up(self) -> None:
         """Connect and pair-verify, GET /info, SETUP, the video connection, RECORD, /feedback."""
@@ -573,6 +603,9 @@ class MirrorSession:
             if unit is None:
                 if self._stopping:
                     return
+                if frames.last_frame_ns is None and self._sources:  # no frame at all from this way
+                    await self._next_source()
+                    continue
                 raise MirrorError(ended_text(self._ffmpeg), step="encoder")
             taken = now_ns()
             trimmed = frames.take_trimmed()

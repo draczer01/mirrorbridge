@@ -104,6 +104,11 @@ class Target:
         return self.features is not None and bool(self.features >> bit & 1)
 
     @property
+    def offers_mirroring(self) -> bool:
+        """The receiver says it takes screen mirroring (bit 7); one that says nothing may."""
+        return self.features is None or self.has_feature(FEATURE_SCREEN)
+
+    @property
     def needs_fairplay(self) -> bool:
         """Apple TVs and Macs (bit 14): their mirroring needs FairPlay, which MirrorBridge lacks."""
         return self.has_feature(FEATURE_FAIRPLAY)

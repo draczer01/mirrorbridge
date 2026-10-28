@@ -10,12 +10,14 @@ torn down before the next one starts:
    player (its User-Agent);
 4. screen mirroring (mirror.probe_mirroring) with a moving test pattern for about 10 s: does
    the TV accept the mirroring session and keep the video open, and in which SETUP ordering,
-   avcC ending and timing. What worked is saved for the TV, for Mirror screen. A TV that
-   needs FairPlay (an Apple TV) is skipped.
+   avcC ending and timing. What worked is saved for the TV, for Mirror screen. Then, in the
+   time left, what else it takes (without the audio stream, PTP, the other ordering), for the
+   report. A TV that needs FairPlay (an Apple TV), or that MirrorBridge cannot mirror to
+   otherwise, is skipped.
 
 The first two tell "the TV refuses the request" from "the TV cannot reach this PC": Apple's
-video comes from the internet. The person only watches the TV, and during the last test looks
-for the moving test pattern. Everything the TV answered and said goes to the log and to a
+video comes from the internet. The person only watches the TV, and is told when the last test's
+moving test pattern goes to it. Everything the TV answered and said goes to the log and to a
 report file of its own, in the log folder.
 """
 
@@ -35,7 +37,6 @@ from .config import Settings, app_data_dir
 from .devices import Device, DeviceManager
 from .hls_server import Activity
 from .mirror import ProbeResult, Target, probe_mirroring
-from .mirror.probe import ORDERING, TIMING, TRAILER
 from .session import CastSession
 from .text import Text
 
@@ -52,11 +53,10 @@ STOP_SECONDS = 15  # stopping a test and tearing its session down
 PAUSE_SECONDS = 3  # between tests, so that the TV's player is back to idle
 POLL_SECONDS = 0.25
 MIRROR_SECONDS = 10  # how long the screen mirroring test sends its test pattern, at most
-MIRROR_LIMIT_SECONDS = 75  # that test in all: pair-verify, the SETUP shapes and the test pattern
-# Both SETUP orderings, PTP (does the TV give a ClockID), and the other avcC ending if the TV
-# drops the video. Without the silent audio stream is not tried: the TVs tried so far want it
-# (mirror --probe tries that too).
-MIRROR_VARIANTS = (ORDERING, TIMING, TRAILER)
+# That test in all: pair-verify, the SETUP shapes until the TV takes one, and the test pattern
+# come first; the other shapes (without the audio stream, PTP, the other ordering) only fill
+# the time that is left, as mirror --probe tries them.
+MIRROR_LIMIT_SECONDS = 75
 
 MIRROR = "mirror"
 TESTS = (PLAY, QUEUE, "live", MIRROR)
@@ -68,13 +68,26 @@ _NAMES = {
 }
 
 ProgressCallback = Callable[[int, int, Text], None]  # test number (from 1), number of tests, its name
+WatchCallback = Callable[[Text], None]  # what to look for on the TV, said when it is there to see
 
 
-def watch_hint(test: str, seconds: float = DEFAULT_SECONDS) -> Optional[Text]:
-    """What the person should look for on the TV while `test` runs, if anything in particular."""
-    if test == MIRROR:
-        return Text("probe_watch_mirror", "Watch the TV now: for about {seconds} s it should show a moving test "
-                    "pattern, mirrored from this PC.", seconds=f"{min(seconds, MIRROR_SECONDS):g}")
+def watch_hint(seconds: float = DEFAULT_SECONDS) -> Text:
+    """What the person should look for on the TV once the mirroring test's pattern goes to it."""
+    return Text("probe_watch_mirror", "Watch the TV now: for about {seconds} s it should show a moving test "
+                "pattern, mirrored from this PC.", seconds=f"{min(seconds, MIRROR_SECONDS):g}")
+
+
+def mirroring_skipped(device: Device) -> Optional[Text]:
+    """Why the screen mirroring test is not run on `device`, None if it is."""
+    target = Target.from_device(device)
+    if not target.offers_mirroring:
+        return Text("probe_mirror_unsupported", "the TV does not say that it takes screen mirroring")
+    if target.needs_fairplay:
+        return Text("probe_mirror_fairplay", "the TV needs FairPlay for screen mirroring, as Apple TVs and Macs do, "
+                    "which MirrorBridge does not have yet")
+    if not target.credentials:  # pair-verify keys the session and the video
+        return Text("probe_mirror_unpaired", "MirrorBridge is not paired with this TV, and screen mirroring needs "
+                    "it: use Device > Pair with PIN first")
     return None
 
 
@@ -165,11 +178,15 @@ class TestResult:
                         "{frames} frames of the test pattern went to it, and it asked for the time {times} times. "
                         "What worked: {how}", frames=check.report.frames_sent, times=check.report.ntp_requests,
                         how=result.profile.describe())
+        error = result.conclusion()
+        cut = getattr(error, "key", None) == "mirror_probe_time_up"  # MirrorBridge stopped it, not the TV
+        if result.session_accepted and cut:
+            return Text("probe_mirror_cut", "the TV accepted the screen mirroring session, but the test ran out of "
+                        "time before the video check ended: {error}", error=error)
         if result.session_accepted:
             return Text("probe_mirror_no_video", "the TV accepted the screen mirroring session, but did not keep "
-                        "the video open: {error}", error=result.conclusion())
-        error = result.conclusion()
-        if result.pair_verify != "ok" or error.key == "mirror_probe_time_up":  # not the TV saying no
+                        "the video open: {error}", error=error)
+        if result.pair_verify != "ok" or cut:  # not the TV saying no
             return Text("probe_failed", "failed: {error}", error=error)
         return Text("probe_mirror_refused", "the TV did not accept a screen mirroring session: {error}", error=error)
 
@@ -190,11 +207,15 @@ class ProbeReport:
         return any(result.worked for result in self.results)
 
     def conclusion(self) -> Text:
-        """What the tests say, and Mirror screen when the TV took the mirroring test."""
+        """What the tests say, and whether Mirror screen should work, when the mirroring test ran."""
         casting = self._casting()
-        mirrored = any(result.test == MIRROR and result.worked for result in self.results)
-        if not mirrored:
+        mirrored = next((result for result in self.results if result.test == MIRROR and result.skipped is None), None)
+        if mirrored is None:
             return casting
+        if not mirrored.worked:
+            return Text("probe_mirror_not_working", "{conclusion} Mirror screen did not work on this TV in the test: "
+                        "please send the report, and say whether the moving test pattern appeared on the TV.",
+                        conclusion=casting)
         if casting.key == "probe_none":
             return Text("probe_mirror_only", "{device} did not take the video it was sent to cast, but Mirror "
                         "screen should work on this TV: it accepted screen mirroring and kept the video open.",
@@ -342,25 +363,28 @@ async def _live(manager: DeviceManager, device: Device, settings: Settings, seco
     return result
 
 
-async def _mirroring(device: Device, settings: Settings, seconds: float) -> TestResult:
+async def _mirroring(device: Device, settings: Settings, seconds: float,
+                     watch: Optional[WatchCallback] = None) -> TestResult:
     """Screen mirroring with the test pattern, within MIRROR_LIMIT_SECONDS in all: does the
-    TV accept the session and keep the video open? What worked is saved for the TV."""
+    TV accept the session and keep the video open? What worked is saved for the TV. `watch`
+    is told what to look for once the test pattern goes to the TV."""
     result = TestResult(MIRROR)
-    target = Target.from_device(device)
-    if target.needs_fairplay:
-        result.skipped = Text("probe_mirror_fairplay", "the TV needs FairPlay for screen mirroring, as Apple TVs "
-                              "and Macs do, which MirrorBridge does not have yet")
-        _LOGGER.info("Screen mirroring is not tried: %s needs FairPlay", device.name)
+    result.skipped = mirroring_skipped(device)
+    if result.skipped is not None:
+        _LOGGER.info("Screen mirroring is not tried with %s: %s", device.name, result.skipped)
         return result
-    if not target.credentials:  # pair-verify keys the session and the video
-        result.skipped = Text("probe_mirror_unpaired", "MirrorBridge is not paired with this TV, and screen mirroring "
-                              "needs it: use Device > Pair with PIN first")
-        _LOGGER.info("Screen mirroring is not tried: MirrorBridge is not paired with %s", device.name)
-        return result
+    seconds = min(seconds, MIRROR_SECONDS)
+    told = False
+
+    def showing() -> None:  # once: the TV may be sent the pattern a second time, with another avcC ending
+        nonlocal told
+        if watch is not None and not told:
+            told = True
+            watch(watch_hint(seconds))
+
     try:
         mirrored = result.mirror = await probe_mirroring(
-            target, settings, seconds=min(seconds, MIRROR_SECONDS), variants=MIRROR_VARIANTS,
-            limit=MIRROR_LIMIT_SECONDS)
+            Target.from_device(device), settings, seconds=seconds, limit=MIRROR_LIMIT_SECONDS, on_pattern=showing)
     except asyncio.CancelledError:
         raise
     except Exception as ex:  # pylint: disable=broad-except
@@ -429,9 +453,11 @@ async def run(
     seconds: float = DEFAULT_SECONDS,
     public_url: str = PUBLIC_STREAM,
     progress: Optional[ProgressCallback] = None,
+    watch: Optional[WatchCallback] = None,
     report_folder: Optional[Path] = None,
 ) -> ProbeReport:
-    """Run the four tests on `device`, one after the other, and say what each found out."""
+    """Run the four tests on `device`, one after the other, and say what each found out.
+    `progress` is told as each test starts, `watch` what to look for on the TV when it is there."""
     with _Report(report_folder) as report_file:
         _LOGGER.info("%s %s is testing %s (%s): %s", APP_NAME, __version__, device.name, device.address,
                      device.details())
@@ -440,7 +466,7 @@ async def run(
             PLAY: lambda: _public(manager, device, PLAY, public_url, seconds),
             QUEUE: lambda: _public(manager, device, QUEUE, public_url, seconds),
             "live": lambda: _live(manager, device, settings, seconds),
-            MIRROR: lambda: _mirroring(device, settings, seconds),
+            MIRROR: lambda: _mirroring(device, settings, seconds, watch),
         }
         results = []
         for number, test in enumerate(TESTS, 1):

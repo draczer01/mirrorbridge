@@ -123,9 +123,9 @@ todavía no se probó con una TV real.
 1. Elige la TV en **Dispositivo** y emparéjala, como para transmitir (**Transmitir a ...** una
    vez, o *Dispositivo* > *Emparejar con PIN…*).
 2. Una vez, usa **Más opciones** > **Probar esta TV…**. Su última prueba duplica una imagen de
-   prueba en movimiento durante unos 10 segundos: mira si aparece en la TV. Lo que funcionó
-   queda guardado para esa TV, así que *Duplicar pantalla* lo pide de entrada (ver *Avisar de
-   una TV que no funciona*).
+   prueba en movimiento durante unos 10 segundos: cuando un aviso diga *Mira la TV ahora*, mira
+   si aparece en la TV. Lo que funcionó queda guardado para esa TV, así que *Duplicar pantalla*
+   lo pide de entrada (ver *Avisar de una TV que no funciona*).
 3. Elige **Duplicar pantalla (baja latencia, experimental)**, justo debajo de **Transmitir a
    ...**. Igual que al transmitir, el texto del icono dice *Conectando con la TV…* y luego
    *Duplicando la pantalla en (tu TV)*, y un aviso dice cuándo empieza, cuándo termina y, si
@@ -133,11 +133,11 @@ todavía no se probó con una TV real.
    terminan.
 
 *Duplicar pantalla* aparece en gris hasta que MirrorBridge está emparejado con la TV (al pasar
-el mouse lo dice), y con los Apple TV y los Mac, que necesitan FairPlay para duplicar la
-pantalla: llegarán en una versión futura, y mientras tanto se les transmite como siempre. Se
-hace una sola cosa a la vez: mientras hay una transmisión, una duplicación o una prueba de la
-TV, lo demás queda en gris hasta que termine. La ventana completa tiene el mismo botón, debajo
-de **Transmitir**.
+el mouse lo dice), con los receptores que no ofrecen duplicar la pantalla, y con los Apple TV y
+los Mac, que necesitan FairPlay para duplicar la pantalla: llegarán en una versión futura, y
+mientras tanto se les transmite como siempre. Se hace una sola cosa a la vez: mientras hay una
+transmisión, una duplicación o una prueba de la TV, lo demás queda en gris hasta que termine.
+La ventana completa tiene el mismo botón, debajo de **Transmitir**.
 
 **Qué mandar** después de probarlo con tu TV:
 
@@ -163,16 +163,20 @@ de **Transmitir**.
 * Primero empareja la TV (`pair`), igual que para transmitir. Los Apple TV y los Mac necesitan
   FairPlay para duplicar la pantalla, y MirrorBridge no lo tiene.
 * Duplica lo que elegiste en **Qué transmitir** (una pantalla o una ventana) al tamaño de la
-  pantalla de la TV, hasta 1080p o lo que diga **Calidad** > **Resolución**. Todavía no hay
-  sonido.
+  pantalla de la TV, hasta 1080p o lo que diga **Calidad** > **Resolución**, con el
+  codificador, los cuadros por segundo y la tasa de bits de **Calidad**. Todavía no hay sonido.
+  Si FFmpeg no puede capturar o codificar al empezar (el controlador de video rechaza ddagrab,
+  el codificador de la GPU está ocupado), sigue con la captura GDI y luego con x264 (CPU), igual
+  que al transmitir.
 * La TV le pide la hora al equipo por UDP: permite MirrorBridge, o los puertos UDP de entrada
   7880-7889, en el Firewall de Windows para redes privadas, o la TV no mostrará nada.
 * `mirror --probe` prueba las formas en que las TVs difieren, muestra qué contestó la TV y
   guarda lo que funcionó en `%APPDATA%\MirrorBridge\mirroring.json`, que *Duplicar pantalla* y
-  cada `mirror` piden primero; la última prueba de *Probar esta TV* hace lo mismo. Si
-  no funciona, manda lo que muestra junto con `mirrorbridge.log`. Antes de un `--probe`, si la
-  TV corta el video apenas empieza, se intenta una vez más con el otro final del encabezado
-  H.264.
+  cada `mirror` piden primero. La última prueba de *Probar esta TV* hace lo mismo en 75
+  segundos: la imagen de prueba sale en cuanto la TV acepta un SETUP, y las demás formas se
+  prueban con el tiempo que queda (el informe dice cuáles no alcanzó a probar). Si no funciona,
+  manda lo que muestra junto con `mirrorbridge.log`. Antes de un `--probe`, si la TV corta el
+  video apenas empieza, se intenta una vez más con el otro final del encabezado H.264.
 * Si la red o la TV no dan abasto, se descartan cuadros hasta el siguiente cuadro clave en
   lugar de acumularlos: la imagen salta, pero no se atrasa. Si la TV no recibe video durante
   5 segundos, la sesión termina con un error; si terminas la duplicación desde la TV, la
@@ -201,13 +205,14 @@ MirrorBridge prueba cuatro formas de enviarle un video, una tras otra: `POST /pl
 video de prueba público de Apple, la cola de reproducción con el mismo video, la cola de
 reproducción con una transmisión corta de la imagen de prueba de MirrorBridge desde este
 equipo, y por último la duplicación de pantalla con una imagen de prueba en movimiento durante
-unos 10 segundos (en ninguna se manda nada de tu pantalla). Durante esa última prueba, mira si
-la imagen en movimiento aparece en la TV; una TV que necesita FairPlay (un Apple TV) se la
-salta. Al final dice qué hizo la TV con cada una (en la duplicación, si aceptó la sesión y
-mantuvo abierto el video, y qué orden de SETUP, final del encabezado H.264 y forma de dar la
-hora funcionaron, que guarda para *Duplicar pantalla*), si *Duplicar pantalla* debería
-funcionar, y dónde está el informe: `%APPDATA%\MirrorBridge\probe-<fecha>-<hora>.log` (el
-botón **Abrir carpeta de registros** del resultado lleva ahí).
+unos 10 segundos (en ninguna se manda nada de tu pantalla). Cuando un aviso diga *Mira la TV
+ahora*, mira si la imagen en movimiento aparece en la TV; una TV que necesita FairPlay (un Apple
+TV), o con la que MirrorBridge no está emparejado, se salta esa prueba. Al final dice qué hizo
+la TV con cada una (en la duplicación, si aceptó la sesión y mantuvo abierto el video, y qué
+orden de SETUP, final del encabezado H.264 y forma de dar la hora funcionaron, que guarda para
+*Duplicar pantalla*), si *Duplicar pantalla* debería funcionar, y dónde está el informe:
+`%APPDATA%\MirrorBridge\probe-<fecha>-<hora>.log` (el botón **Abrir carpeta de registros** del
+resultado lleva ahí).
 
 Manda ese archivo junto con `mirrorbridge.log`, y di si apareció la imagen de prueba en
 movimiento. Ahí se ve qué anuncia la TV, qué contestó a cada pedido de AirPlay, qué dijo

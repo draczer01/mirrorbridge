@@ -3,6 +3,7 @@ default: pairing, SETUP in its shapes and the fallbacks, the clock, the event ch
 decrypted and decoded by FFmpeg, the probe, and the ways a TV says no, is slow, or goes away."""
 
 import asyncio
+import logging
 import statistics
 import subprocess
 import sys
@@ -549,6 +550,42 @@ async def test_an_encoder_that_gives_nothing_ends_the_session(tv, monkeypatch):
     assert session.state == State.FAILED and tv.teardowns == 1
 
 
+async def test_a_gpu_encoder_that_will_not_start_gives_way_to_x264(tv, monkeypatch, caplog):
+    """As a cast does when NVENC is out of sessions (here there is no NVIDIA GPU at all): the
+    session the TV set up goes on, with the CPU encoder."""
+    _ffmpeg()
+    monkeypatch.setattr(ffmpeg, "pick_encoder", lambda *args: "h264_nvenc")
+    states = []
+    session = MirrorSession(tv.target(), SETTINGS, lambda s, m: states.append((s, str(m))), source=TEST_PATTERN,
+                            seconds=1)
+    with caplog.at_level(logging.WARNING, logger=mirror_session.__name__):
+        await asyncio.wait_for(session.run(), 60)
+    assert session.state == State.STOPPED and session.error is None
+    starting = [message for state, message in states if state == State.STARTING]
+    assert starting[-2:] == ["NVIDIA NVENC via testsrc", "x264 (CPU) via testsrc"]
+    assert session.report.encoder == "libx264" and session.report.frames_sent > 0
+    assert tv.records == 1 and tv.teardowns == 1  # one session, set up once
+    assert "test with h264_nvenc failed, trying the next option" in caplog.text
+
+
+async def test_when_every_way_of_encoding_fails_the_session_says_so(tv, monkeypatch):
+    _ffmpeg()
+    commands = []
+
+    def failing(ff, settings, **kw):
+        commands.append((kw["backend"], kw["encoder"]))
+        return [sys.executable, "-c", "import sys; sys.exit(1)"]
+
+    monkeypatch.setattr(ffmpeg, "pick_encoder", lambda *args: "h264_nvenc")
+    monkeypatch.setattr(mirror_session, "build_command", failing)
+    session = MirrorSession(tv.target(), SETTINGS, source=TEST_PATTERN)
+    with pytest.raises(MirrorError) as caught:
+        await asyncio.wait_for(session.run(), 60)
+    assert commands == [(TEST_PATTERN, "h264_nvenc"), (TEST_PATTERN, "libx264")]
+    assert caught.value.args[0].key == "encoder_stopped"
+    assert session.state == State.FAILED and tv.records == 1 and tv.teardowns == 1
+
+
 async def test_setting_up_has_a_time_limit(tv, monkeypatch):
     _ffmpeg()
     tv.reconfigure(setup_delay=2)
@@ -568,12 +605,19 @@ async def test_probe_finds_how_tcl_mirrors_and_saves_it(tv):
     result = await asyncio.wait_for(probe_mirroring(tv.target(), SETTINGS, seconds=2, progress=lines.append), 120)
     assert result.worked and result.pair_verify == "ok" and not result.fairplay
     assert result.info is not None and result.info.displays[0].width == 1920
-    assert [a.worked for a in result.setups] == [False, True, False, False, True]
-    assert [a.plan.describe() for a in result.setups][:4] == [
-        "control-first, with the audio stream, NTP timing", "media-first, with the audio stream, NTP timing",
-        "control-first, without the audio stream, NTP timing", "media-first, without the audio stream, NTP timing"]
+    # Until the TV takes one; then the video; then, for the report, the TCL wanting the audio
+    # stream, PTP without a ClockID, and control-first without the audio stream.
+    assert [(a.plan.describe(), a.worked) for a in result.setups] == [
+        ("control-first, with the audio stream, NTP timing", False),
+        ("media-first, with the audio stream, NTP timing", True),
+        ("media-first, without the audio stream, NTP timing", False),
+        ("media-first, with the audio stream, PTP timing", True),
+        ("control-first, without the audio stream, NTP timing", False)]
+    video = next(n for n, line in enumerate(lines) if " s of the test pattern: " in line)
+    assert video < next(n for n, line in enumerate(lines) if "without the audio stream" in line)
     assert result.setups[0].steps == {"pair-verify": "ok", "setup control-first": 400}
     assert result.ptp == "answered without timingPeerInfo.ClockID" and result.ntp_after_ptp is True
+    assert result.not_tried == [] and "Not tried" not in "\n".join(result.lines())
     (check,) = result.streams
     assert check.worked and check.report.frames_sent >= 40 and check.report.ntp_requests >= 3
     assert result.data_channel_accepted and result.data_channel_kept

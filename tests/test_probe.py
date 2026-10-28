@@ -32,10 +32,12 @@ from mirrorbridge.mirror.negotiation import MEDIA_FIRST, Plan
 from mirrorbridge.mirror.probe import SetupAttempt, StreamCheck
 from mirrorbridge.mirror.session import SessionReport
 from mirrorbridge.session import CastSession
+from mirrorbridge.text import Text
 
 ROOT = Path(__file__).resolve().parent.parent
 REPORT_FILE = Path("C:/Users/Ana/AppData/Roaming/MirrorBridge/probe-20261028-201500.log")
 APPLE_TV_FEATURES = 0x4A7FDFD5 | (0xBC157FDE << 32)  # bit 14: FairPlay
+PAIRED = SimpleNamespace(port=7000, credentials=CREDENTIALS, properties={"srcvers": "377.40.00"})  # its AirPlay service
 STEPS = {"setup": 200, "record": 200, "setup130": 200, "insert": 200, "isInterestedInDateRange": 200,
          "actionAtItemEnd": 200, "rate": 200}
 
@@ -105,6 +107,20 @@ def _mirrored(**report):
 MIRRORED = _mirrored()
 
 
+def _dropped():
+    """The fourth test, as it ends when the TV took the session but closed the video at once."""
+    plan = Plan(MEDIA_FIRST)
+    error = Text("mirror_data_closed", "The TV closed the video connection after {frames} frames. It may not take "
+                 "this video: please report this TV, with mirrorbridge.log.", frames=5)
+    check = StreamCheck(plan, TRAILER_FIXED, report=SessionReport(frames_sent=5, data_closed_after=5), error=error)
+    result = ProbeResult("Sala familiar", "127.0.0.1:7000", setups=[SetupAttempt(plan, worked=True)], streams=[check],
+                         error=error)
+    return probe.TestResult(probe.MIRROR, accepted=True, mirror=result)
+
+
+DROPPED = _dropped()
+
+
 # -- against the fake TV ---------------------------------------------------------------------------
 
 
@@ -153,14 +169,18 @@ async def test_the_probe_tries_each_way_and_says_what_the_tv_did(monkeypatch, tm
     monkeypatch.setattr(CastSession, "_wait_for_segments", one_segment)
     pyatv_level = logging.getLogger("pyatv").level
     handlers = list(logging.getLogger().handlers)
-    progress = []
+    progress, watched = [], []
+
+    def watch(hint):  # said once the mirrored test pattern goes to the TV
+        watched.append((hint, mirror_tv.records, len(progress)))
+
     settings = Settings(capture_audio=False, http_port=0, extend_screen=True, encoder="libx264", output_height=360,
                         video_bitrate_kbps=1500)
     async with _apples_video() as public_url, QueueTV(said=PLAYING, fetch=True) as tv:  # it plays until stopped
         manager = FakeManager(tv)
         report = await asyncio.wait_for(probe.run(
             manager, _device(mirror_tv), settings, seconds=2, public_url=public_url,
-            progress=lambda *step: progress.append(step), report_folder=tmp_path,
+            progress=lambda *step: progress.append(step), watch=watch, report_folder=tmp_path,
         ), 180)
 
     assert progress == [(n, 4, probe._NAMES[test]) for n, test in enumerate(probe.TESTS, 1)]
@@ -181,7 +201,11 @@ async def test_the_probe_tries_each_way_and_says_what_the_tv_did(monkeypatch, tm
         f"the test pattern went to it, and it asked for the time {check.report.ntp_requests} times. What worked: "
         f"media-first, with the audio stream, NTP timing, avcC ending 02000000, lead 100 ms")
     assert check.report.frames_sent >= 20 and check.report.ntp_requests >= 3
+    assert watched == [(probe.watch_hint(2), 1, 4)]  # during the fourth test, with the session recording
+    assert watched[0][0] == ("Watch the TV now: for about 2 s it should show a moving test pattern, mirrored from "
+                             "this PC.")
     assert mirrored.mirror.ptp == "answered without timingPeerInfo.ClockID"  # PTP is tried, not kept
+    assert mirrored.mirror.not_tried == []
     saved = profiles.load("TCL")  # for Mirror screen, under the device's identifier
     assert saved is not None and (saved.ordering, saved.trailer) == (MEDIA_FIRST, TRAILER_FIXED)
     assert report.worked
@@ -213,6 +237,10 @@ async def test_the_probe_tries_each_way_and_says_what_the_tv_did(monkeypatch, tm
                   f"User-Agent: {TV_AGENT}", "DEBUG   pyatv", "Test 4 of 4: the TV accepted the screen mirroring "
                   "session and kept the video open", "SETUP control-first, with the audio stream, NTP timing: "
                   "failed: refused with 400", "Screen mirroring works with Sala familiar: media-first",
+                  # whether the TV wants the (silent) audio stream: the TCL does
+                  "SETUP media-first, without the audio stream, NTP timing: failed: refused with 400",
+                  "Video (media-first, avcC ending 02000000): ok; video connection open",
+                  "PTP: answered without timingPeerInfo.ClockID; NTP on a fresh pair-verify: ok",
                   report.conclusion()):
         assert words in text, words
     assert logging.getLogger("pyatv").level == pyatv_level and logging.getLogger().handlers == handlers
@@ -318,10 +346,13 @@ def test_a_video_the_tv_ended_early_says_so():
 
 
 async def test_a_tv_that_needs_fairplay_skips_the_mirroring_test(mirror_tv):
-    result = await probe._mirroring(_device(mirror_tv, features=APPLE_TV_FEATURES, is_apple=True), Settings(), 2)
+    watched = []
+    result = await probe._mirroring(_device(mirror_tv, features=APPLE_TV_FEATURES, is_apple=True), Settings(), 2,
+                                    watched.append)
     assert result.verdict() == ("skipped: the TV needs FairPlay for screen mirroring, as Apple TVs and Macs do, which "
                                 "MirrorBridge does not have yet")
     assert not result.worked and result.mirror is None and mirror_tv.connections == []  # nothing was sent
+    assert watched == []  # nothing to look for on the TV
     report = _report(REFUSED, PLAYED, FETCHED, result)
     assert report.lines()[3].startswith("4. Screen mirroring with a moving test pattern, from this PC: skipped: the TV "
                                         "needs FairPlay")
@@ -330,6 +361,14 @@ async def test_a_tv_that_needs_fairplay_skips_the_mirroring_test(mirror_tv):
     assert i18n.say(report.lines()[3]) == (
         "4. La duplicación de pantalla con una imagen de prueba en movimiento, desde este equipo: omitida: la TV "
         "necesita FairPlay para duplicar la pantalla, como los Apple TV y los Mac, y MirrorBridge todavía no lo tiene")
+
+
+async def test_a_receiver_that_does_not_offer_screen_mirroring_skips_the_test(mirror_tv):
+    result = await probe._mirroring(_device(mirror_tv, features=TCL_FEATURES & ~(1 << 7)), Settings(), 2)  # no bit 7
+    assert result.verdict() == "skipped: the TV does not say that it takes screen mirroring"
+    assert mirror_tv.connections == []
+    i18n.set_language("es")
+    assert i18n.say(result.verdict()) == "omitida: la TV no indica que admita la duplicación de pantalla"
 
 
 async def test_an_unpaired_tv_skips_the_mirroring_test(mirror_tv):
@@ -355,7 +394,9 @@ async def test_a_tv_that_drops_the_mirrored_video_is_said_so(mirror_tv):
     assert profiles.load("TCL") is None  # nothing that works to save
     assert mirror_tv.teardowns == len(mirror_tv.orderings)
     report = _report(REFUSED, PLAYED, FETCHED, result)
-    assert report.conclusion() == "Sala familiar should play your casts: it fetched MirrorBridge's video."
+    assert report.conclusion() == (
+        "Sala familiar should play your casts: it fetched MirrorBridge's video. Mirror screen did not work on this TV "
+        "in the test: please send the report, and say whether the moving test pattern appeared on the TV.")
 
 
 async def test_a_tv_that_refuses_mirroring_is_said_so(mirror_tv):
@@ -374,6 +415,53 @@ async def test_a_tv_whose_pairing_is_gone_fails_the_mirroring_test(mirror_tv):
                                 "(Authentication)). Use Device > Forget pairing, then cast again and type the new PIN "
                                 "the TV shows.")
     assert mirror_tv.codes("SETUP") == []
+
+
+@pytest.mark.skipif(not _has_ffmpeg(), reason="the mirroring test sends a test pattern with FFmpeg's x264")
+async def test_running_out_of_time_during_the_video_check_does_not_blame_the_tv(monkeypatch, mirror_tv):
+    monkeypatch.setattr(probe, "MIRROR_LIMIT_SECONDS", 8)  # less than the test pattern's 10 s and its setting up
+    settings = Settings(encoder="libx264", output_height=360, video_bitrate_kbps=1500)
+    result = await asyncio.wait_for(probe._mirroring(_device(mirror_tv), settings, 20), 60)
+    assert result.accepted and not result.worked
+    assert result.verdict() == (
+        "the TV accepted the screen mirroring session, but the test ran out of time before the video check ended: "
+        "The screen mirroring test was stopped after 8 s, before it found a way that works.")
+    (check,) = result.mirror.streams  # how far the video got, for the report
+    assert check.stopped and check.report.frames_sent > 0 and check.report.ntp_requests > 0
+    line = check.line()
+    assert line.startswith(f"Video (media-first, avcC ending 02000000): stopped by the time limit after "
+                           f"{check.report.frames_sent} frames; video connection open; ") and "ms p50/p95" in line
+    assert "Not tried, for lack of time" not in "\n".join(result.mirror.lines())  # it was cut, not skipped
+    assert profiles.load("TCL") is None
+    await asyncio.sleep(0.1)
+    assert mirror_tv.teardowns == len(mirror_tv.orderings) and all(conn.closed for conn in mirror_tv.connections)
+    i18n.set_language("es")
+    assert i18n.say(result.verdict()).startswith(
+        "la TV aceptó la sesión de duplicación de pantalla, pero a la prueba se le acabó el tiempo antes de "
+        "terminar de comprobar el video: La prueba de duplicación de pantalla se detuvo a los 8 s")
+
+
+@pytest.mark.skipif(not _has_ffmpeg(), reason="the mirroring test sends a test pattern with FFmpeg's x264")
+async def test_a_slow_tv_gets_the_video_check_before_the_shapes_for_the_report(monkeypatch, mirror_tv):
+    """A TV that takes 1.5 s to answer each SETUP: the test pattern goes once it took one, and
+    what does not fit in the time left is named in the report instead of cut short."""
+    monkeypatch.setattr(probe, "MIRROR_LIMIT_SECONDS", 14)
+    mirror_tv.reconfigure(setup_delay=1.5)
+    settings = Settings(encoder="libx264", output_height=360, video_bitrate_kbps=1500)
+    started = asyncio.get_running_loop().time()
+    result = await asyncio.wait_for(probe._mirroring(_device(mirror_tv), settings, 2), 60)
+    assert asyncio.get_running_loop().time() - started < 14
+    assert result.worked and result.verdict().startswith("the TV accepted the screen mirroring session and kept the "
+                                                         "video open")
+    mirrored = result.mirror
+    assert [(a.plan.ordering, a.worked) for a in mirrored.setups] == [("control-first", False), ("media-first", True)]
+    assert mirrored.not_tried == ["SETUP media-first, without the audio stream, NTP timing",
+                                  "SETUP media-first, with the audio stream, PTP timing",
+                                  "SETUP control-first, without the audio stream, NTP timing"]
+    assert ("Not tried, for lack of time: SETUP media-first, without the audio stream, NTP timing; SETUP "
+            "media-first, with the audio stream, PTP timing; SETUP control-first, without the audio stream, NTP "
+            "timing") in mirrored.lines()
+    assert profiles.load("TCL").ordering == MEDIA_FIRST  # for Mirror screen
 
 
 async def test_the_mirroring_test_has_a_time_limit_and_tears_down(monkeypatch, mirror_tv):
@@ -404,6 +492,30 @@ async def test_stopping_the_mirroring_test_tears_its_session_down(mirror_tv):
     assert all(conn.closed for conn in mirror_tv.connections)
 
 
+def test_the_conclusion_says_when_mirror_screen_did_not_work():
+    report = _report(REFUSED, PLAYED, FETCHED, DROPPED)
+    assert report.worked  # casting does
+    assert report.lines()[3] == (
+        "4. Screen mirroring with a moving test pattern, from this PC: the TV accepted the screen mirroring session, "
+        "but did not keep the video open: The TV closed the video connection after 5 frames. It may not take this "
+        "video: please report this TV, with mirrorbridge.log.")
+    assert report.conclusion() == (
+        "Sala familiar should play your casts: it fetched MirrorBridge's video. Mirror screen did not work on this TV "
+        "in the test: please send the report, and say whether the moving test pattern appeared on the TV.")
+    nothing = _report(REFUSED, probe.TestResult(airplay_patch.QUEUE, steps={"setup130": 501}), LIVE_REFUSED, DROPPED)
+    assert not nothing.worked and nothing.conclusion() == (
+        "None of the tests got Sala familiar to take the video. Mirror screen did not work on this TV in the test: "
+        "please send the report, and say whether the moving test pattern appeared on the TV.")
+    skipped = probe.TestResult(probe.MIRROR, skipped=probe.mirroring_skipped(_device(features=APPLE_TV_FEATURES)))
+    assert _report(REFUSED, PLAYED, FETCHED, skipped).conclusion() == (
+        "Sala familiar should play your casts: it fetched MirrorBridge's video.")  # nothing to say about mirroring
+    i18n.set_language("es")
+    assert i18n.say(report.conclusion()) == (
+        "Sala familiar debería reproducir tus transmisiones: descargó el video de MirrorBridge. Duplicar pantalla no "
+        "funcionó en esta TV durante la prueba: manda el informe y di si apareció la imagen de prueba en movimiento "
+        "en la TV.")
+
+
 def test_the_conclusion_says_mirror_screen_should_work():
     report = _report(REFUSED, PLAYED, FETCHED, MIRRORED)
     assert report.lines()[3] == (
@@ -421,10 +533,11 @@ def test_the_conclusion_says_mirror_screen_should_work():
     assert i18n.say(report.conclusion()) == (
         "Sala familiar debería reproducir tus transmisiones: descargó el video de MirrorBridge. Duplicar pantalla "
         "debería funcionar en esta TV: aceptó la duplicación de pantalla y mantuvo abierto el video.")
-    assert i18n.say(report.lines()[3]).startswith(
+    assert i18n.say(report.lines()[3]) == (
         "4. La duplicación de pantalla con una imagen de prueba en movimiento, desde este equipo: la TV aceptó la "
         "sesión de duplicación de pantalla y mantuvo abierto el video: recibió 300 fotogramas de la imagen de prueba y "
-        "pidió la hora 48 veces. Lo que funcionó: media-first")
+        "pidió la hora 48 veces. Lo que funcionó: media-first, con el flujo de audio, sincronización NTP, final del "
+        "avcC 02000000, adelanto de 100 ms")
 
 
 # -- the command line --------------------------------------------------------------------------------
@@ -433,15 +546,16 @@ def test_the_conclusion_says_mirror_screen_should_work():
 def test_the_command_line_prints_each_test_and_where_the_report_is(monkeypatch, capsys):
     calls = []
 
-    async def run(manager, device, settings, *, seconds, public_url, progress):
+    async def run(manager, device, settings, *, seconds, public_url, progress, watch):
         calls.append((device.name, seconds, public_url))
         progress(1, 4, probe._NAMES[airplay_patch.PLAY])
         progress(4, 4, probe._NAMES[probe.MIRROR])
+        watch(probe.watch_hint(seconds))
         failed = probe.TestResult("live", accepted=True, steps=STEPS, error=exceptions.PlaybackError(
             airplay_queue.media_error({"domain": "CoreMediaErrorDomain", "code": -17221})))
         return _report(REFUSED, PLAYED, failed, MIRRORED)
 
-    monkeypatch.setattr(cli, "DeviceManager", lambda _loop: FakeManager(devices=[_device()]))
+    monkeypatch.setattr(cli, "DeviceManager", lambda _loop: FakeManager(devices=[_device(airplay=PAIRED)]))
     monkeypatch.setattr(probe, "run", run)
     monkeypatch.setattr(Settings, "load", classmethod(lambda cls: Settings()))
     pyatv_level = logging.getLogger("pyatv").level
@@ -461,7 +575,7 @@ def test_the_command_line_prints_each_test_and_where_the_report_is(monkeypatch, 
             "session and kept the video open") in out
     assert ("Sala familiar plays video from the internet, but never fetched MirrorBridge's own stream from this PC. "
             "Check that Windows Firewall allows MirrorBridge on private networks; if it does, this TV may only play "
-            "video from HTTPS addresses. Mirror screen should work on this TV") in out
+            "video from HTTPS addresses. mirror -d \"Sala familiar\" should work on this TV") in out
     assert "If the TV asks whether to allow MirrorBridge, choose Allow. This takes about three minutes." in out
     assert f"The full report is in {REPORT_FILE}: please send it with your bug report." in out
     assert code == 0  # something worked: the TV played the video from the internet
@@ -496,12 +610,37 @@ async def test_the_command_line_runs_the_mirroring_test_too(monkeypatch, capsys,
     assert ("4. Screen mirroring with a moving test pattern, from this PC: the TV accepted the screen mirroring "
             "session and kept the video open: ") in out
     assert "What worked: media-first, with the audio stream, NTP timing, avcC ending 02000000, lead 100 ms" in out
-    assert "Mirror screen should work on this TV: it accepted screen mirroring and kept the video open." in out
+    # Mirror screen is the tray's; here it is the mirror command
+    assert ("Sala familiar should play your casts: it fetched MirrorBridge's video. mirror -d \"Sala familiar\" should "
+            "work on this TV: it accepted screen mirroring and kept the video open.") in out
+    assert "Mirror screen" not in out
     assert code == 0 and mirror_tv.records == 1 and mirror_tv.teardowns == len(mirror_tv.orderings)
     reports = list((tmp_path / "MirrorBridge").glob("probe-*.log"))
     assert len(reports) == 1 and "Test 4 of 4: the TV accepted the screen mirroring session" in reports[0].read_text(
         encoding="utf-8")
     assert profiles.load("TCL").ordering == MEDIA_FIRST
+
+
+def test_the_command_line_says_when_the_mirroring_test_is_skipped(monkeypatch, capsys):
+    async def run(manager, device, settings, *, seconds, public_url, progress, watch):
+        skipped = probe.TestResult(probe.MIRROR, skipped=probe.mirroring_skipped(device))
+        return _report(REFUSED, PLAYED, FETCHED, skipped)
+
+    apple_tv = _device(features=APPLE_TV_FEATURES, is_apple=True, airplay=PAIRED)
+    monkeypatch.setattr(cli, "DeviceManager", lambda _loop: FakeManager(devices=[apple_tv]))
+    monkeypatch.setattr(probe, "run", run)
+    monkeypatch.setattr(Settings, "load", classmethod(lambda cls: Settings()))
+    pyatv_level = logging.getLogger("pyatv").level
+    try:
+        assert cli.main(["probe", "Sala familiar"]) == 0
+    finally:
+        logging.getLogger("pyatv").setLevel(pyatv_level)
+    out = capsys.readouterr().out
+    intro = next(line for line in out.splitlines() if line.startswith("Testing Sala familiar."))
+    assert intro.endswith("This takes about two minutes. The fourth test, screen mirroring, is skipped: the TV needs "
+                          "FairPlay for screen mirroring, as Apple TVs and Macs do, which MirrorBridge does not have "
+                          "yet.")
+    assert "moving test pattern" not in intro and "Watch the TV now" not in out
 
 
 def test_errors_name_the_test_as_the_command_line_runs_it():
@@ -573,20 +712,24 @@ def test_test_this_tv_runs_the_tests_and_shows_what_they_found(controller, monke
 
     controller.set_language("es")
     assert not _more_options(controller)["Probar esta TV…"].isEnabled()  # no TV chosen
-    device = _device()
+    device = _device(airplay=PAIRED)
     controller.devices = [device]
     controller.settings.last_device_id = device.identifier
     assert _more_options(controller)["Probar esta TV…"].isEnabled()
 
-    release, mirroring, shown, intro, notes = threading.Event(), threading.Event(), [], [], []
+    release, mirroring, pattern, shown, intro, notes = (threading.Event(), threading.Event(), threading.Event(), [],
+                                                        [], [])
     report = _report(REFUSED, PLAYED, FETCHED, MIRRORED)
     controller.notify.connect(lambda *note: notes.append(note))
 
-    async def run(manager, tv, settings, *, progress):
+    async def run(manager, tv, settings, *, progress, watch):
         progress(2, 4, probe._NAMES[airplay_patch.QUEUE])
         while not mirroring.is_set():
             await asyncio.sleep(0.01)
         progress(4, 4, probe._NAMES[probe.MIRROR])
+        while not pattern.is_set():
+            await asyncio.sleep(0.01)
+        watch(probe.watch_hint())  # the test pattern went to the TV
         while not release.is_set():
             await asyncio.sleep(0.01)
         return report
@@ -610,12 +753,40 @@ def test_test_this_tv_runs_the_tests_and_shows_what_they_found(controller, monke
     assert notes == []
     mirroring.set()
     _until(lambda: "prueba 4" in controller.status()[1])
+    assert controller.status() == ("busy", "Probando Sala familiar: prueba 4 de 4…")
+    assert notes == []  # not before the test pattern is there to see
+    pattern.set()
+    _until(lambda: "mira la TV" in controller.status()[1])
     assert controller.status() == ("busy", "Probando Sala familiar: prueba 4 de 4, mira la TV…")
     assert notes == [("Probar Sala familiar", "Mira la TV ahora: durante unos 10 s debería mostrar una imagen de "
                       "prueba en movimiento, duplicada desde este equipo.", False)]
     release.set()
     _until(lambda: controller.probe_future is None)
     assert shown == [report] and not controller.is_active
+
+
+def test_test_this_tv_does_not_promise_a_moving_pattern_it_will_not_send(controller, monkeypatch):
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    controller.set_language("es")
+    device = _device(features=APPLE_TV_FEATURES, is_apple=True, airplay=PAIRED)
+    controller.devices = [device]
+    controller.settings.last_device_id = device.identifier
+    intro = []
+
+    def cancel() -> None:
+        dialog = QApplication.activeModalWidget()
+        intro.append(dialog.text())
+        next(b for b in dialog.buttons() if dialog.buttonRole(b) == QMessageBox.RejectRole).click()
+
+    QTimer.singleShot(0, cancel)
+    controller.test_tv()
+    assert intro and intro[0].startswith("MirrorBridge probará tres formas de enviar un video a Sala familiar, una "
+                                         "tras otra, durante unos dos minutos en total.")
+    assert ("La cuarta prueba, la duplicación de pantalla, se omite: la TV necesita FairPlay para duplicar la "
+            "pantalla, como los Apple TV y los Mac, y MirrorBridge todavía no lo tiene.") in intro[0]
+    assert "en movimiento" not in intro[0] and controller.probe_future is None
 
 
 def test_stop_casting_stops_the_test(controller, monkeypatch):
@@ -630,7 +801,7 @@ def test_stop_casting_stops_the_test(controller, monkeypatch):
     started, errors, torn_down = [], [], threading.Event()
     release = threading.Event()
 
-    async def run(manager, tv, settings, *, progress):
+    async def run(manager, tv, settings, *, progress, watch):
         started.append(True)
         try:
             await asyncio.sleep(60)
@@ -666,7 +837,7 @@ def test_quit_waits_for_the_test_to_stop(controller, monkeypatch):
     controller.settings.last_device_id = device.identifier
     started, torn_down = [], []
 
-    async def run(manager, tv, settings, *, progress):
+    async def run(manager, tv, settings, *, progress, watch):
         started.append(True)
         try:
             await asyncio.sleep(60)
@@ -705,8 +876,8 @@ def test_the_report_dialog_speaks_the_users_language(controller):
         f"descargó el video (User-Agent: {TV_AGENT})",
         "4. La duplicación de pantalla con una imagen de prueba en movimiento, desde este equipo: la TV aceptó la "
         "sesión de duplicación de pantalla y mantuvo abierto el video: recibió 300 fotogramas de la imagen de prueba y "
-        "pidió la hora 48 veces. Lo que funcionó: media-first, with the audio stream, NTP timing, avcC ending "
-        "02000000, lead 100 ms",
+        "pidió la hora 48 veces. Lo que funcionó: media-first, con el flujo de audio, sincronización NTP, final del "
+        "avcC 02000000, adelanto de 100 ms",
         "",
         f"El informe completo está en {REPORT_FILE}: mándalo con tu reporte del problema.",
     ]

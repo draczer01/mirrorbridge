@@ -54,6 +54,8 @@ def _cli_words(message: str, device: Device) -> str:
         "Quality > Encoder > x264 (CPU)": "--encoder libx264",
         "What to cast > Extended screen size > 720p": "--extend-mode 720p",
         "More options > Test this TV": f'probe -d "{device.name}"',
+        "Mirror screen should work": f'mirror -d "{device.name}" should work',
+        "Mirror screen did not work": f'mirror -d "{device.name}" did not work',
     }
     for item, option in paths.items():
         message = message.replace(item, option)
@@ -205,15 +207,18 @@ async def cmd_probe(args) -> int:
 
     def progress(number: int, total: int, name: str) -> None:
         print(f"Test {number} of {total}: {name}...")
-        watch = probe.watch_hint(probe.TESTS[number - 1], args.seconds)
-        if watch:
-            print(watch)
 
-    print(f"Testing {device.name}. Watch the TV: it may show Apple's test video, then MirrorBridge's test "
-          f"pattern, and during the last test a moving test pattern, mirrored from this PC. If the TV asks "
-          f"whether to allow MirrorBridge, choose Allow. This takes about three minutes.")
+    skipped = probe.mirroring_skipped(device)
+    if skipped is None:
+        print(f"Testing {device.name}. Watch the TV: it may show Apple's test video, then MirrorBridge's test "
+              f"pattern, and during the last test a moving test pattern, mirrored from this PC. If the TV asks "
+              f"whether to allow MirrorBridge, choose Allow. This takes about three minutes.")
+    else:
+        print(f"Testing {device.name}. Watch the TV: it may show Apple's test video, then MirrorBridge's test "
+              f"pattern. If the TV asks whether to allow MirrorBridge, choose Allow. This takes about two minutes. "
+              f"The fourth test, screen mirroring, is skipped: {_cli_words(skipped, device)}.")
     report = await probe.run(manager, device, settings, seconds=args.seconds, public_url=args.url,
-                             progress=progress)
+                             progress=progress, watch=print)
     print()
     for line in report.lines():
         print(_cli_words(line, device))
