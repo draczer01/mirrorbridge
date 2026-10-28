@@ -4,7 +4,8 @@ AirCast casts your Windows screen (a whole display or one window) with system au
 Apple TV or other AirPlay video receiver. It finds receivers on your network, pairs with
 the PIN shown on the TV, and streams with your GPU's hardware H.264 encoder.
 
-It is a single `AirCast.exe` (FFmpeg included, nothing to install) that lives in the
+It is a single `AirCast.exe` (FFmpeg included, nothing to install; only Extend screen
+needs a driver, which AirCast offers to install the first time) that lives in the
 system tray. Every feature is in the tray icon's menu; the full window only opens when
 you choose **Open AirCast** in that menu. The interface follows the Windows display
 language (Spanish or English). There is also a command line.
@@ -17,7 +18,7 @@ language (Spanish or English). There is also a command line.
 | PIN pairing (Apple TV shows a 4-digit code, you type it in), saved for next time | Works |
 | AirPlay password-protected receivers | Works |
 | Cast a display or a single window, with system audio | Works, with a 3 to 7 second delay (see below) |
-| Extend screen: the TV as a second monitor | Works, with a free driver from Parsec installed the first time |
+| Extend screen: the TV as a second monitor | Experimental, not yet tested with the real driver; needs a free driver from Parsec, installed the first time |
 | Hardware encoding: NVIDIA NVENC, Intel Quick Sync, AMD AMF, Media Foundation, x264 fallback | Auto-detected |
 | Play a local video file on the TV | Works |
 | Real-time screen mirroring like a Mac or iPhone (under 0.5 s delay) | Not possible yet, see below |
@@ -67,6 +68,8 @@ start the cast again. Minimized windows cannot be cast.
 
 ### Extend screen (the TV as a second screen)
 
+Experimental: it has not yet been tested with the real driver.
+
 Choose **What to cast** > **Extend screen (virtual display)**. While you cast, Windows has
 one more monitor that only the TV shows, so the TV works as a second screen: drag windows
 past the right edge of your screen to move them onto it. The screen disappears when the
@@ -108,7 +111,7 @@ AirCast.exe doctor                        # check FFmpeg, GPU encoders, audio ca
 AirCast.exe scan                          # list receivers
 AirCast.exe scan --host 192.168.1.50      # scan one IP directly (when mDNS is blocked)
 AirCast.exe pair -d "Living Room"         # pair using the on-screen PIN
-AirCast.exe cast -d "Living Room"         # cast the main display with audio
+AirCast.exe cast -d "Living Room"         # cast the app's choice (at first, the main display) with audio
 AirCast.exe cast --monitor 2 --fps 60 --bitrate 15000 --latency smooth
 AirCast.exe cast --window "PowerPoint"    # cast a single window
 AirCast.exe cast --file movie.mp4         # play a video file on the TV
@@ -118,6 +121,9 @@ AirCast.exe vdd status                    # is the virtual display driver instal
 AirCast.exe vdd install                   # download and install it (asks first; one UAC prompt)
 AirCast.exe forget -d "Living Room"       # remove the saved pairing
 ```
+
+`cast` starts from the app's settings, so without `--monitor`, `--window` or `--extend` it
+casts what the app has selected under *What to cast*, the virtual screen included.
 
 `AirCast.exe` is a windowed program, so a command opens its own console window, which
 waits for Enter before closing. With output redirected (`AirCast.exe doctor > out.txt`)
@@ -180,8 +186,8 @@ downloaded driver installer stays in `%LOCALAPPDATA%\AirCast\downloads`.
 * **Extend screen**: if Windows does not show the new screen, press Win+P and choose
   *Extend*. If AirCast says the virtual screen is turned off, enable it in Device Manager >
   Display adapters > Parsec Virtual Display Adapter. `AirCast.exe vdd status` shows the
-  driver's state. On laptops with two GPUs the screen may be drawn by the integrated GPU;
-  AirCast then captures it with GDI, which uses more CPU.
+  driver's state. If the virtual screen is drawn by a GPU other than the main one (DXGI
+  adapter 0), AirCast captures it with GDI, which uses more CPU.
 * The full log is in `%APPDATA%\AirCast\aircast.log`; `AirCast.exe -v cast ...` adds
   debug detail.
 
@@ -201,9 +207,12 @@ the playlist fix for sub-second segments), the live-stream keepalive, legacy and
 HomeKit-style (AirPlay 2) PIN pairing, wrong-PIN rejection, a full pair-and-cast run
 against the fake Apple TV, falling back from Desktop Duplication to GDI capture, and
 stopping while a cast is still starting. For Extend screen they cover the driver's IOCTL
-codes and payloads, finding its monitor, the mode fallback, the installer check, the
-clean-up after a crash, and the virtual screen being removed only after FFmpeg has stopped
-(on stop, failure and cancel), all with a fake driver, so no real monitor is ever created.
+codes and payloads, IOCTL time-outs and cancels, reading the driver's state, finding its
+monitor and switching Duplicate or Second screen only to Extend, pings that never wait for
+the presence check, the mode fallback, the installer check (a cached file included), asking
+before any download, the clean-up after a crash, and the virtual screen being removed only
+after FFmpeg has stopped (on stop, failure and cancel), all with a fake driver, so no real
+monitor is ever created.
 
 ## Building AirCast.exe
 

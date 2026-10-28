@@ -42,7 +42,7 @@ class MainWindow(QMainWindow):
         c = self.c
         c.devices_changed.connect(self._render_devices)
         c.scanning_changed.connect(self._scanning)
-        c.activity_changed.connect(self._update_buttons)
+        c.activity_changed.connect(self._activity_changed)
         c.cast_state_changed.connect(self._cast_state)
         c.encoders_detected.connect(self._render_encoders)
         c.settings_changed.connect(self._load_settings)
@@ -228,9 +228,16 @@ class MainWindow(QMainWindow):
             self._save(window_title="", monitor_index=int(self.monitor_combo.currentData() or 0), extend_screen=False)
 
     def _fill_monitors(self) -> None:
-        self.monitor_combo.clear()
-        for mon in ffmpeg.list_monitors():
-            self.monitor_combo.addItem(display_label(mon), mon.index)
+        self._show_monitors(ffmpeg.list_monitors())
+
+    def _show_monitors(self, monitors: list[ffmpeg.Monitor]) -> None:
+        virtual = self.c.virtual_device  # the virtual screen a cast added; it goes when the cast ends
+        with self._filling():
+            self.monitor_combo.clear()
+            for mon in monitors:
+                if not (virtual and mon.device == virtual):
+                    self.monitor_combo.addItem(display_label(mon), mon.index)
+            self.monitor_combo.setCurrentIndex(max(0, self.monitor_combo.findData(self.c.settings.monitor_index)))
 
     def _fill_windows(self) -> None:
         current = self.c.settings.window_title or self.window_combo.currentText()
@@ -318,6 +325,11 @@ class MainWindow(QMainWindow):
         if message and state in (State.STARTING, State.CASTING, State.FAILED):
             text = f"{text}: {message}"  # encoder in use, stream address, or the error
         self.status_label.setText(text)
+
+    def _activity_changed(self) -> None:
+        self._update_buttons()
+        if not self.c.is_active:  # a cast that ended may have removed its virtual screen
+            self.c.run_blocking(ffmpeg.list_monitors, on_ok=self._show_monitors)
 
     def _update_buttons(self) -> None:
         dev = self.c.selected_device

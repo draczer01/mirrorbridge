@@ -27,7 +27,8 @@ _LOGGER = logging.getLogger(__name__)
 # Size choices: (menu label, settings value). The pixel size is added from vdisplay.EXTEND_MODES.
 EXTEND_SIZES = [("1080p", "1080p"), ("720p", "720p"), ("4K", "4k")]
 
-_ERROR_KEYS = {"add_failed": "vdd_add_failed", "not_attached": "vdd_not_attached", "lost": "vdd_lost"}
+_ERROR_KEYS = {"add_failed": "vdd_add_failed", "not_attached": "vdd_not_attached", "lost": "vdd_lost",
+               "mismatch": "vdd_mismatch", "unsupported": "vdd_unsupported"}
 STATUS_KEYS = {
     DriverStatus.NOT_INSTALLED: "vdd_st_missing",
     DriverStatus.DISABLED: "vdd_st_disabled",
@@ -63,6 +64,7 @@ class ExtendScreenSetup:
     def __init__(self, controller: "Controller") -> None:
         self.c = controller
         self.busy = False  # a check, a dialog or an install is under way
+        self._from_cast = False  # this check started when a cast found the driver not working
 
     # -- entry points --------------------------------------------------------
 
@@ -80,7 +82,8 @@ class ExtendScreenSetup:
         """A cast found the driver missing or broken: the same dialogs as picking Extend screen."""
         if not self.busy:
             self.busy = True
-            self._checked(status, from_cast=True)
+            self._from_cast = True
+            self._checked(status)
 
     def remove_driver(self, *_args) -> None:
         """Windows' own uninstaller is in Settings > Apps; the installer registers it there."""
@@ -92,19 +95,16 @@ class ExtendScreenSetup:
     def _check_failed(self, exc: BaseException) -> None:
         _LOGGER.error("Virtual screen driver check failed: %s", exc)
         self._finish()
-        self.c.notify.emit(tr("extend_screen"), str(exc), True)
+        self.c.notify.emit(tr("extend_screen"), f"{tr('vdd_check_failed')}\n{error_text(exc)}", True)
 
-    def _checked(self, status: DriverStatus, from_cast: bool = False) -> None:
+    def _checked(self, status: DriverStatus) -> None:
         self.c.vdd_status = status
         _LOGGER.info("Virtual screen driver: %s", status.value)
         if status is DriverStatus.OK:
             self._enable()
         elif status is DriverStatus.NOT_INSTALLED:
-            if self._consent():
-                self._install()
+            if self._consent_and_install():
                 return
-            if from_cast:
-                self.c.update_settings(extend_screen=False)  # so Start casts a display again
         elif status is DriverStatus.RESTART_REQUIRED:
             self._enable()  # works after the restart
             self._message(QMessageBox.Information, tr("vdd_st_restart"))
@@ -119,6 +119,11 @@ class ExtendScreenSetup:
         self.c.update_settings(extend_screen=True, window_title="")
 
     def _finish(self) -> None:
+        if self._from_cast and self.c.vdd_status is not DriverStatus.OK and self.c.settings.extend_screen:
+            # Otherwise every Start would end in the same dialog and cast nothing.
+            self.c.update_settings(extend_screen=False)
+            self.c.notify.emit(tr("extend_screen"), tr("vdd_extend_off"), False)
+        self._from_cast = False
         self.busy = False
         self.c.settings_changed.emit()  # the window's radio buttons follow the saved choice
 
@@ -146,6 +151,14 @@ class ExtendScreenSetup:
         box.exec()
         return box.clickedButton() is install
 
+    def _consent_and_install(self) -> bool:
+        """Install, or reinstall, only after the user agreed to Parsec's download and terms.
+        True if the install started."""
+        if not self._consent():
+            return False
+        self._install()
+        return True
+
     def _broken(self, text: str, info: str = "") -> bool:
         """The driver is there but does not work. True if a reinstall started."""
         box = self._box(QMessageBox.Warning, text, info)
@@ -153,10 +166,7 @@ class ExtendScreenSetup:
         box.addButton(tr("close"), QMessageBox.RejectRole)
         self.c.bring_to_front(box)
         box.exec()
-        if box.clickedButton() is reinstall:
-            self._install()
-            return True
-        return False
+        return box.clickedButton() is reinstall and self._consent_and_install()
 
     def _disabled(self, text: str) -> bool:
         """The adapter is turned off in Device Manager. True if a reinstall started."""
@@ -172,24 +182,29 @@ class ExtendScreenSetup:
             except OSError as ex:
                 self.c.notify.emit(tr("vdd_open_devmgmt"), str(ex), True)
         elif box.clickedButton() is reinstall:
-            self._install()
-            return True
+            return self._consent_and_install()
         return False
 
     def _download_failed(self, exc: VddError) -> None:
-        box = self._box(QMessageBox.Warning, tr("vdd_download_failed", error=exc.detail or exc))
+        # A file that did not match is never offered again; a network error is only detail.
+        mismatch = exc.code == "mismatch"
+        if mismatch:
+            box = self._box(QMessageBox.Warning, tr("vdd_mismatch"))
+        else:
+            box = self._box(QMessageBox.Warning, tr("vdd_download_failed"), exc.detail)
         winget = box.addButton(tr("vdd_winget"), QMessageBox.ActionRole)
-        manual = box.addButton(tr("vdd_manual"), QMessageBox.ActionRole)
+        manual = None if mismatch else box.addButton(tr("vdd_manual"), QMessageBox.ActionRole)
         box.addButton(tr("close"), QMessageBox.RejectRole)
         self.c.bring_to_front(box)
         box.exec()
         if box.clickedButton() is winget:
+            missing = "vdd_winget_missing" if manual is not None else "vdd_winget_missing_only"
             self.c.run_blocking(
                 vdisplay.install_with_winget,
                 on_ok=lambda _: self.c.notify.emit(tr("vdd_winget"), tr("vdd_choose_again"), False),
-                on_err=lambda _exc: self.c.notify.emit(tr("vdd_winget"), tr("vdd_winget_missing"), True),
+                on_err=lambda _exc: self.c.notify.emit(tr("vdd_winget"), tr(missing), True),
             )
-        elif box.clickedButton() is manual:
+        elif manual is not None and box.clickedButton() is manual:
             QDesktopServices.openUrl(QUrl(vdisplay.VDD_INSTALLER_URL))
             self.c.notify.emit(tr("vdd_manual"), tr("vdd_choose_again"), False)
 
@@ -253,7 +268,11 @@ class ExtendScreenSetup:
         def failed(exc: BaseException) -> None:
             close_progress()
             _LOGGER.error("Driver install failed: %s", exc)
-            self._message(QMessageBox.Warning, tr("vdd_install_failed"), str(exc))
+            if isinstance(exc, VddError) and exc.code == "install":
+                detail = tr("vdd_installer_error", error=exc.detail)  # the detail is Windows' own text
+            else:
+                detail = error_text(exc)
+            self._message(QMessageBox.Warning, tr("vdd_install_failed"), detail)
             self._finish()
 
         c.run_blocking(job, on_ok=done, on_err=failed)

@@ -115,7 +115,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "vdd_install": {"en": "Install", "es": "Instalar"},
     "vdd_not_now": {"en": "Not now", "es": "Ahora no"},
     "vdd_reinstall": {"en": "Reinstall", "es": "Reinstalar"},
-    "vdd_open_devmgmt": {"en": "Open Device Manager", "es": "Abrir Administrador de dispositivos"},
+    "vdd_open_devmgmt": {"en": "Open Device Manager", "es": "Abrir el Administrador de dispositivos"},
     "vdd_downloading": {"en": "Downloading the driver… {pct}%", "es": "Descargando el controlador… {pct}%"},
     "vdd_asking": {
         "en": "Windows will ask for permission to install the driver…",
@@ -129,27 +129,50 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "Empieza a transmitir y la TV será una segunda pantalla.",
     },
     "vdd_uac_cancelled": {
-        "en": "Not installed: the Windows permission was cancelled.",
-        "es": "No se instaló: se canceló el permiso de Windows.",
+        "en": "Not installed: you cancelled the Windows permission request.",
+        "es": "No se instaló: cancelaste la solicitud de permiso de Windows.",
     },
     "vdd_restart_to_finish": {
         "en": "Restart Windows to finish the installation.",
         "es": "Reinicia Windows para terminar la instalación.",
     },
     "vdd_enable_hint": {
-        "en": "Turn it on in Device Manager → Display adapters → Parsec Virtual Display Adapter → Enable.",
-        "es": "Actívala en Administrador de dispositivos → Adaptadores de pantalla → Parsec Virtual Display "
-              "Adapter → Habilitar.",
+        "en": "To turn it on, open Device Manager, go to Display adapters, right-click Parsec Virtual "
+              "Display Adapter and choose Enable device.",
+        "es": "Para activarla, abre el Administrador de dispositivos, ve a Adaptadores de pantalla, haz "
+              "clic derecho en Parsec Virtual Display Adapter y elige Habilitar dispositivo.",
     },
     "vdd_no_answer": {
         "en": "The driver did not respond. Restart Windows or reinstall it.",
         "es": "El controlador no respondió. Reinicia Windows o reinstálalo.",
     },
     "vdd_download_failed": {
-        "en": "Could not download the driver.\n\n{error}",
-        "es": "No se pudo descargar el controlador.\n\n{error}",
+        "en": "Could not download the driver. Check the internet connection, or install it another way.",
+        "es": "No se pudo descargar el controlador. Revisa la conexión a internet o instálalo de otra forma.",
+    },
+    "vdd_mismatch": {
+        "en": "The downloaded file is not the expected driver installer, so AirCast did not run it.",
+        "es": "El archivo descargado no es el instalador esperado, así que AirCast no lo ejecutó.",
     },
     "vdd_install_failed": {"en": "Could not install the driver", "es": "No se pudo instalar el controlador"},
+    "vdd_installer_error": {
+        "en": "Windows could not run the installer: {error}",
+        "es": "Windows no pudo ejecutar el instalador: {error}",
+    },
+    "vdd_check_failed": {
+        "en": "Could not check the virtual screen driver.",
+        "es": "No se pudo comprobar el controlador de pantalla virtual.",
+    },
+    "vdd_unsupported": {
+        "en": "The virtual screen needs Windows 10 or 11.",
+        "es": "La pantalla virtual necesita Windows 10 u 11.",
+    },
+    "vdd_extend_off": {
+        "en": "Extend screen is off for now, so Start casting sends your display. Choose it again once "
+              "the driver works.",
+        "es": "Extender pantalla quedó desactivado, así que Transmitir enviará tu pantalla. Vuelve a "
+              "elegirlo cuando el controlador funcione.",
+    },
     "vdd_winget": {"en": "Install with winget", "es": "Instalar con winget"},
     "vdd_manual": {"en": "Download manually", "es": "Descargar manualmente"},
     "vdd_choose_again": {
@@ -159,6 +182,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     "vdd_winget_missing": {
         "en": "winget is not available on this PC. Use Download manually instead.",
         "es": "winget no está disponible en este equipo. Usa Descargar manualmente.",
+    },
+    "vdd_winget_missing_only": {
+        "en": "winget is not available on this PC, so the driver cannot be installed from here.",
+        "es": "winget no está disponible en este equipo, así que no se puede instalar el controlador desde aquí.",
     },
     "vdd_remove_hint": {
         "en": "Look for \"Parsec Virtual Display Driver\" in the list and choose Uninstall.",

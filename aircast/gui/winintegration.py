@@ -122,5 +122,7 @@ def open_folder(path: str) -> None:
 
 def open_device_manager() -> None:
     """Device Manager, where a disabled virtual display adapter is turned back on. Through the
-    shell, so Windows can offer the elevation that enabling a device needs."""
-    os.startfile("devmgmt.msc")  # type: ignore[attr-defined]  # pylint: disable=no-member
+    shell, so Windows can offer the elevation that enabling a device needs. By full path: the
+    shell would open a devmgmt.msc in the current folder (often Downloads) first."""
+    system32 = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+    os.startfile(os.path.join(system32, "devmgmt.msc"))  # type: ignore[attr-defined]  # pylint: disable=no-member

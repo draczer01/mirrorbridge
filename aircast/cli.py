@@ -232,9 +232,16 @@ async def cmd_vdd(args) -> int:
     return 0 if status is vdisplay.DriverStatus.OK else 1
 
 
+_WINGET_HINT = f"Install it with winget instead:  winget install -e --id {vdisplay.VDD_WINGET_ID}"
+
+
 async def _vdd_install(args) -> int:
-    if vdisplay.backend().status() is vdisplay.DriverStatus.OK:
+    status = vdisplay.backend().status()
+    if status is vdisplay.DriverStatus.OK:
         print("The virtual display driver is already installed and working.")
+        return 0
+    if status is vdisplay.DriverStatus.RESTART_REQUIRED:
+        print("The virtual display driver is installed. Restart Windows to finish installing it.")
         return 0
     about = (
         "AirCast's Extend screen uses the free \"Parsec Virtual Display Driver\" from Parsec (Unity).\n"
@@ -255,12 +262,18 @@ async def _vdd_install(args) -> int:
 
     try:
         installer = vdisplay.download_installer(progress=progress)
-    except vdisplay.VddError as ex:
-        print(f"\n{ex}\nInstall it with winget instead:  winget install -e --id {vdisplay.VDD_WINGET_ID}\n"
-              f"or download it yourself: {vdisplay.VDD_INSTALLER_URL}")
+    except (vdisplay.VddError, OSError) as ex:
+        print(f"\n{ex}\n{_WINGET_HINT}")
+        if getattr(ex, "code", "") != "mismatch":  # a file that did not match is not offered again
+            print(f"or download it yourself: {vdisplay.VDD_INSTALLER_URL}")
         return 1
     print(f"\nVerified {installer}. Windows will ask for permission...")
-    if not vdisplay.run_installer_elevated(installer):
+    try:
+        started = vdisplay.run_installer_elevated(installer)
+    except (vdisplay.VddError, OSError) as ex:
+        print(f"{ex}\n{_WINGET_HINT}")
+        return 1
+    if not started:
         print("Not installed: the Windows permission was cancelled.")
         return 1
     print("Waiting for the driver to start...")
@@ -299,8 +312,10 @@ def build_parser() -> argparse.ArgumentParser:
     cast.add_argument("--no-audio", action="store_true")
     cast.add_argument("--ffmpeg", dest="ffmpeg_path")
     cast.add_argument("--extend", action="store_true",
-                      help="cast a new virtual screen, so the TV works as a second screen")
-    cast.add_argument("--extend-mode", choices=list(vdisplay.EXTEND_MODES), help="size of that screen (default 1080p)")
+                      help="cast a new virtual screen, so the TV works as a second screen (with none of "
+                           "--extend, --monitor or --window, cast uses the app's 'What to cast' choice)")
+    cast.add_argument("--extend-mode", choices=list(vdisplay.EXTEND_MODES),
+                      help="size of that screen (default: the app's choice, 1080p at first)")
 
     vdd = sub.add_parser("vdd", help="the virtual display driver that --extend uses")
     vdd_sub = vdd.add_subparsers(dest="vdd_command", required=True, metavar="{status,install}")

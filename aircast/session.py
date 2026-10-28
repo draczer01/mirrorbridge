@@ -236,7 +236,7 @@ class CastSession:
         s = self.settings
         self._set(State.EXTENDING)
 
-        def lost() -> None:  # called from the driver's keep-alive thread
+        def lost() -> None:  # called from the driver's keep-alive or presence-check thread
             self._lost = True
             try:
                 loop.call_soon_threadsafe(self._stop_requested.set)
@@ -248,7 +248,8 @@ class CastSession:
         name = await loop.run_in_executor(None, self._xscreen.start, width, height, hz)
         self.virtual_device = name
         for _ in range(10):  # the display list can lag a moment behind the driver
-            monitor = next((m for m in ffmpeg.list_monitors() if m.device.lower() == name.lower()), None)
+            monitors = await loop.run_in_executor(None, ffmpeg.list_monitors)  # DXGI is slow right after a mode change
+            monitor = next((m for m in monitors if m.device.lower() == name.lower()), None)
             if monitor is not None:
                 break
             await asyncio.sleep(0.2)

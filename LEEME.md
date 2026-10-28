@@ -2,7 +2,8 @@
 
 AirCast transmite la pantalla de Windows (completa o una sola ventana), con el sonido del
 equipo, a un Apple TV o a una TV con AirPlay. Es un solo archivo, `AirCast.exe`, que ya
-trae FFmpeg adentro: no hay que instalar nada.
+trae FFmpeg adentro: no hay que instalar nada (solo *Extender pantalla* necesita un
+controlador, que AirCast ofrece instalar la primera vez).
 
 ## Uso
 
@@ -28,18 +29,23 @@ trae FFmpeg adentro: no hay que instalar nada.
 
 ## Extender pantalla (la TV como segunda pantalla)
 
+Es experimental: todavía no se probó con el controlador real.
+
 En el menú, **Qué transmitir** > **Extender pantalla (pantalla virtual)**. Mientras
 transmites, Windows tiene un monitor más que solo se ve en la TV: arrastra ventanas hacia
 la derecha de tu pantalla para llevarlas a la TV. Al detener la transmisión, esa pantalla
 desaparece. En **Tamaño de la pantalla extendida** eliges 1080p (el normal), 720p (letra
-más grande y menos datos) o 4K (se envía a 20 Mbps o más).
+más grande y menos datos) o 4K (se envía a 20 Mbps o más). La TV recibe exactamente ese
+tamaño, así que la **Resolución** de *Calidad* no se aplica en este modo.
 
 Windows no puede crear un monitor por sí solo, así que AirCast usa el controlador gratuito
 **Parsec Virtual Display Driver** de Parsec (hoy parte de Unity), firmado por Microsoft.
 AirCast no lo incluye. La primera vez te pregunta antes de hacer nada; si aceptas, descarga
 el instalador oficial de parsec.app (unos 500 KB), comprueba que sea exactamente el archivo
 esperado y lo ejecuta. Windows te pide permiso una sola vez. Al instalarlo aceptas los
-[términos de Parsec](https://parsec.app/terms).
+[términos de Parsec](https://parsec.app/terms). Si la descarga está bloqueada, el mismo
+cuadro ofrece instalarlo con winget (`winget install -e --id Parsec.ParsecVDD`) o
+descargarlo a mano.
 
 Para quitarlo: *Más opciones* > *Quitar el controlador de pantalla virtual* abre
 Configuración > Aplicaciones; desinstala ahí **Parsec Virtual Display Driver**.

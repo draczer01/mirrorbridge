@@ -68,6 +68,11 @@ IOCTL_VDD_UPDATE = 0x0022A00C  # CTL_CODE(0x22, 0x803, METHOD_BUFFERED, FILE_WRI
 IOCTL_VDD_VERSION = 0x0022E010  # CTL_CODE(0x22, 0x804, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
 VDD_IN_BUFFER_SIZE = 32
 PING_INTERVAL_S = 0.1  # ParsecDisplay pings every 100 ms; the driver gives up after ~1 s of silence
+PRESENCE_INTERVAL_S = 1.0  # how often a cast checks that Windows still has its monitor
+EXTEND_AFTER_S = 2.0  # how long Windows gets to put a new monitor on the desktop by itself
+
+# Monitors' device interface; its paths are the monitor IDs EnumDisplayDevicesW reports.
+GUID_DEVINTERFACE_MONITOR = _guid(0xE6F07B5F, 0xEE97, 0x4A90, (0xB0, 0x76, 0x33, 0xF5, 0x7B, 0xF4, 0xEA, 0xA7))
 
 # Parsec's official installer (signed by Parsec Cloud, Inc.), pinned to the winget manifest of
 # Parsec.ParsecVDD 0.45.0.0. Parsec's licence does not allow bundling it, so it is downloaded.
@@ -97,7 +102,7 @@ FILE_FLAG_OVERLAPPED = 0x40000000
 FILE_FLAG_NO_BUFFERING = 0x20000000
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 ERROR_ACCESS_DENIED = 5
-ERROR_INVALID_HANDLE = 6
+ERROR_IO_PENDING = 997
 ERROR_CANCELLED = 1223
 WAIT_TIMEOUT = 258
 STILL_ACTIVE = 259
@@ -219,6 +224,7 @@ _MESSAGES = {
     "not_attached": 'Windows did not turn on the virtual screen. Press Win+P, choose "Extend" and try again.',
     "lost": "The virtual screen closed (for example, when the PC went to sleep). Start casting again.",
     "download": "Could not download the virtual screen driver",
+    "mismatch": "The downloaded file is not the expected driver installer, so it was not run.",
     "install": "Could not run the virtual screen driver installer",
     "cancelled": "Cancelled",
     "unsupported": "Virtual screens need Windows 10 or 11",
@@ -227,8 +233,8 @@ _MESSAGES = {
 
 class VddError(RuntimeError):
     """A virtual screen problem. `code` says which one, so the app can explain it in the user's
-    language: "driver:<DriverStatus value>", add_failed, not_attached, lost, download, install,
-    cancelled or unsupported."""
+    language: "driver:<DriverStatus value>", add_failed, not_attached, lost, download, mismatch,
+    install, cancelled or unsupported."""
 
     def __init__(self, code: str, detail: str = "") -> None:
         message = _MESSAGES.get(code, code)
@@ -464,7 +470,8 @@ class VddDevice:
             self._handle = 0
 
     def ioctl(self, code: int, payload: bytes = b"", timeout_ms: int = 1000) -> Optional[int]:
-        """Send one IOCTL the way the reference library does. Returns the DWORD output, or None."""
+        """Send one IOCTL (32 bytes in, a DWORD out) and wait at most about timeout_ms + 2 s.
+        Returns the DWORD output, or None."""
         k32 = _dlls().kernel32
         if not self._handle:
             return None
@@ -478,21 +485,23 @@ class VddDevice:
         done = wintypes.DWORD(0)
         leak = False
         try:
-            # Like the reference library, do not trust the synchronous result: the driver can
-            # return FALSE with a non-pending error and still queue the request. Only errors the
-            # I/O manager raises before the driver sees the request are final.
+            # Any error but ERROR_IO_PENDING is final: a request that fails at once was never
+            # queued, so nothing writes into inbuf/out/ov later and the event is never set. The
+            # driver's requests always pend; they fail at once when its device has gone away.
             if not k32.DeviceIoControl(self._handle, code, inbuf, VDD_IN_BUFFER_SIZE, ctypes.byref(out),
-                                       ctypes.sizeof(out), None, ctypes.byref(ov)):
-                if ctypes.get_last_error() in (ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE):
-                    return None
+                                       ctypes.sizeof(out), None, ctypes.byref(ov)) \
+                    and ctypes.get_last_error() != ERROR_IO_PENDING:
+                return None
             if k32.GetOverlappedResultEx(self._handle, ctypes.byref(ov), ctypes.byref(done), timeout_ms, False):
                 return out.value
+            if ctypes.get_last_error() != WAIT_TIMEOUT:
+                return None  # it completed, with an error
             # Never return while the kernel may still write into inbuf/out/ov, and never block
-            # forever either: the reference code's GetOverlappedResult(bWait=TRUE) can hang when
-            # nothing was queued.
+            # forever either: the reference code's GetOverlappedResult(bWait=TRUE) can hang.
             k32.CancelIoEx(self._handle, ctypes.byref(ov))
-            if not k32.GetOverlappedResultEx(self._handle, ctypes.byref(ov), ctypes.byref(done), 2000, False) \
-                    and ctypes.get_last_error() == WAIT_TIMEOUT:
+            if k32.GetOverlappedResultEx(self._handle, ctypes.byref(ov), ctypes.byref(done), 2000, False):
+                return out.value  # it finished before the cancel took effect: a slow ADD still counts
+            if ctypes.get_last_error() == WAIT_TIMEOUT:
                 leak = True
                 _LEAKED.append((inbuf, out, ov))  # keeps the memory valid for a late completion
             return None
@@ -530,10 +539,10 @@ def _raise_thread_priority() -> None:
 
 
 class KeepAlive(threading.Thread):
-    """Pings the driver every 100 ms while AirCast owns a monitor.
+    """Pings the driver every 100 ms while AirCast owns a monitor, and does nothing else: a ping
+    that waits for anything (a display enumeration, ADD's 5 s) can cost the monitor.
 
-    Calls on_lost once when the driver stops answering (5 failed pings in a row) or the watched
-    monitor disappears (the watchdog fired while the PC slept, for example), then stops.
+    Calls on_lost once when the driver stops answering (5 failed pings in a row), then stops.
     """
 
     def __init__(self, device: VddDevice, on_lost: Optional[Callable[[], None]] = None) -> None:
@@ -541,15 +550,10 @@ class KeepAlive(threading.Thread):
         self._device = device
         self._on_lost = on_lost
         self._stop_event = threading.Event()
-        self._present: Optional[Callable[[], bool]] = None
-
-    def watch(self, present: Optional[Callable[[], bool]]) -> None:
-        """Check about once a second that `present()` is still true; None stops checking."""
-        self._present = present
 
     def run(self) -> None:
         _raise_thread_priority()
-        failures = missing = ticks = 0
+        failures = 0
         last = time.monotonic()
         while not self._stop_event.wait(PING_INTERVAL_S):
             now = time.monotonic()
@@ -557,13 +561,8 @@ class KeepAlive(threading.Thread):
                 _LOGGER.warning("Virtual screen keep-alive ran %.0f ms late", (now - last) * 1000)
             last = now
             failures = 0 if self._device.update() else failures + 1
-            ticks += 1
-            present = self._present
-            if present is not None and ticks % 10 == 0:
-                missing = 0 if present() else missing + 1
-            if failures >= 5 or missing >= 2:
-                _LOGGER.error("The virtual screen is gone (%s)",
-                              "the driver stopped answering" if failures >= 5 else "Windows removed it")
+            if failures >= 5:
+                _LOGGER.error("The virtual screen is gone (the driver stopped answering)")
                 if self._on_lost and not self._stop_event.is_set():
                     self._on_lost()
                 return
@@ -572,6 +571,36 @@ class KeepAlive(threading.Thread):
         self._stop_event.set()
         if self.is_alive() and threading.current_thread() is not self:
             self.join(timeout=2)
+
+
+class PresenceWatch(threading.Thread):
+    """Checks about once a second that Windows still has the monitor (the watchdog removes it
+    while the PC sleeps, for example) and calls on_lost once after two misses, then stops.
+
+    A thread of its own: EnumDisplayDevicesW waits for any display mode change under way
+    (a monitor waking up, HDR, Win+P), which can take seconds, and the pings must not wait.
+    """
+
+    def __init__(self, present: Callable[[], bool], on_lost: Callable[[], None]) -> None:
+        super().__init__(name="aircast-vdd-presence", daemon=True)
+        self._present = present
+        self._on_lost = on_lost
+        self._stop_event = threading.Event()
+
+    def run(self) -> None:
+        missing = 0
+        while not self._stop_event.wait(PRESENCE_INTERVAL_S):
+            missing = 0 if self._present() else missing + 1
+            if missing >= 2:
+                _LOGGER.error("The virtual screen is gone (Windows removed it)")
+                if not self._stop_event.is_set():
+                    self._on_lost()
+                return
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self.is_alive() and threading.current_thread() is not self:
+            self.join(timeout=1)  # a check stuck in Windows ends on its own and reports nothing
 
 
 # -- finding the new monitor, extending, setting the mode --------------------------------
@@ -631,6 +660,58 @@ def _present(uid: int) -> bool:
     return any(src.uid == uid for src in vdd_sources())
 
 
+def _monitor_known(uid: int) -> bool:
+    """Whether Windows has the monitor with this UID as a device yet, on the desktop or not."""
+    return any(parse_uid(path) == uid for path in interface_paths(GUID_DEVINTERFACE_MONITOR))
+
+
+Rect = tuple[int, int, int, int]  # left, top, right, bottom
+
+
+def desktop_rects() -> dict[str, Rect]:
+    """{\\\\.\\DISPLAYn: its rectangle} for every source that is part of the desktop."""
+    u32 = _dlls().user32
+    rects: dict[str, Rect] = {}
+    i = 0
+    while True:
+        src = DISPLAY_DEVICEW()
+        src.cb = ctypes.sizeof(src)
+        if not u32.EnumDisplayDevicesW(None, i, ctypes.byref(src), 0):
+            break
+        i += 1
+        if not src.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP:
+            continue
+        dm = _DEVMODEW()
+        dm.dmSize = ctypes.sizeof(dm)
+        if u32.EnumDisplaySettingsW(src.DeviceName, ENUM_CURRENT_SETTINGS, ctypes.byref(dm)):
+            rects[src.DeviceName] = (dm.dmPositionX, dm.dmPositionY,
+                                     dm.dmPositionX + dm.dmPelsWidth, dm.dmPositionY + dm.dmPelsHeight)
+    return rects
+
+
+def own_screen_on_desktop() -> bool:
+    """Whether the desktop has a screen that is not a Parsec monitor (a headless PC may have none)."""
+    parsec = {src.device_name for src in vdd_sources()}
+    return any(name not in parsec for name in desktop_rects())
+
+
+def is_extended(name: str, rects: dict[str, Rect], parsec: set[str], own_screen: bool = True) -> bool:
+    """Whether source `name` is a screen of its own next to the PC's: on the desktop, not
+    overlapping another screen (Duplicate shows both at the same spot), and not the only screen
+    left when the PC had one of its own ("Second screen only").
+
+    `parsec` is the source names of every Parsec monitor; `own_screen` is whether the desktop
+    had a screen that is not one before the virtual monitor was added.
+    """
+    rect = rects.get(name)
+    if rect is None:
+        return False
+    for other, (left, top, right, bottom) in rects.items():
+        if other != name and left < rect[2] and rect[0] < right and top < rect[3] and rect[1] < bottom:
+            return False
+    return not own_screen or any(other not in parsec for other in rects)
+
+
 def extend_desktop() -> bool:
     """Win+P "Extend": apply the extend topology from the display database."""
     rc = _dlls().user32.SetDisplayConfig(0, None, 0, None, SDC_TOPOLOGY_EXTEND | SDC_APPLY)
@@ -639,20 +720,29 @@ def extend_desktop() -> bool:
     return rc == 0
 
 
-def wait_for_source(index: int, timeout: float = 10.0, cancel: Optional[threading.Event] = None) -> str:
-    """Wait until the monitor with driver index `index` is part of the desktop; returns \\\\.\\DISPLAYn."""
+def wait_for_source(index: int, timeout: float = 10.0, cancel: Optional[threading.Event] = None,
+                    own_screen: bool = True) -> str:
+    """Wait until the monitor with driver index `index` extends the desktop; returns \\\\.\\DISPLAYn.
+
+    `own_screen`: the desktop had a screen of its own before the monitor was added, so it must
+    still have one (see is_extended).
+    """
     uid = VDD_UID_BASE + index
     start = time.monotonic()
     extended = False
     while time.monotonic() - start < timeout:
-        for src in vdd_sources():
-            if src.uid == uid and src.attached_to_desktop:
-                return src.device_name
-        if not extended and time.monotonic() - start > 2.0:
-            # Still not on the desktop: Windows remembered another topology (Duplicate, PC screen
-            # only...). Apply Win+P "Extend" once.
+        sources = vdd_sources()
+        mine = next((src for src in sources if src.uid == uid), None)
+        if mine is not None and mine.attached_to_desktop and is_extended(
+                mine.device_name, desktop_rects(), {src.device_name for src in sources}, own_screen):
+            return mine.device_name
+        if not extended and time.monotonic() - start > EXTEND_AFTER_S and (mine is not None or _monitor_known(uid)):
+            # Windows brings back the topology it saved for this set of monitors, so a Duplicate,
+            # PC screen only or Second screen only picked once comes back on every cast. Apply
+            # Win+P "Extend" once, and only once Windows has the new monitor: before that, Extend
+            # would be applied to (and saved for) the user's own monitors alone.
             extended = True
-            _LOGGER.info("The virtual screen is not part of the desktop yet; extending the desktop")
+            _LOGGER.info("The virtual screen does not extend the desktop yet; extending the desktop")
             extend_desktop()
         if cancel is not None and cancel.wait(0.1):
             raise VddError("cancelled")
@@ -865,42 +955,64 @@ class ParsecScreen(VirtualScreen):
         self._cancel = threading.Event()
         self._device: Optional[VddDevice] = None
         self._keepalive: Optional[KeepAlive] = None
+        self._presence: Optional[PresenceWatch] = None
+        self._lost_lock = threading.Lock()
+        self._quiet = False  # on_lost was called, or the monitor is going away on purpose
         self.index: Optional[int] = None
         self.device_name = ""
 
     @classmethod
     def status(cls) -> DriverStatus:
-        return driver_status()
+        """Ready means started and with its device interface there: an adapter can start without
+        registering it, and then it cannot be opened."""
+        status = driver_status()
+        if status is DriverStatus.OK and not interface_paths():
+            return DriverStatus.DRIVER_ERROR
+        return status
 
     @classmethod
     def version(cls) -> str:
         return driver_version()
 
+    def _report_lost(self) -> None:
+        """From the pinger or the presence check: tell the cast once, and never for a monitor
+        that is being removed on purpose."""
+        with self._lost_lock:
+            if self._quiet:
+                return
+            self._quiet = True
+        if self.on_lost:
+            self.on_lost()
+
     def start(self, width: int = 1920, height: int = 1080, hz: int = 60) -> str:
         with self._lock:
             if self._cancel.is_set():
                 raise VddError("cancelled")
-            status = driver_status()
+            status = self.status()
             if status is not DriverStatus.OK:
                 raise VddError(f"driver:{status.value}")
+            with self._lost_lock:
+                self._quiet = False
             try:
                 self._device = VddDevice.open()
                 version = self._device.version()
                 _LOGGER.info("Parsec Virtual Display Driver %s", "%d.%d" % version if version else "(no version)")
                 _remove_stale(self._device)
+                own_screen = own_screen_on_desktop()  # before ADD: Extend has to keep it
                 # Pings start before ADD: the driver drops its monitors ~1 s after the last one.
-                self._keepalive = KeepAlive(self._device, self.on_lost)
+                self._keepalive = KeepAlive(self._device, self._report_lost)
                 self._keepalive.start()
                 self.index = self._device.add()
                 _remember(self.index)
-                self.device_name = wait_for_source(self.index, cancel=self._cancel)
+                self.device_name = wait_for_source(self.index, cancel=self._cancel, own_screen=own_screen)
                 mode = pick_mode((width, height, hz), supported_modes(self.device_name))
                 if mode is None:
                     _LOGGER.warning("The virtual screen offers no %dx%d mode; keeping its default", width, height)
                 else:
                     set_mode(self.device_name, *mode)
                 uid = VDD_UID_BASE + self.index
-                self._keepalive.watch(lambda: _present(uid))
+                self._presence = PresenceWatch(lambda: _present(uid), self._report_lost)
+                self._presence.start()
                 if self._cancel.wait(0.5):  # let the desktop settle before Desktop Duplication opens it
                     raise VddError("cancelled")
                 _ACTIVE.add(self)
@@ -917,10 +1029,12 @@ class ParsecScreen(VirtualScreen):
 
     def _teardown(self) -> None:
         _ACTIVE.discard(self)
-        keepalive, device, index = self._keepalive, self._device, self.index
-        self._keepalive, self._device, self.index = None, None, None
-        if keepalive:
-            keepalive.watch(None)  # its monitor is about to go on purpose
+        with self._lost_lock:
+            self._quiet = True  # its monitor is about to go on purpose
+        presence, keepalive, device, index = self._presence, self._keepalive, self._device, self.index
+        self._presence, self._keepalive, self._device, self.index = None, None, None, None
+        if presence:
+            presence.stop()
         if device and index is not None:
             if device.remove(index):
                 _forget(index)
@@ -975,39 +1089,41 @@ def download_installer(dest_dir: Optional[Path] = None,
                        progress: Optional[Callable[[int, int], None]] = None) -> Path:
     """Download Parsec's official installer and check it against the pinned SHA-256.
 
-    A file that does not match is deleted and never run. `progress(done, total)` is called
-    from this thread; total is 0 when the server does not say.
+    A file that does not match is deleted and never run (VddError "mismatch"); a network or
+    disk problem is VddError "download". `progress(done, total)` is called from this thread;
+    total is 0 when the server does not say.
     """
     import urllib.request
 
     dest_dir = dest_dir or downloads_dir()
-    dest_dir.mkdir(parents=True, exist_ok=True)
     target = dest_dir / VDD_INSTALLER_URL.rsplit("/", 1)[1]
-    if target.exists() and sha256_of(target) == VDD_INSTALLER_SHA256:
-        return target
     part = target.with_name(target.name + ".part")
     request = urllib.request.Request(VDD_INSTALLER_URL, headers={"User-Agent": f"AirCast/{__version__}"})
     try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            if sha256_of(target) == VDD_INSTALLER_SHA256:
+                return target
+            target.unlink()  # changed since it was checked: never run it
         with urllib.request.urlopen(request, timeout=30) as resp, open(part, "wb") as out:
             total = int(resp.headers.get("Content-Length") or 0)
             got = 0
             while chunk := resp.read(65536):
                 got += len(chunk)
                 if got > VDD_INSTALLER_MAX_BYTES:
-                    raise VddError("download", "the file is far larger than expected")
+                    raise VddError("mismatch", "far larger than expected")
                 out.write(chunk)
                 if progress:
                     progress(got, total)
+        if sha256_of(part) != VDD_INSTALLER_SHA256:
+            raise VddError("mismatch")
+        os.replace(part, target)
     except (OSError, http.client.HTTPException) as ex:
         part.unlink(missing_ok=True)
         raise VddError("download", str(ex)) from ex
     except BaseException:
         part.unlink(missing_ok=True)
         raise
-    if sha256_of(part) != VDD_INSTALLER_SHA256:
-        part.unlink(missing_ok=True)
-        raise VddError("download", "the file did not match the expected one")
-    os.replace(part, target)
     return target
 
 
@@ -1036,7 +1152,7 @@ def run_installer_elevated(installer: Path, hwnd: Optional[int] = None,
             err = ctypes.get_last_error()
             if err == ERROR_CANCELLED:
                 return False
-            raise VddError("install", f"Windows error {err}")
+            raise VddError("install", f"{ctypes.FormatError(err).strip()} ({err})")  # in Windows' language
     finally:
         if com >= 0:  # S_OK or S_FALSE; not RPC_E_CHANGED_MODE
             api.ole32.CoUninitialize()
@@ -1066,11 +1182,21 @@ def wait_until_ready(timeout_s: float = 30.0) -> DriverStatus:
         time.sleep(0.5)
 
 
+def winget_path() -> str:
+    """winget's App Execution Alias, by full path: a bare "winget" would run a winget.exe left
+    next to AirCast.exe or in the current folder (often Downloads) first."""
+    local = os.environ.get("LOCALAPPDATA")
+    path = os.path.join(local, "Microsoft", "WindowsApps", "winget.exe") if local else ""
+    if not path or not os.path.exists(path):
+        raise FileNotFoundError("winget is not installed")
+    return path
+
+
 def install_with_winget() -> None:
     """For when the download is blocked: install the same package with winget, in a console
     the user can watch. Raises OSError when winget is missing."""
     subprocess.Popen(  # pylint: disable=consider-using-with
-        ["winget", "install", "-e", "--id", VDD_WINGET_ID, "--silent",
+        [winget_path(), "install", "-e", "--id", VDD_WINGET_ID, "--silent",
          "--accept-package-agreements", "--accept-source-agreements"],
         creationflags=_CREATE_NEW_CONSOLE if sys.platform == "win32" else 0,
     )
