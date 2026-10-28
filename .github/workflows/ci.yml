@@ -12,7 +12,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      # libegl1/libgl1: PySide6.QtWidgets loads them, and the Extend dialog tests import it
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg libegl1 libgl1
       - run: pip install -e ".[dev]"
       - name: Fetch pyatv sources for the fake Apple TV
         run: |
