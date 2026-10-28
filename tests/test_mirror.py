@@ -522,7 +522,10 @@ async def test_the_video_connection_closes_cleanly_once_its_buffer_went_out():
     server = await asyncio.start_server(tv, "127.0.0.1", 0)
     try:
         data = await DataChannel.open("127.0.0.1", server.sockets[0].getsockname()[1], buffer=16384)
-        data.write(b"x" * 300_000)  # more than the socket takes at once: the rest waits in asyncio
+        # Two writes: Windows takes a whole first write into the kernel at once, whatever the send
+        # buffer, but not a second one before the loop has run, so that one waits in asyncio.
+        data.write(b"x" * 150_000)
+        data.write(b"x" * 150_000)
         assert data.buffered > 0
         try:
             await asyncio.wait_for(data.close(seconds=10), 20)
