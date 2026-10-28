@@ -23,7 +23,7 @@ hidden = collect_submodules("pyatv") + collect_submodules("zeroconf") + ["soundc
 # Extend screen (normal imports reach these too; listed so the bundle can never miss them).
 hidden += ["mirrorbridge.vdisplay", "mirrorbridge.extended", "mirrorbridge.gui.extend"]
 # Screen mirroring (experimental): Mirror screen, Test this TV and the mirror command.
-hidden += collect_submodules("mirrorbridge.mirror")
+hidden += collect_submodules("mirrorbridge.mirror") + collect_submodules("mirrorbridge.googlecast")
 datas = collect_data_files("pyatv") + collect_data_files("soundcard")
 
 a = Analysis(
