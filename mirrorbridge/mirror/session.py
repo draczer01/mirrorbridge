@@ -60,7 +60,7 @@ def _env_slew_ns() -> Optional[int]:
         return None
 from .clock import NS, TIMING_PORTS, NtpResponder, PtsMapper, bind_udp, now_ns, to_ntp
 from .control import FEATURE_1080P, ControlChannel, ReceiverInfo, Target, open_event_channel
-from .datachannel import DataChannel
+from .datachannel import HEARTBEAT_IDLE_ONLY, DataChannel
 from .errors import MirrorError, answer_of, data_closed, data_refused, needs_fairplay, no_timing, refused
 from .flv import CONFIG, FRAME
 from .h264 import TRAILERS, avcc_record, frame_nals, is_idr, join_avcc, parse_avcc, parse_sps, split_avcc
@@ -422,8 +422,12 @@ class MirrorSession:
         plan.lead_ms = negotiation.lead_from_env(plan.lead_ms)
         _LOGGER.info("Experiment knobs: keyframe every %g s (MIRRORBRIDGE_KEYFRAME_SECONDS), lead %d ms "
                      "(MIRRORBRIDGE_LEAD_MS), /feedback every %g s (MIRRORBRIDGE_FEEDBACK_S), frames shown %s "
-                     "(MIRRORBRIDGE_ON_ARRIVAL)", ffmpeg.MIRROR_KEYFRAME_SECONDS, plan.lead_ms,
-                     negotiation.FEEDBACK_INTERVAL, "as they arrive" if ON_ARRIVAL else "at their timestamps")
+                     "(MIRRORBRIDGE_ON_ARRIVAL), time requests %s (MIRRORBRIDGE_NTP_STOP_S), heartbeat %s "
+                     "(MIRRORBRIDGE_HEARTBEAT_IDLE_ONLY)", ffmpeg.MIRROR_KEYFRAME_SECONDS, plan.lead_ms,
+                     negotiation.FEEDBACK_INTERVAL, "as they arrive" if ON_ARRIVAL else "at their timestamps",
+                     f"answered for {_env_float('MIRRORBRIDGE_NTP_STOP_S', 0):g} s only"
+                     if "MIRRORBRIDGE_NTP_STOP_S" in os.environ else "always answered",
+                     "only when idle" if HEARTBEAT_IDLE_ONLY else "every second")
         _LOGGER.info("Setting up mirroring to %s (%s): %s", self.target.name,
                      "saved settings" if self.saved else "first time", plan.describe())
         est = self.report.established = await negotiator.establish(plan)

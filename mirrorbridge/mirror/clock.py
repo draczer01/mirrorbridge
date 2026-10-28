@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import struct
 import time
 from collections import deque
@@ -79,6 +80,13 @@ def ntp_request(sent_ns: int) -> bytes:
     return struct.pack(">BBHIQQQ", 0x80, NTP_REQUEST, 7, 0, 0, 0, to_ntp(sent_ns, True))
 
 
+def _ntp_stop_ns() -> Optional[int]:
+    try:
+        return int(float(os.environ["MIRRORBRIDGE_NTP_STOP_S"]) * NS)
+    except (KeyError, ValueError):
+        return None
+
+
 class NtpResponder(asyncio.DatagramProtocol):
     """Answers the TV's timing requests and counts them, so a silent TV can be told apart."""
 
@@ -88,6 +96,9 @@ class NtpResponder(asyncio.DatagramProtocol):
         self.first_request_ns: Optional[int] = None
         self.last_request_ns: Optional[int] = None
         self._first_tv_minus_ours: Optional[int] = None
+        # Experiment: MIRRORBRIDGE_NTP_STOP_S stops answering that long after the first request.
+        self.stop_after_ns: Optional[int] = _ntp_stop_ns()
+        self.stopped_answering = False
         self.peers: set[str] = set()
         self.arrived = asyncio.Event()
 
@@ -107,7 +118,12 @@ class NtpResponder(asyncio.DatagramProtocol):
             _LOGGER.debug("Ignoring a %d-byte packet on the timing port from %s", len(data), addr[0])
             return
         sent = now_ns()  # the answer's transmit time: when it really leaves
-        if self.transport is not None:
+        silent = (self.stop_after_ns is not None and self.first_request_ns is not None
+                  and received - self.first_request_ns >= self.stop_after_ns)
+        if silent and not self.stopped_answering:
+            self.stopped_answering = True
+            _LOGGER.info("Not answering the TV's time requests any more (MIRRORBRIDGE_NTP_STOP_S test switch)")
+        if self.transport is not None and not silent:
             self.transport.sendto(ntp_reply(data, received, sent), addr)
         self.requests += 1
         # Experiment: the TV's own transmit time against our receive time, from the first request
@@ -115,11 +131,11 @@ class NtpResponder(asyncio.DatagramProtocol):
         tv_minus_ours = from_ntp(struct.unpack(">Q", data[24:32])[0]) - received
         if self._first_tv_minus_ours is None:
             self._first_tv_minus_ours = tv_minus_ours
-        _LOGGER.debug("NTP request %d, %s; tv_sent - our_received %+.2f ms vs the first; answered %.0f us "
-                      "after it came", self.requests,
+        _LOGGER.debug("NTP request %d, %s; tv_sent - our_received %+.2f ms vs the first; %s", self.requests,
                       f"{(received - self.last_request_ns) / 1e6:.0f} ms after the last"
                       if self.last_request_ns is not None else "the first",
-                      (tv_minus_ours - self._first_tv_minus_ours) / 1e6, (sent - received) / 1e3)
+                      (tv_minus_ours - self._first_tv_minus_ours) / 1e6,
+                      "not answered (test switch)" if silent else f"answered {(sent - received) / 1e3:.0f} us after it came")
         self.last_request_ns = received
         if self.first_request_ns is None:
             self.first_request_ns = received

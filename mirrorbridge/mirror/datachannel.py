@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import socket
+import time
 from typing import Optional
 
 from .packets import heartbeat_packet
@@ -24,6 +26,9 @@ CONNECT_SECONDS = 5
 SEND_BUFFER = 64 * 1024  # without a size from the session
 HEARTBEAT_SECONDS = 1.0
 CLOSE_SECONDS = 1.0  # to send what is still buffered when the session ends; then it is dropped
+# Experiment: MIRRORBRIDGE_HEARTBEAT_IDLE_ONLY=1 sends the heartbeat only when no frame went out in
+# the last HEARTBEAT_SECONDS.
+HEARTBEAT_IDLE_ONLY = os.environ.get("MIRRORBRIDGE_HEARTBEAT_IDLE_ONLY") == "1"
 
 
 class DataChannel:
@@ -34,6 +39,9 @@ class DataChannel:
         self.close_reason = ""
         self.bytes_sent = 0
         self.heartbeats = 0
+        self.heartbeats_skipped = 0
+        self.heartbeat_idle_only = HEARTBEAT_IDLE_ONLY
+        self._last_frame = 0.0  # time.monotonic() of the last write that was not a heartbeat
         self._started = False
         self._tasks = [asyncio.ensure_future(self._watch())]
 
@@ -68,15 +76,20 @@ class DataChannel:
     async def _heartbeat(self) -> None:
         while not self.closed.is_set():
             await asyncio.sleep(HEARTBEAT_SECONDS)
-            self.write(heartbeat_packet(0))
+            if self.heartbeat_idle_only and time.monotonic() - self._last_frame < HEARTBEAT_SECONDS:
+                self.heartbeats_skipped += 1  # experiment: a frame went out in the last second
+                continue
+            self.write(heartbeat_packet(0), heartbeat=True)
             self.heartbeats += 1
 
-    def write(self, data: bytes) -> None:
+    def write(self, data: bytes, heartbeat: bool = False) -> None:
         """Queue one or more whole packets (a packet is never split between writes)."""
         if self.closed.is_set() or self._writer.is_closing():
             raise ConnectionResetError(self.close_reason or "video connection closed")
         self._writer.write(data)
         self.bytes_sent += len(data)
+        if not heartbeat:
+            self._last_frame = time.monotonic()
         if not self._started:
             self._started = True
             self._tasks.append(asyncio.ensure_future(self._heartbeat()))
