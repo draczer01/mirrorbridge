@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mirrorbridge"
-version = "0.2.1"
+version = "0.3.0"
 description = "Cast your Windows screen and audio to Apple TV and other AirPlay TVs (LG, Samsung, TCL...)"
 readme = "README.md"
 requires-python = ">=3.10"
