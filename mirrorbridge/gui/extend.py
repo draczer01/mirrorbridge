@@ -68,7 +68,7 @@ class ExtendScreenSetup:
     def __init__(self, controller: "Controller") -> None:
         self.c = controller
         self.busy = False  # a check, a dialog or an install is under way
-        self._from_cast = False  # this check started when a cast found the driver not working
+        self._from_cast = False  # this check started when a cast or Mirror screen found the driver not working
 
     # -- entry points --------------------------------------------------------
 
@@ -83,7 +83,8 @@ class ExtendScreenSetup:
         self.c.run_blocking(vdisplay.backend().status, on_ok=self._checked, on_err=self._check_failed)
 
     def handle_status(self, status: DriverStatus) -> None:
-        """A cast found the driver missing or broken: the same dialogs as picking Extend screen."""
+        """A cast or Mirror screen found the driver missing or broken: the same dialogs as
+        picking Extend screen."""
         if not self.busy:
             self.busy = True
             self._from_cast = True

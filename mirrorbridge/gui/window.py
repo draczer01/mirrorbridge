@@ -284,7 +284,7 @@ class MainWindow(QMainWindow):
 
     def _show_monitors(self, monitors: list[ffmpeg.Monitor]) -> None:
         self._monitors = monitors
-        virtual = self.c.virtual_device  # the virtual screen a cast added; it goes when the cast ends
+        virtual = self.c.virtual_device  # the virtual screen a cast or Mirror screen added; it goes when that ends
         with self._filling():
             self.monitor_combo.clear()
             for mon in monitors:
@@ -393,7 +393,7 @@ class MainWindow(QMainWindow):
 
     def _activity_changed(self) -> None:
         self._update_buttons()
-        if not self.c.is_active:  # a cast that ended may have removed its virtual screen
+        if not self.c.is_active:  # a cast or Mirror screen that ended may have removed its virtual screen
             self.c.run_blocking(ffmpeg.list_monitors, on_ok=self._show_monitors)
 
     def _update_buttons(self) -> None:

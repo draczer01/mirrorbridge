@@ -30,11 +30,12 @@ _STRINGS: dict[str, dict[str, str]] = {
     "stop_mirror": {"en": "Stop mirroring", "es": "Detener la duplicación"},
     "status_mirroring": {"en": "Mirroring to {device}", "es": "Duplicando la pantalla en {device}"},
     "mirror_hint": {
-        "en": "Your screen on the TV a fraction of a second behind, instead of a cast's few seconds. For paired "
-              "AirPlay 2 TVs of other brands (TCL, Roku, Samsung, LG…); no sound yet.",
+        "en": "Your screen on the TV a fraction of a second behind, instead of a cast's few seconds: the display, "
+              "window or extended screen chosen under What to cast. For paired AirPlay 2 TVs of other brands (TCL, "
+              "Roku, Samsung, LG…); no sound yet.",
         "es": "Tu pantalla en la TV con una fracción de segundo de retraso, en lugar de los segundos de una "
-              "transmisión. Para TV AirPlay 2 de otras marcas ya emparejadas (TCL, Roku, Samsung, LG…); todavía "
-              "sin sonido.",
+              "transmisión: la pantalla, la ventana o la pantalla extendida que elegiste en Qué transmitir. Para TV "
+              "AirPlay 2 de otras marcas ya emparejadas (TCL, Roku, Samsung, LG…); todavía sin sonido.",
     },
     "mirror_apple_tv": {
         "en": "Screen mirroring to Apple TVs and Macs is coming in a later version. For now, cast to them with "
@@ -204,11 +205,13 @@ _STRINGS: dict[str, dict[str, str]] = {
     "vdd_install_text": {
         "en": "To extend your desktop to the TV, MirrorBridge uses the free \"Parsec Virtual Display Driver\" "
               "from Parsec (Unity). MirrorBridge will download it from parsec.app (about 500 KB) and Windows "
-              "will ask for your permission once. The virtual screen only exists while you cast. By "
+              "will ask for your permission once. The virtual screen only exists while you cast or mirror "
+              "your screen. By "
               "installing it you accept Parsec's terms.",
         "es": "Para extender tu escritorio a la TV, MirrorBridge usa el controlador gratuito \"Parsec Virtual "
               "Display Driver\" de Parsec (Unity). MirrorBridge lo descargará de parsec.app (unos 500 KB) y "
-              "Windows te pedirá permiso una vez. La pantalla virtual solo existe mientras transmites. "
+              "Windows te pedirá permiso una vez. La pantalla virtual solo existe mientras transmites o "
+              "duplicas la pantalla. "
               "Al instalarlo aceptas los términos de Parsec.",
     },
     "vdd_terms": {"en": "Parsec's terms", "es": "Términos de Parsec"},
@@ -225,8 +228,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     "vdd_finishing": {"en": "Waiting for the driver to start…", "es": "Esperando a que arranque el controlador…"},
     "vdd_ready": {"en": "Virtual screen ready", "es": "Pantalla virtual lista"},
     "vdd_ready_hint": {
-        "en": "Start casting and the TV becomes a second screen.",
-        "es": "Empieza a transmitir y la TV será una segunda pantalla.",
+        "en": "Start casting, or Mirror screen, and the TV becomes a second screen.",
+        "es": "Transmite, o usa Duplicar pantalla, y la TV será una segunda pantalla.",
     },
     "vdd_uac_cancelled": {
         "en": "Not installed: you cancelled the Windows permission request.",
@@ -268,10 +271,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "La pantalla virtual necesita Windows 10 u 11.",
     },
     "vdd_extend_off": {
-        "en": "Extend screen is off for now, so Start casting sends your display. Choose it again once "
-              "the driver works.",
-        "es": "Extender pantalla quedó desactivado, así que Transmitir enviará tu pantalla. Vuelve a "
-              "elegirlo cuando el controlador funcione.",
+        "en": "Extend screen is off for now, so Start casting and Mirror screen send your display. Choose it "
+              "again once the driver works.",
+        "es": "Extender pantalla quedó desactivado, así que Transmitir y Duplicar pantalla enviarán tu "
+              "pantalla. Vuelve a elegirlo cuando el controlador funcione.",
     },
     "vdd_winget": {"en": "Install with winget", "es": "Instalar con winget"},
     "vdd_manual": {"en": "Download manually", "es": "Descargar manualmente"},
@@ -316,9 +319,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "Windows no activó la pantalla virtual. Pulsa Win+P, elige \"Extender\" y vuelve a intentarlo.",
     },
     "vdd_lost": {
-        "en": "The virtual screen closed (for example, when the PC went to sleep). Start casting again.",
-        "es": "La pantalla virtual se cerró (por ejemplo, al suspender el equipo). Vuelve a iniciar la "
-              "transmisión.",
+        "en": "The virtual screen closed (for example, when the PC went to sleep). Start casting or mirroring "
+              "again.",
+        "es": "La pantalla virtual se cerró (por ejemplo, al suspender el equipo). Vuelve a transmitir o a "
+              "duplicar la pantalla.",
     },
     "extend_tip": {
         "en": "Drag windows past the right edge of your screen to see them on the TV.",
@@ -498,6 +502,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "mirror_what_test": {"en": "the test pattern", "es": "la imagen de prueba"},
     "mirror_what_screen": {"en": "this PC's screen", "es": "la pantalla de este equipo"},
+    "mirror_what_extended": {"en": "the extended screen", "es": "la pantalla extendida"},
     "mirror_casting": {
         "en": "Mirroring {what} to {device} ({width}x{height}, {fps} fps)",
         "es": "Duplicando {what} en {device} ({width}x{height}, {fps} fps)",

@@ -110,9 +110,12 @@ Experimental: it has not yet been tested with the real driver.
 Choose **What to cast** > **Extend screen (virtual display)**. While you cast, Windows has
 one more monitor that only the TV shows, so the TV works as a second screen: drag windows
 past the right edge of your screen to move them onto it. The screen disappears when the
-cast stops. **Extended screen size** picks 1080p (the default), 720p (bigger text and a
-lighter stream, like AirParrot's "force 720p") or 4K (sent at 20 Mbps or more). The TV gets
-exactly that size, so the Resolution setting does not apply in this mode.
+cast stops. *Mirror screen* sends it too, a fraction of a second behind instead of a few
+seconds (see *Screen mirroring* below): for PowerPoint's Presenter View, for example, with
+the notes on the laptop and the slides on the TV. **Extended screen size** picks 1080p (the
+default), 720p (bigger text and a lighter stream, like AirParrot's "force 720p") or 4K. A
+cast sends exactly that size (4K at 20 Mbps or more), and Mirror screen fits it into the
+TV's screen, up to 1080p, so the Resolution setting does not apply in this mode.
 
 Windows cannot add a monitor by itself, so MirrorBridge uses the free **Parsec Virtual
 Display Driver**, a Microsoft-signed driver from Parsec (now part of Unity). MirrorBridge
@@ -127,8 +130,8 @@ To remove the driver, choose *More options* > *Remove the virtual display driver
 Settings > Apps, where you uninstall **Parsec Virtual Display Driver**.
 
 If MirrorBridge crashes or is ended from Task Manager, the driver removes the screen by
-itself about a second later. Sleep also removes it; start the cast again after waking the
-PC.
+itself about a second later. Sleep also removes it; start the cast or Mirror screen again
+after waking the PC.
 
 ### Running from source
 
@@ -217,17 +220,29 @@ out until it stops. The full window has the same *Mirror screen* button, under *
 MirrorBridge.exe mirror --probe -d "Living Room"      # find out how the TV takes it (10 s of a test pattern)
 MirrorBridge.exe mirror -d "Living Room"              # mirror the screen until Ctrl+C
 MirrorBridge.exe mirror --test-pattern --seconds 30   # a moving test pattern instead of the screen
+MirrorBridge.exe mirror --extend                      # the TV as a second screen (a new virtual monitor)
+MirrorBridge.exe mirror --extend --extend-mode 720p   # ... at 720p (1080p, 720p or 4k)
+MirrorBridge.exe mirror --monitor 2                   # display 2 (--window "PowerPoint": one window)
 ```
+
+As `cast` does, `mirror` starts from the app's settings: without `--monitor`, `--window` or
+`--extend` it mirrors what the app has selected under *What to cast*, the virtual screen
+included.
 
 ### What it needs, and what it does
 
 * Pair the TV first (`pair`), as for a cast. Apple TVs and Macs need FairPlay for screen
   mirroring, which MirrorBridge does not have, so they are turned down at once.
-* It mirrors what *What to cast* names (a display or a window, not the virtual screen) at the
-  TV's screen size, up to 1080p or the *Quality > Resolution* setting, with the encoder, frame
-  rate and bitrate of the *Quality* menu. There is no sound yet. If FFmpeg cannot capture or
-  encode at the start (the graphics driver refuses ddagrab, the GPU encoder is busy), it goes
-  on with GDI capture, then with x264 (CPU), as a cast does.
+* It mirrors what *What to cast* names: a display or a window at the TV's screen size, up to
+  1080p or the *Quality > Resolution* setting, or with *Extend screen* the virtual screen. That
+  is added as for a cast (the tray says *Creating the virtual screen…*, and a missing driver
+  gets the same offer to install it), at its *Extended screen size* fitted into the TV's screen,
+  up to 1080p (Resolution does not apply, as for a cast; at 4K, text on the TV is small). It
+  stays for the whole session and goes when the session ends; if it goes away first (sleep),
+  the session ends and says so. *Test this TV* and `mirror --probe` never add it. Each is sent
+  with the encoder, frame rate and bitrate of the *Quality* menu. There is no sound yet. If
+  FFmpeg cannot capture or encode at the start (the graphics driver refuses ddagrab, the GPU
+  encoder is busy), it goes on with GDI capture, then with x264 (CPU), as a cast does.
 * The TV asks the PC for the time over UDP: allow MirrorBridge, or inbound UDP ports
   7880-7889, in Windows Firewall on private networks, or the TV shows nothing.
 * TVs differ in the order they want the session set up in, whether they need an (empty) audio
@@ -271,6 +286,7 @@ pyatv: mDNS discovery → PIN pair-setup → pair-verify → AirPlay /play (URL 
 | `mirrorbridge/mirror/` | Screen mirroring (experimental): pair-verify, the session's SETUP in the shapes TVs take, the clock the TV asks, FFmpeg's frames encrypted to the TV as they come, the probe, and what worked for each TV |
 | `mirrorbridge/winmonitors.py` | Displays at their real resolution and GPU, window rectangles, and a job object that ends FFmpeg with MirrorBridge |
 | `mirrorbridge/vdisplay.py` | Extend screen: adds and removes the virtual monitor through the Parsec driver, keeps it alive, installs the driver |
+| `mirrorbridge/extended.py` | The virtual monitor of one cast or Mirror screen session: added, found among the displays FFmpeg captures, watched, and removed when the session ends |
 | `mirrorbridge/gui/tray.py` | The tray icon and its menu, with every feature |
 | `mirrorbridge/gui/window.py` | The full window, opened from the menu's *Open* |
 | `mirrorbridge/gui/controller.py` | State shared by the menu and the window; runs pyatv on a background asyncio loop |

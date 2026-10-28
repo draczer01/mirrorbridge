@@ -17,7 +17,7 @@ from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import airplay_patch, audio, ffmpeg, vdisplay
+from . import airplay_patch, audio, extended, ffmpeg, vdisplay
 from .config import Settings
 from .devices import Device, DeviceManager
 from .hls_server import Activity, HlsServer
@@ -106,8 +106,7 @@ class CastSession:
         self._stop_requested = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._starting = False  # stop() may cancel outright only while starting up
-        self._xscreen: vdisplay.VirtualScreen | None = None
-        self._lost = False  # the virtual screen went away under the cast
+        self._xscreen: extended.ExtendedScreen | None = None
         self.virtual_device = ""  # \\.\DISPLAYn of the virtual screen while there is one
         self.error: Exception | None = None  # why the cast failed
         self.finished = threading.Event()
@@ -195,7 +194,7 @@ class CastSession:
         ff = ffmpeg.find_ffmpeg(s.ffmpeg_path)
         _LOGGER.info("FFmpeg: %s", ff)
         region = None
-        if s.extend_screen and s.capture_backend != "test" and vdisplay.available():
+        if extended.wanted(s):
             monitor = await self._create_virtual_screen()
             s = self.settings  # now without the display and window choices
         else:
@@ -282,40 +281,26 @@ class CastSession:
             _LOGGER.warning("FFmpeg declared no CODECS for %s; some TVs refuse such a stream", self.encoder)
 
     async def _create_virtual_screen(self) -> "ffmpeg.Monitor":
-        """Add the virtual monitor Windows extends the desktop onto; return it as a display."""
-        loop = asyncio.get_running_loop()
+        """Add the virtual monitor Windows extends the desktop onto (extended.py, as screen
+        mirroring does); return it as a display. It goes in _cleanup, once FFmpeg is gone."""
         s = self.settings
         self._set(State.EXTENDING)
-
-        def lost() -> None:  # called from the driver's keep-alive or presence-check thread
-            self._lost = True
-            try:
-                loop.call_soon_threadsafe(self._stop_requested.set)
-            except RuntimeError:  # the loop is already closed
-                pass
-
-        self._xscreen = vdisplay.backend()(on_lost=lost)
-        width, height, hz = vdisplay.EXTEND_MODES.get(s.extend_mode, vdisplay.EXTEND_MODES["1080p"])
-        name = await loop.run_in_executor(None, self._xscreen.start, width, height, hz)
-        self.virtual_device = name
-        for _ in range(10):  # the display list can lag a moment behind the driver
-            monitors = await loop.run_in_executor(None, ffmpeg.list_monitors)  # DXGI is slow right after a mode change
-            monitor = next((m for m in monitors if m.device.lower() == name.lower()), None)
-            if monitor is not None:
-                break
-            await asyncio.sleep(0.2)
-        else:
-            raise vdisplay.VddError("not_attached")
-        if monitor.dxgi_output is None:
-            _LOGGER.info("The virtual screen is drawn by another GPU (DXGI adapter %s)", monitor.dxgi_adapter)
+        self._xscreen = extended.ExtendedScreen(on_lost=self._stop_requested.set)
+        monitor = await self._xscreen.start(s.extend_mode)
+        self.virtual_device = monitor.device
         # The virtual screen is already the size the TV should get, so send it as it is. The
         # display and window choices do not apply to this cast.
-        changes: dict = {"window_title": "", "output_height": 0}
+        s = extended.screen_settings(s)
         if monitor.height >= 2160:
-            changes["video_bitrate_kbps"] = max(s.video_bitrate_kbps, EXTEND_4K_MIN_KBPS)
-        self.settings = dataclasses.replace(s, **changes)
-        _LOGGER.info("Casting virtual screen %s: %dx%d", name, monitor.width, monitor.height)
+            s = dataclasses.replace(s, video_bitrate_kbps=max(s.video_bitrate_kbps, EXTEND_4K_MIN_KBPS))
+        self.settings = s
+        _LOGGER.info("Casting virtual screen %s: %dx%d", monitor.device, monitor.width, monitor.height)
         return monitor
+
+    @property
+    def _lost(self) -> bool:
+        """The virtual screen went away under the cast."""
+        return self._xscreen is not None and self._xscreen.lost
 
     async def _launch_encoder(
         self, ff: str, monitor: "ffmpeg.Monitor | None", region: "ffmpeg.Region | None" = None
@@ -484,7 +469,7 @@ class CastSession:
                         raise RuntimeError(queue.ended_early())
                     return  # stopped from the TV
                 if self._proc and self._proc.poll() is not None:
-                    if self._xscreen and await self._screen_lost():
+                    if self._xscreen and await self._xscreen.lost_within():
                         raise vdisplay.VddError("lost")
                     raise RuntimeError(Text("encoder_stopped", "Encoder stopped unexpectedly:\n{errors}",
                                             errors=self.ffmpeg_errors()))
@@ -506,14 +491,6 @@ class CastSession:
         finally:
             stop_wait.cancel()
 
-    async def _screen_lost(self, wait: float = 2.5) -> bool:
-        """After FFmpeg died: did the virtual screen vanish under it? Its keep-alive notices
-        within about 2 s (sleep and resume, for example)."""
-        deadline = time.monotonic() + wait
-        while not self._lost and time.monotonic() < deadline:
-            await asyncio.sleep(0.1)
-        return self._lost
-
     async def _cleanup(self) -> None:
         if self._play_task and not self._play_task.done():
             self._play_task.cancel()
@@ -530,10 +507,7 @@ class CastSession:
         await self._stop_encoder()
         if self._xscreen:
             # Only once FFmpeg is gone: ddagrab losing its output would turn a stop into an error.
-            try:
-                await asyncio.get_running_loop().run_in_executor(None, self._xscreen.stop)
-            except Exception:  # pylint: disable=broad-except
-                _LOGGER.warning("Could not remove the virtual screen", exc_info=True)
+            await self._xscreen.stop()
             self._xscreen = None
             self.virtual_device = ""
         if self._server:

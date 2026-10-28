@@ -187,7 +187,7 @@ class TrayMenu(QObject):
         group = QActionGroup(sub)
         for mon in ffmpeg.list_monitors():
             if c.virtual_device and mon.device == c.virtual_device:
-                continue  # the virtual screen this cast added; it is gone once the cast ends
+                continue  # the virtual screen this cast or Mirror screen added; it goes when that ends
             self._action(sub, display_label(mon),
                          (lambda _=False, i=mon.index: c.update_settings(monitor_index=i, window_title="",
                                                                          extend_screen=False)),

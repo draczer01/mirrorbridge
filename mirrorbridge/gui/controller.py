@@ -459,8 +459,8 @@ class Controller(QObject):
 
     @property
     def virtual_device(self) -> str:
-        """\\\\.\\DISPLAYn of the virtual screen the current cast added, if any."""
-        return self.session.virtual_device if isinstance(self.session, CastSession) else ""
+        """\\\\.\\DISPLAYn of the virtual screen the current cast or Mirror screen added, if any."""
+        return self.session.virtual_device if self.session is not None else ""
 
     def choose_extend_screen(self, *_args) -> None:
         self.extend.choose()
@@ -507,13 +507,16 @@ class Controller(QObject):
         if mirroring:
             self._on_mirror_state(state, message, device)
         elif state == State.CASTING:
-            tip = ""
-            if self.virtual_device and not self.settings.extend_tip_shown:
-                tip = tr("extend_tip")  # once: where the new screen is
-                self.update_settings(extend_tip_shown=True)
-            self.notify.emit(tr("cast_started", device=device.name), tip, False)
+            self.notify.emit(tr("cast_started", device=device.name), self._extend_tip(), False)
         elif state == State.STOPPED:
             self.notify.emit(tr("cast_stopped"), "", False)
+
+    def _extend_tip(self) -> str:
+        """Where the new screen is, the first time a cast or Mirror screen sends the virtual screen."""
+        if not self.virtual_device or self.settings.extend_tip_shown:
+            return ""
+        self.update_settings(extend_tip_shown=True)
+        return tr("extend_tip")
 
     # -- Mirror screen -----------------------------------------------------
 
@@ -542,9 +545,11 @@ class Controller(QObject):
         return tr("mirror_hint")
 
     def start_mirror(self, *_args) -> None:
-        """Mirror screen: what What to cast names (a display or a window), on the TV a fraction
-        of a second behind, with the Quality settings. It starts, shows its states and stops as a
-        cast does (the session is mirror.MirrorSession), and it is the one session at a time too."""
+        """Mirror screen: what What to cast names (a display, a window, or with Extend screen the
+        virtual screen), on the TV a fraction of a second behind, with the Quality settings. It
+        starts, shows its states and stops as a cast does (the session is mirror.MirrorSession),
+        it offers to fix the virtual screen driver as a cast does, and it is the one session at a
+        time too."""
         device = self.selected_device
         if self.is_active or device is None or not self.can_mirror(device):
             return
@@ -568,7 +573,11 @@ class Controller(QObject):
 
         def failed(exc):
             finished()
-            if not isinstance(exc, concurrent.futures.CancelledError):
+            if isinstance(exc, concurrent.futures.CancelledError):
+                return
+            if isinstance(exc, vdisplay.VddError) and exc.status is not None:
+                self.extend.handle_status(exc.status)  # driver missing or broken: offer the fix
+            else:
                 self.notify.emit(tr("mirror_failed"), error_text(exc), True)
 
         self.session_future = self.runner.submit(session.run(), finished, failed)
@@ -576,7 +585,7 @@ class Controller(QObject):
 
     def _on_mirror_state(self, state: State, message: Any, device: Device) -> None:
         if state == State.CASTING:
-            self.notify.emit(tr("mirror_started", device=device.name), "", False)
+            self.notify.emit(tr("mirror_started", device=device.name), self._extend_tip(), False)
         elif state == State.STOPPED:
             # The TV ending it is worth saying; "Stopped", after Stop, is not.
             self.notify.emit(tr("mirror_stopped"), say(message) if isinstance(message, Text) else "", False)

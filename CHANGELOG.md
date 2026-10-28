@@ -40,13 +40,24 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   encode at the start (the driver refuses ddagrab, the GPU encoder is busy), it goes on with GDI
   capture, then with x264, as a cast does.
 - *Mirror screen (low latency, experimental)* in the tray menu, next to *Start casting*, and in
-  the window: mirrors what *What to cast* names (a display or a window) with the *Quality*
-  settings (and what *Test this TV* or `mirror --probe` found for the TV), showing Connecting,
-  Casting and Stopping as a cast does. *Stop mirroring* and *Quit* end it, and a failure is
-  explained in the app's language like a failed cast. It is offered only for a paired TV that
-  offers screen mirroring and does not need FairPlay; otherwise it is greyed out, and its
-  tooltip says why (Apple TVs and Macs: coming in a later version). Only one cast, mirroring or
-  test runs at a time.
+  the window: mirrors what *What to cast* names (a display, a window or the virtual screen) with
+  the *Quality* settings (and what *Test this TV* or `mirror --probe` found for the TV), showing
+  Connecting, Casting and Stopping as a cast does. *Stop mirroring* and *Quit* end it, and a
+  failure is explained in the app's language like a failed cast. It is offered only for a
+  paired TV that offers screen mirroring and does not need FairPlay; otherwise it is greyed
+  out, and its tooltip says why (Apple TVs and Macs: coming in a later version). Only one
+  cast, mirroring or test runs at a time.
+- With *Extend screen* on, *Mirror screen* (and `mirror --extend`, with `--extend-mode`) sends
+  the virtual screen, as a cast does, instead of the PC's main display: the TV works as a second
+  screen a fraction of a second behind, for PowerPoint's Presenter View with the notes on the
+  laptop and the slides on the TV, for example. The virtual screen is added before the TV is
+  asked (*Creating the virtual screen*), fitted into the TV's screen (up to 1080p; *Quality >
+  Resolution* does not apply, as for a cast), kept for the whole session, also when the session
+  is set up again or FFmpeg falls back to GDI capture or x264, and removed when the session ends,
+  however it ends. If it goes away first (sleep), the session ends saying so; a missing or broken
+  driver gets the same offer to install or fix it as a cast. *Test this TV* and `mirror --probe`
+  still mirror only their test pattern. The `mirror` command also takes `--monitor` and
+  `--window`, as `cast` does.
 - `mirror --probe` finds out how a TV takes screen mirroring (the SETUP order, the audio stream,
   PTP or NTP timing, the avcC ending), reports what it answered to each step, and saves what
   worked in `mirroring.json` for the next session. Before a probe, a TV that drops the video at

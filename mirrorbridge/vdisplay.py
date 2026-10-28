@@ -222,7 +222,7 @@ _MESSAGES = {
     "driver:inaccessible": _BROKEN,
     "add_failed": "Windows did not allow another virtual screen.",
     "not_attached": 'Windows did not turn on the virtual screen. Press Win+P, choose "Extend" and try again.',
-    "lost": "The virtual screen closed (for example, when the PC went to sleep). Start casting again.",
+    "lost": "The virtual screen closed (for example, when the PC went to sleep). Start casting or mirroring again.",
     "download": "Could not download the virtual screen driver",
     "mismatch": "The downloaded file is not the expected driver installer, so it was not run.",
     "install": "Could not run the virtual screen driver installer",
@@ -915,7 +915,8 @@ def recover_stale() -> None:
 
 
 class VirtualScreen(abc.ABC):
-    """What a cast needs from a virtual display driver: one monitor for the life of one cast."""
+    """What a session (a cast or screen mirroring, through extended.py) needs from a virtual
+    display driver: one monitor for the life of one session."""
 
     name = ""
 

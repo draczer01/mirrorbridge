@@ -60,9 +60,13 @@ Es experimental: todavía no se probó con el controlador real.
 En el menú, **Qué transmitir** > **Extender pantalla (pantalla virtual)**. Mientras
 transmites, Windows tiene un monitor más que solo se ve en la TV: arrastra ventanas hacia
 la derecha de tu pantalla para llevarlas a la TV. Al detener la transmisión, esa pantalla
-desaparece. En **Tamaño de la pantalla extendida** eliges 1080p (el normal), 720p (letra
-más grande y menos datos) o 4K (se envía a 20 Mbps o más). La TV recibe exactamente ese
-tamaño, así que la **Resolución** de *Calidad* no se aplica en este modo.
+desaparece. *Duplicar pantalla* también la envía, con una fracción de segundo de retardo en
+lugar de unos segundos (ver *Duplicar la pantalla*): por ejemplo, para la Vista del moderador
+de PowerPoint, con las notas en la laptop y las diapositivas en la TV. En **Tamaño de la
+pantalla extendida** eliges 1080p (el normal), 720p (letra más grande y menos datos) o 4K.
+Al transmitir, la TV recibe exactamente ese tamaño (4K se envía a 20 Mbps o más), y
+*Duplicar pantalla* lo ajusta a la pantalla de la TV, hasta 1080p, así que la
+**Resolución** de *Calidad* no se aplica en este modo.
 
 Windows no puede crear un monitor por sí solo, así que MirrorBridge usa el controlador
 gratuito **Parsec Virtual Display Driver** de Parsec (hoy parte de Unity), firmado por
@@ -78,7 +82,8 @@ Para quitarlo: *Más opciones* > *Quitar el controlador de pantalla virtual* abr
 Configuración > Aplicaciones; desinstala ahí **Parsec Virtual Display Driver**.
 
 Si MirrorBridge se cierra de golpe, el controlador quita la pantalla solo, en un segundo.
-Al suspender el equipo también desaparece: vuelve a transmitir al despertarlo.
+Al suspender el equipo también desaparece: vuelve a transmitir o a duplicar la pantalla al
+despertarlo.
 
 ## Lo que hay que saber
 
@@ -159,14 +164,26 @@ La ventana completa tiene el mismo botón, debajo de **Transmitir**.
 .\MirrorBridge.exe mirror --probe -d "Nombre de la TV"      # averigua cómo lo acepta la TV
 .\MirrorBridge.exe mirror -d "Nombre de la TV"              # duplica la pantalla hasta Ctrl+C
 .\MirrorBridge.exe mirror --test-pattern --seconds 30       # una imagen de prueba en lugar de la pantalla
+.\MirrorBridge.exe mirror --extend                         # la TV como segunda pantalla (un monitor virtual nuevo)
+.\MirrorBridge.exe mirror --extend --extend-mode 720p      # ... a 720p (1080p, 720p o 4k)
+.\MirrorBridge.exe mirror --monitor 2                      # la pantalla 2 (--window "PowerPoint": una ventana)
 ```
+
+Igual que `cast`, `mirror` parte de los ajustes de la app: sin `--monitor`, `--window` ni
+`--extend` duplica lo que elegiste en **Qué transmitir**, incluida la pantalla virtual.
 
 ### Qué necesita y qué hace
 
 * Primero empareja la TV (`pair`), igual que para transmitir. Los Apple TV y los Mac necesitan
   FairPlay para duplicar la pantalla, y MirrorBridge no lo tiene.
-* Duplica lo que elegiste en **Qué transmitir** (una pantalla o una ventana) al tamaño de la
-  pantalla de la TV, hasta 1080p o lo que diga **Calidad** > **Resolución**, con el
+* Duplica lo que elegiste en **Qué transmitir**: una pantalla o una ventana al tamaño de la
+  pantalla de la TV, hasta 1080p o lo que diga **Calidad** > **Resolución**, o con **Extender
+  pantalla** la pantalla virtual. Esta se crea igual que al transmitir (el icono dice *Creando
+  la pantalla virtual…*, y si falta el controlador se ofrece instalarlo), con su **Tamaño de la
+  pantalla extendida** ajustado a la pantalla de la TV, hasta 1080p (la **Resolución** no se
+  aplica, igual que al transmitir; a 4K la letra se ve chica en la TV). Dura toda la sesión y
+  desaparece al terminarla; si desaparece antes (al suspender el equipo), la sesión termina y
+  lo dice. *Probar esta TV* y `mirror --probe` nunca la crean. Todo se envía con el
   codificador, los cuadros por segundo y la tasa de bits de **Calidad**. Todavía no hay sonido.
   Si FFmpeg no puede capturar o codificar al empezar (el controlador de video rechaza ddagrab,
   el codificador de la GPU está ocupado), sigue con la captura GDI y luego con x264 (CPU), igual

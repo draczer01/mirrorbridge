@@ -20,6 +20,12 @@ not: the session goes on with GDI capture, then with the CPU encoder, as a cast 
 A TV that drops the video connection before the second keyframe of a first session (nothing
 saved for it yet) may not take the avcC ending it was sent: the session is set up once more
 with the other one (h264.TRAILERS), and what works is saved.
+
+With Extend screen on, the desktop is the virtual monitor a cast would add (extended.py): it is
+added before the TV is asked, captured as any display is and fitted into the TV's screen, and
+kept for the whole session, through the retry above and FFmpeg's fallbacks, so the windows on
+it stay there. It goes when the session ends, however it ends; if it goes away first (sleep),
+the session ends with VddError("lost"), as a cast does.
 """
 
 from __future__ import annotations
@@ -31,7 +37,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .. import ffmpeg
+from .. import extended, ffmpeg, vdisplay
 from ..config import Settings
 from ..session import State, StatusCallback
 from ..text import Text
@@ -181,6 +187,8 @@ class MirrorSession:
         self._timing_quiet = False
         self._dropped_at_once = False  # the TV closed the video before the second keyframe
         self._retried = False
+        self._xscreen: Optional[extended.ExtendedScreen] = None  # Extend screen's virtual monitor
+        self.virtual_device = ""  # \\.\DISPLAYn of the virtual screen while there is one
 
     # -- helpers -----------------------------------------------------------
 
@@ -210,9 +218,14 @@ class MirrorSession:
             except MirrorError as ex:
                 other = self._other_trailer(ex)
                 if other is None:
+                    self._check_screen()  # the screen going away is what to say, if it did
                     raise
                 await self._retry_with(other)
-                ended = "Stopped" if self._stop.is_set() else await self._attempt()
+                if self._stop.is_set():
+                    self._check_screen()
+                    ended = "Stopped"
+                else:
+                    ended = await self._attempt()
             self._set(State.STOPPED, ended)
         except asyncio.CancelledError:
             self._set(State.STOPPED, "Cancelled")
@@ -274,13 +287,15 @@ class MirrorSession:
         self.report.encoder = encoder
         backend, monitor, region = TEST_PATTERN, None, None
         if self.source == DESKTOP:
-            if s.extend_screen:
-                _LOGGER.info("Screen mirroring shows a display or a window; the virtual screen is not used")
-            monitors = ffmpeg.list_monitors()
-            monitor = monitors[max(0, min(s.monitor_index, len(monitors) - 1))] if monitors else None
-            if s.window_title and s.capture_backend != "test":
-                monitor, region = ffmpeg.window_region(s.window_title, monitors)
-                _LOGGER.info("Window %r is at %s on %s", s.window_title, region, monitor.label)
+            if extended.wanted(s):
+                monitor = await self._virtual_screen()
+                s = self.settings  # now without the display and window choices
+            else:
+                monitors = ffmpeg.list_monitors()
+                monitor = monitors[max(0, min(s.monitor_index, len(monitors) - 1))] if monitors else None
+                if s.window_title and s.capture_backend != "test":
+                    monitor, region = ffmpeg.window_region(s.window_title, monitors)
+                    _LOGGER.info("Window %r is at %s on %s", s.window_title, region, monitor.label)
             backend = await loop.run_in_executor(None, ffmpeg.pick_capture_backend, ff, s, monitor, region)
 
         self._set(State.CONNECTING, self.target.name)
@@ -302,6 +317,27 @@ class MirrorSession:
         if encoder != "libx264":
             self._sources.append((self._sources[-1][0], "libx264"))
         self._start_source()
+
+    async def _virtual_screen(self) -> ffmpeg.Monitor:
+        """Extend screen's virtual monitor, added as a cast adds it (extended.py), the first time;
+        a session set up again for the other avcC ending captures the same one."""
+        if self._xscreen is None:
+            self._set(State.EXTENDING)
+            self._xscreen = extended.ExtendedScreen(on_lost=self._stop.set)
+            monitor = await self._xscreen.start(self.settings.extend_mode)
+            self.virtual_device = monitor.device
+            self.settings = extended.screen_settings(self.settings)
+            _LOGGER.info("Mirroring virtual screen %s: %dx%d, fitted into the TV's screen", monitor.device,
+                         monitor.width, monitor.height)
+        monitor = self._xscreen.monitor
+        assert monitor is not None
+        return monitor
+
+    def _check_screen(self) -> None:
+        """The virtual screen went away under the session (sleep, a display change): end it with
+        the error a cast ends with, not as if it had been stopped."""
+        if self._xscreen is not None and self._xscreen.lost:
+            raise vdisplay.VddError("lost")
 
     def _start_source(self) -> None:
         """FFmpeg with the next way of capturing and encoding, its frames into the frame queue."""
@@ -446,6 +482,7 @@ class MirrorSession:
                 done, _ = await asyncio.wait({pump, *waits.values()}, timeout=SUPERVISE_SECONDS)
                 now = now_ns()
                 if waits["stop"] in done:
+                    self._check_screen()
                     self._stopping = True
                     self._set(State.STOPPING)
                     return "Stopped"
@@ -603,9 +640,12 @@ class MirrorSession:
             if unit is None:
                 if self._stopping:
                     return
+                self._check_screen()
                 if frames.last_frame_ns is None and self._sources:  # no frame at all from this way
                     await self._next_source()
                     continue
+                if self._xscreen is not None and await self._xscreen.lost_within():
+                    raise vdisplay.VddError("lost")  # ddagrab lost its output before the driver said so
                 raise MirrorError(ended_text(self._ffmpeg), step="encoder")
             taken = now_ns()
             trimmed = frames.take_trimmed()
@@ -673,8 +713,12 @@ class MirrorSession:
             self.report.frames_sent = self._stats.frames
             if self._stats.frames == 1:
                 self.report.first_frame_ms = (sent - self._ffmpeg.started_ns) / 1e6
-                what = (Text("mirror_what_test", "the test pattern") if self.source == TEST_PATTERN
-                        else Text("mirror_what_screen", "this PC's screen"))
+                if self.source == TEST_PATTERN:
+                    what = Text("mirror_what_test", "the test pattern")
+                elif self.virtual_device:
+                    what = Text("mirror_what_extended", "the extended screen")
+                else:
+                    what = Text("mirror_what_screen", "this PC's screen")
                 self._set(State.CASTING, Text(
                     "mirror_casting", "Mirroring {what} to {device} ({width}x{height}, {fps} fps)",
                     what=what, device=self.target.name, width=picture[0], height=picture[1], fps=self.report.fps,
@@ -729,7 +773,14 @@ class MirrorSession:
 
     async def _cleanup(self) -> None:
         loop = asyncio.get_running_loop()
-        await self._release()
+        try:
+            await self._release()
+        finally:
+            if self._xscreen is not None:
+                # Only once FFmpeg is gone (_release): ddagrab losing its output would turn a stop into an error.
+                await self._xscreen.stop()
+                self._xscreen = None
+                self.virtual_device = ""
         _LOGGER.info("Mirroring ended: %d frames sent, %d dropped; the TV asked for the time %d times; "
                      "/feedback answers %s; steps %s", self._stats.frames, self._stats.dropped,
                      self.report.ntp_requests, self.report.feedback or "none", self.report.steps)

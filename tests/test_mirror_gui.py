@@ -12,22 +12,25 @@ import concurrent.futures
 import os
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from fake_mirror_tv import CREDENTIALS, FakeMirrorTV
-from mirrorbridge import ffmpeg
+from mirrorbridge import ffmpeg, vdisplay
 from mirrorbridge.config import Settings
 from mirrorbridge.gui import i18n
 from mirrorbridge.mirror import MirrorSession, profiles
 from mirrorbridge.mirror.negotiation import MEDIA_FIRST
 from mirrorbridge.session import State
+from mirrorbridge.vdisplay import DriverStatus, VddError
 
 TCL_TXT = {"features": "0x7F8AD0,0x38BCF46", "srcvers": "377.40.00", "model": "55QM7L", "manufacturer": "TCL"}
 APPLE_TV_TXT = {"features": "0x4A7FDFD5,0xBC157FDE", "srcvers": "690.7.1", "model": "AppleTV11,1"}  # bit 14
 NO_SCREEN_TXT = {**TCL_TXT, "features": "0x7F8A50,0x38BCF46"}  # the TCL's, without bit 7 (screen mirroring)
 SPEAKER_TXT = {"features": "0x445F8A00,0x1C340", "model": "Era 100", "manufacturer": "Sonos"}  # audio only
 MIRROR = "Mirror screen (low latency, experimental)"
+VIRTUAL = r"\\.\DISPLAY9"
 
 _APP = None  # one QApplication for every test here; it must outlive them
 
@@ -161,8 +164,9 @@ def test_mirror_screen_is_offered_for_a_paired_tv_of_another_brand(controller):
     assert texts[texts.index("Start casting to TCL 55QM7L") + 1] == MIRROR  # next to Start casting
     item = _items(tray)[MIRROR]
     assert item.isEnabled() and item.toolTip() == (
-        "Your screen on the TV a fraction of a second behind, instead of a cast's few seconds. For paired AirPlay 2 "
-        "TVs of other brands (TCL, Roku, Samsung, LG…); no sound yet.")
+        "Your screen on the TV a fraction of a second behind, instead of a cast's few seconds: the display, window or "
+        "extended screen chosen under What to cast. For paired AirPlay 2 TVs of other brands (TCL, Roku, Samsung, "
+        "LG…); no sound yet.")
 
 
 def test_mirror_screen_needs_the_pairing(controller):
@@ -359,6 +363,123 @@ def test_quit_stops_mirroring(controller, tv):
     assert session._ffmpeg.returncode is not None  # pylint: disable=protected-access
     _until(lambda: controller.session is None)
     controller.runner.thread.join(5)
+
+
+# -- with Extend screen ---------------------------------------------------------------------------------
+
+
+def _virtual_screen(monkeypatch, status: DriverStatus = DriverStatus.OK) -> SimpleNamespace:
+    """Extend screen's driver, as a fake that logs what it is asked, with Windows listing its
+    monitor to the right of the PC's own while it is there. FFmpeg's test source stands in for it."""
+    log = SimpleNamespace(events=[], screens=[])
+    main = ffmpeg.Monitor(0, 0, 0, 1920, 1080, True, 0, device=r"\\.\DISPLAY1")
+    added = ffmpeg.Monitor(1, 1920, 0, 1920, 1080, False, 1, device=VIRTUAL)
+
+    class Screen(vdisplay.VirtualScreen):
+        name = "fake"
+
+        def __init__(self, on_lost=None) -> None:
+            super().__init__(on_lost)
+            log.screens.append(self)
+
+        @classmethod
+        def status(cls) -> DriverStatus:
+            return status
+
+        def start(self, width: int, height: int, hz: int) -> str:
+            log.events.append(("start", width, height, hz))
+            if status is not DriverStatus.OK:
+                raise VddError(f"driver:{status.value}")
+            log.events.append("on the desktop")
+            return VIRTUAL
+
+        def stop(self) -> None:
+            log.events.append("stop")
+
+    def monitors() -> list:
+        there = "on the desktop" in log.events and log.events[-1] != "stop"
+        return [main, added] if there else [main]
+
+    monkeypatch.setattr(vdisplay, "available", lambda: True)
+    monkeypatch.setattr(vdisplay, "backend", lambda name=vdisplay.DEFAULT_BACKEND: Screen)
+    monkeypatch.setattr(ffmpeg, "list_monitors", monitors)
+    monkeypatch.setattr(ffmpeg, "pick_capture_backend", lambda *args: "test")
+    return log
+
+
+def test_mirror_screen_sends_the_virtual_screen_as_a_cast_does(controller, tv, monkeypatch):
+    _ffmpeg()
+    driver = _virtual_screen(monkeypatch)
+    tv.reconfigure(width=640, height=360)  # the virtual screen is fitted into the TV's
+    controller.settings.extend_screen, controller.settings.capture_backend = True, "auto"
+    _choose(controller, _device(tv.port))
+    notes, extending = [], []
+    controller.notify.connect(lambda *note: notes.append(note))
+    controller.cast_state_changed.connect(
+        lambda state, _message: extending.append(controller.status()) if state == State.EXTENDING else None)
+    controller.start_mirror()
+    _until(lambda: controller.cast_state == State.CASTING, 30)
+
+    assert extending == [("busy", "Creating the virtual screen…")]  # in the tray's tooltip, as for a cast
+    assert driver.events == [("start", 1920, 1080, 60), "on the desktop"] and controller.virtual_device == VIRTUAL
+    assert str(controller.cast_message) == "Mirroring the extended screen to TCL 55QM7L (640x360, 30 fps)"
+    # Once: where the new screen is.
+    assert notes == [("Mirroring to TCL 55QM7L", "Drag windows past the right edge of your screen to see them on the "
+                      "TV.", False)]
+    assert controller.settings.extend_tip_shown
+    tray = _tray(controller)
+    source = next(action.menu() for action in tray.menu.actions() if action.text() == "What to cast")
+    # The screen this session added is not offered as a display to cast.
+    assert [action.text() for action in source.actions() if action.text().startswith("Display")] == [
+        "Display 1: 1920x1080 (main)"]
+    controller.stop_cast()
+    _until(lambda: controller.session_future is None, 30)
+    assert driver.events[-1] == "stop" and driver.events.count("stop") == 1 and controller.virtual_device == ""
+    assert notes[-1] == ("Screen mirroring stopped", "", False) and len(driver.screens) == 1
+
+
+def test_a_virtual_screen_that_goes_away_is_explained_in_spanish(controller, tv, monkeypatch):
+    from mirrorbridge.gui.window import MainWindow
+
+    _ffmpeg()
+    driver = _virtual_screen(monkeypatch)
+    tv.reconfigure(width=640, height=360)
+    controller.settings.extend_screen, controller.settings.capture_backend = True, "auto"
+    controller.set_language("es")
+    _choose(controller, _device(tv.port))
+    notes = []
+    controller.notify.connect(lambda *note: notes.append(note))
+    window = MainWindow(controller)
+    controller.start_mirror()
+    _until(lambda: controller.cast_state == State.CASTING, 30)
+    threading.Thread(target=driver.screens[0].on_lost).start()  # sleep, as the driver's keep-alive sees it
+    _until(lambda: controller.session_future is None, 30)
+    error = ("La pantalla virtual se cerró (por ejemplo, al suspender el equipo). Vuelve a transmitir o a duplicar "
+             "la pantalla.")
+    assert notes[-1] == ("La duplicación de pantalla falló", error, True)
+    assert window.status_label.text() == f"Falló: {error}" and driver.events[-1] == "stop"
+
+
+def test_mirror_screen_offers_to_install_the_driver_as_a_cast_does(controller, tv, monkeypatch):
+    from mirrorbridge.gui import extend
+
+    _ffmpeg()
+    driver = _virtual_screen(monkeypatch, DriverStatus.NOT_INSTALLED)
+    asked = []
+    monkeypatch.setattr(extend.ExtendScreenSetup, "_consent", lambda self: asked.append("install?") or False)  # Not now
+    controller.update_settings(extend_screen=True, capture_backend="auto")
+    _choose(controller, _device(tv.port))
+    notes = []
+    controller.notify.connect(lambda *note: notes.append(note))
+    controller.start_mirror()
+    _until(lambda: controller.session_future is None and not controller.extend.busy, 30)
+    assert asked == ["install?"]  # Parsec's download and terms, as when a cast finds no driver
+    # Extend screen is turned off, so the next Mirror screen sends the display; no "failed" on top.
+    assert notes == [("Extend screen (virtual display)", "Extend screen is off for now, so Start casting and Mirror "
+                      "screen send your display. Choose it again once the driver works.", False)]
+    assert not controller.settings.extend_screen and controller.vdd_status is DriverStatus.NOT_INSTALLED
+    assert controller.cast_state == State.FAILED and not controller.is_active
+    assert driver.events == [("start", 1920, 1080, 60), "stop"] and tv.connections == []  # the TV was not asked
 
 
 # -- one session at a time ----------------------------------------------------------------------------

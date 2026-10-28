@@ -134,12 +134,9 @@ async def cmd_forget(args) -> int:
     return 0
 
 
-async def cmd_cast(args) -> int:
-    settings = Settings.load()
-    for key in ("framerate", "encoder", "capture_backend", "latency_mode", "ffmpeg_path"):
-        value = getattr(args, key, None)
-        if value not in (None, ""):
-            setattr(settings, key, value)
+def _what_to_send(settings: Settings, args) -> None:
+    """--monitor, --window, --extend and --extend-mode over the app's What to cast choice, alike
+    for cast and mirror: without any of the first three, what the app has selected is sent."""
     if args.window_title is not None:  # --window "" clears a window picked in the app
         settings.window_title = args.window_title.strip()
     if args.monitor is not None:
@@ -152,6 +149,15 @@ async def cmd_cast(args) -> int:
         settings.extend_screen = False  # a display or a window, not the virtual screen
     if args.extend_mode:
         settings.extend_mode = args.extend_mode
+
+
+async def cmd_cast(args) -> int:
+    settings = Settings.load()
+    for key in ("framerate", "encoder", "capture_backend", "latency_mode", "ffmpeg_path"):
+        value = getattr(args, key, None)
+        if value not in (None, ""):
+            setattr(settings, key, value)
+    _what_to_send(settings, args)
     if args.bitrate:
         settings.video_bitrate_kbps = args.bitrate
     if args.height is not None:
@@ -231,6 +237,7 @@ async def cmd_probe(args) -> int:
 async def cmd_mirror(args) -> int:
     """Screen mirroring (experimental), or with --probe, how the TV takes it."""
     settings = Settings.load()
+    _what_to_send(settings, args)
     manager = DeviceManager(asyncio.get_running_loop())
     device = await _choose(manager, args)
     if device.airplay is None:
@@ -310,7 +317,7 @@ def _vdd_summary(status: vdisplay.DriverStatus | None = None) -> str:
 
 async def cmd_vdd(args) -> int:
     if not vdisplay.available():
-        print("The virtual screen (cast --extend) needs Windows 10 or 11.")
+        print("The virtual screen (cast --extend, mirror --extend) needs Windows 10 or 11.")
         return 1
     if args.vdd_command == "install":
         return await _vdd_install(args)
@@ -390,6 +397,15 @@ def build_parser() -> argparse.ArgumentParser:
                        help="debug logging, and what each receiver advertises")
         return p
 
+    def what_to_send(p, command: str) -> None:
+        p.add_argument("--monitor", type=int, help="display number (1 = first)")
+        p.add_argument("--window", dest="window_title", help="capture a single window by title")
+        p.add_argument("--extend", action="store_true",
+                       help=f"{command} a new virtual screen, so the TV works as a second screen (with none of "
+                            f"--extend, --monitor or --window, {command} uses the app's 'What to cast' choice)")
+        p.add_argument("--extend-mode", choices=list(vdisplay.EXTEND_MODES),
+                       help="size of that screen (default: the app's choice, 1080p at first)")
+
     common(sub.add_parser("scan", help="list AirPlay receivers"))
     common(sub.add_parser("doctor", help="check FFmpeg, encoders, audio and network"))
     for name, text in (("pair", "pair with a receiver using the on-screen PIN"), ("forget", "remove saved pairing")):
@@ -398,8 +414,7 @@ def build_parser() -> argparse.ArgumentParser:
     cast = common(sub.add_parser("cast", help="cast the screen (or a file) to a receiver"))
     cast.add_argument("-d", "--device", help="name, IP or id")
     cast.add_argument("--file", help="play a local video file or http(s) URL instead of the screen")
-    cast.add_argument("--monitor", type=int, help="display number (1 = first)")
-    cast.add_argument("--window", dest="window_title", help="capture a single window by title")
+    what_to_send(cast, "cast")
     cast.add_argument("--fps", dest="framerate", type=int)
     cast.add_argument("--bitrate", type=int, help="video kbps")
     cast.add_argument("--height", type=int, help="output height, 0 = native")
@@ -408,11 +423,6 @@ def build_parser() -> argparse.ArgumentParser:
     cast.add_argument("--latency", dest="latency_mode", choices=list(ffmpeg.LATENCY_SEGMENT_SECONDS))
     cast.add_argument("--no-audio", action="store_true")
     cast.add_argument("--ffmpeg", dest="ffmpeg_path")
-    cast.add_argument("--extend", action="store_true",
-                      help="cast a new virtual screen, so the TV works as a second screen (with none of "
-                           "--extend, --monitor or --window, cast uses the app's 'What to cast' choice)")
-    cast.add_argument("--extend-mode", choices=list(vdisplay.EXTEND_MODES),
-                      help="size of that screen (default: the app's choice, 1080p at first)")
 
     test = common(sub.add_parser("probe", help="test which ways of sending video a receiver takes, for a bug report"))
     test.add_argument("name", nargs="?", metavar="device", help="name, IP or id")
@@ -425,10 +435,12 @@ def build_parser() -> argparse.ArgumentParser:
     mirroring = common(sub.add_parser("mirror", help="mirror the screen with a fraction of a second of delay "
                                                      "(experimental; AirPlay 2 TVs of other brands)"))
     mirroring.add_argument("-d", "--device", help="name, IP or id")
+    what_to_send(mirroring, "mirror")
     mirroring.add_argument("--probe", action="store_true",
                            help="find out how the TV takes screen mirroring and remember what works")
     mirroring.add_argument("--no-video", action="store_true", help="with --probe: send no test pattern")
-    mirroring.add_argument("--test-pattern", action="store_true", help="mirror a test pattern, not the screen")
+    mirroring.add_argument("--test-pattern", action="store_true",
+                           help="mirror a test pattern, not the screen (and no virtual screen)")
     mirroring.add_argument("--seconds", type=float, help="stop after this many seconds (--probe: 10)")
 
     vdd = sub.add_parser("vdd", help="the virtual display driver that --extend uses")
