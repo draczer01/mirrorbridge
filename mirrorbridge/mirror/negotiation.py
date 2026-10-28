@@ -68,6 +68,11 @@ FEEDBACK_SECONDS = 5
 DEFAULT_LEAD_MS = 100  # how long after capture the TV shows a frame (75 is enough on a cable)
 
 
+def audio_from_env(audio: bool) -> bool:
+    """MIRRORBRIDGE_NO_AUDIO=1, for an experiment: SETUP without the audio (type 96) stream."""
+    return False if os.environ.get("MIRRORBRIDGE_NO_AUDIO") == "1" else audio
+
+
 def lead_from_env(lead_ms: int) -> int:
     """MIRRORBRIDGE_LEAD_MS, for an experiment on Wi-Fi (20-1000 ms), or `lead_ms` when unset."""
     try:

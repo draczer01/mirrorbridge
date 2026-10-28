@@ -612,3 +612,13 @@ async def test_an_experiment_sends_the_heartbeat_only_when_no_frame_went(monkeyp
     reader.feed_eof()
     for t in channel._tasks:  # pylint: disable=protected-access
         t.cancel()
+
+
+def test_an_experiment_sets_up_mirroring_without_the_audio_stream(monkeypatch):
+    """MIRRORBRIDGE_NO_AUDIO=1: the plan has no audio stream (no type-96 SETUP)."""
+    from mirrorbridge.mirror import negotiation
+
+    monkeypatch.delenv("MIRRORBRIDGE_NO_AUDIO", raising=False)
+    assert negotiation.audio_from_env(True) is True
+    monkeypatch.setenv("MIRRORBRIDGE_NO_AUDIO", "1")
+    assert negotiation.audio_from_env(True) is False

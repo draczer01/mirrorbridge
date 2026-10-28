@@ -420,14 +420,17 @@ class MirrorSession:
 
         plan = self.profile.plan()
         plan.lead_ms = negotiation.lead_from_env(plan.lead_ms)
+        plan.audio = negotiation.audio_from_env(plan.audio)
         _LOGGER.info("Experiment knobs: keyframe every %g s (MIRRORBRIDGE_KEYFRAME_SECONDS), lead %d ms "
                      "(MIRRORBRIDGE_LEAD_MS), /feedback every %g s (MIRRORBRIDGE_FEEDBACK_S), frames shown %s "
                      "(MIRRORBRIDGE_ON_ARRIVAL), time requests %s (MIRRORBRIDGE_NTP_STOP_S), heartbeat %s "
-                     "(MIRRORBRIDGE_HEARTBEAT_IDLE_ONLY)", ffmpeg.MIRROR_KEYFRAME_SECONDS, plan.lead_ms,
+                     "(MIRRORBRIDGE_HEARTBEAT_IDLE_ONLY), audio stream %s (MIRRORBRIDGE_NO_AUDIO)",
+                     ffmpeg.MIRROR_KEYFRAME_SECONDS, plan.lead_ms,
                      negotiation.FEEDBACK_INTERVAL, "as they arrive" if ON_ARRIVAL else "at their timestamps",
                      f"answered for {_env_float('MIRRORBRIDGE_NTP_STOP_S', 0):g} s only"
                      if "MIRRORBRIDGE_NTP_STOP_S" in os.environ else "always answered",
-                     "only when idle" if HEARTBEAT_IDLE_ONLY else "every second")
+                     "only when idle" if HEARTBEAT_IDLE_ONLY else "every second",
+                     "set up" if plan.audio else "left out")
         _LOGGER.info("Setting up mirroring to %s (%s): %s", self.target.name,
                      "saved settings" if self.saved else "first time", plan.describe())
         est = self.report.established = await negotiator.establish(plan)
@@ -835,6 +838,8 @@ class MirrorSession:
                 and self.report.ntp_requests and self.target.identifier):
             profile = profiles.MirrorProfile.of(est.plan, self.profile.trailer)
             profile.lead_ms = self.profile.lead_ms  # an experiment's MIRRORBRIDGE_LEAD_MS is not kept
+            if negotiation.audio_from_env(True) is False:  # nor a plan without audio (MIRRORBRIDGE_NO_AUDIO)
+                profile.audio = self.profile.audio
             info =self.report.info.summary() if self.report.info else ""
             try:
                 await loop.run_in_executor(None, lambda: profiles.save(
