@@ -213,7 +213,7 @@ def test_stream_for_other_tvs_declares_codecs_and_program_date_time(tmp_path):
     """FFmpeg's master playlist must carry what Apple's rules for AirPlay 2 TVs ask for."""
     import re
 
-    from aircast.hls_server import fix_target_duration
+    from aircast.hls_server import complete_variants, fix_target_duration
 
     settings = Settings(latency_mode="low", output_height=360)
     cmd = ffmpeg.build_command(FF, settings, tmp_path, encoder="libx264", backend="test", for_apple=False)
@@ -228,5 +228,11 @@ def test_stream_for_other_tvs_declares_codecs_and_program_date_time(tmp_path):
     variant = next(line for line in master.splitlines() if line.startswith("#EXT-X-STREAM-INF"))
     assert re.search(r'CODECS="avc1\.64[0-9a-f]{4},mp4a\.40\.2"', variant), variant
     assert re.search(r"BANDWIDTH=\d+", variant) and "RESOLUTION=640x360" in variant
+    # FFmpeg leaves these out while the stream is live; HlsServer adds them as it serves it.
+    assert "FRAME-RATE=" not in variant
+    average = (settings.video_bitrate_kbps + settings.audio_bitrate_kbps) * 1000
+    served = complete_variants(variant.encode(), settings.framerate, average).decode()
+    peak = int(re.search(r"[:,]BANDWIDTH=(\d+)", served).group(1))
+    assert served.endswith(f",FRAME-RATE=30.000,AVERAGE-BANDWIDTH={average}") and average <= peak
     assert "#EXT-X-PROGRAM-DATE-TIME:" in media
     assert b"#EXT-X-TARGETDURATION:2\n" in fix_target_duration(media.encode())

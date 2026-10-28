@@ -37,7 +37,9 @@ LATENCY_SEGMENT_SECONDS = {"low": 0.5, "balanced": 1.0, "smooth": 2.0}
 # playlist. They get what Apple's HLS rules for AirPlay 2 TVs ask for: segments of at
 # least 2 s, a playlist of at least 12 s whose segments stay on disk a while after
 # they leave it, PROGRAM-DATE-TIME, and a master playlist that declares CODECS,
-# BANDWIDTH and RESOLUTION. Apple TVs keep the stream they have always been sent.
+# BANDWIDTH and RESOLUTION (FFmpeg's own), plus FRAME-RATE and AVERAGE-BANDWIDTH
+# (added by hls_server, since FFmpeg does not write them while the stream is live).
+# Apple TVs keep the stream they have always been sent.
 OTHER_TV_MIN_SEGMENT_SECONDS = 2.0
 OTHER_TV_WINDOW_SECONDS = 12
 MEDIA_PLAYLIST = "stream.m3u8"
@@ -47,6 +49,14 @@ MASTER_PLAYLIST = "master.m3u8"
 def segment_seconds(settings: Settings, for_apple: bool = True) -> float:
     seg = LATENCY_SEGMENT_SECONDS.get(settings.latency_mode, 1.0)
     return seg if for_apple else max(seg, OTHER_TV_MIN_SEGMENT_SECONDS)
+
+
+def playlist_size(settings: Settings, for_apple: bool = True) -> int:
+    """How many segments the live playlist lists."""
+    if for_apple:
+        return 6
+    return max(6, math.ceil(OTHER_TV_WINDOW_SECONDS / segment_seconds(settings, for_apple)))
+
 
 _NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
 
@@ -421,10 +431,10 @@ def build_command(
     ]
     flags = "delete_segments+independent_segments+omit_endlist+temp_file"
     cmd += ["-f", "hls", "-hls_time", str(seg)]
+    size = playlist_size(settings, for_apple)
     if for_apple:
-        cmd += ["-hls_list_size", "6", "-hls_flags", flags]
+        cmd += ["-hls_list_size", str(size), "-hls_flags", flags]
     else:
-        size = max(6, math.ceil(OTHER_TV_WINDOW_SECONDS / seg))
         cmd += [
             "-hls_list_size", str(size),
             "-hls_delete_threshold", str(size),

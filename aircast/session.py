@@ -86,6 +86,7 @@ class CastSession:
         self.backend = ""
         self.stream_url = ""
         self.for_apple = True  # Apple TVs get the stream they always had; see ffmpeg.OTHER_TV_*
+        self.no_codecs = False  # FFmpeg's master playlist declares no CODECS (see _log_master_playlist)
         self._work_dir = work_dir
         self._own_work_dir = work_dir is None
         self._proc: subprocess.Popen | None = None
@@ -223,12 +224,17 @@ class CastSession:
                     leftover.unlink(missing_ok=True)
 
         host = s.bind_address or local_ip_reaching(self.device.address)
-        self._server = HlsServer(self._work_dir, host, s.http_port)
+        # Other TVs get the master playlist; FFmpeg's own lacks these two of Apple's rules.
+        variant = {} if self.for_apple else {
+            "frame_rate": s.framerate,
+            "average_bandwidth": (s.video_bitrate_kbps + s.audio_bitrate_kbps) * 1000,
+        }
+        self._server = HlsServer(self._work_dir, host, s.http_port, **variant)
         try:
             await self._server.start()
         except OSError:
             _LOGGER.warning("Port %s busy, using a random port", s.http_port)
-            self._server = HlsServer(self._work_dir, host, 0)
+            self._server = HlsServer(self._work_dir, host, 0, **variant)
             await self._server.start()
         if self.for_apple:
             self.stream_url = self._server.url(ffmpeg.MEDIA_PLAYLIST)
@@ -239,14 +245,20 @@ class CastSession:
         self._set(State.CONNECTING, self.device.name)
         airplay_patch.apply()
         self._atv = await self.manager.connect(self.device)
-        self._cast = airplay_patch.CastContext(apple=self.device.is_apple, live=True)
+        self._cast = airplay_patch.CastContext(
+            apple=self.device.is_apple, live=True, password=self.device.requires_password
+        )
         self._play_task = asyncio.ensure_future(airplay_patch.play_url(self._atv, self.stream_url, self._cast))
 
     def _log_master_playlist(self) -> None:
-        text = (self._work_dir / ffmpeg.MASTER_PLAYLIST).read_text(encoding="utf-8", errors="replace")
+        served = self._server.rewrite_playlist((self._work_dir / ffmpeg.MASTER_PLAYLIST).read_bytes())
+        text = served.decode("utf-8", "replace")
         variant = next((line for line in text.splitlines() if line.startswith("#EXT-X-STREAM-INF")), "")
         _LOGGER.info("Master playlist: %s", variant or "no variant")
-        if "CODECS=" not in variant:
+        # FFmpeg takes CODECS from the encoder's header at startup, which some hardware
+        # encoders (Media Foundation with some Intel drivers) do not give.
+        self.no_codecs = "CODECS=" not in variant
+        if self.no_codecs:
             _LOGGER.warning("FFmpeg declared no CODECS for %s; some TVs refuse such a stream", self.encoder)
 
     async def _launch_encoder(
@@ -276,8 +288,18 @@ class CastSession:
             self._feeder.start()
 
         self._set(State.BUFFERING)
-        master = None if self.for_apple else self._work_dir / ffmpeg.MASTER_PLAYLIST
-        await self._wait_for_segments(self._work_dir / ffmpeg.MEDIA_PLAYLIST, master=master)
+        playlist = self._work_dir / ffmpeg.MEDIA_PLAYLIST
+        if self.for_apple:
+            await self._wait_for_segments(playlist)
+        else:
+            # Other TVs are handed a playlist that already holds its whole window (Apple's
+            # rule for AirPlay 2 TVs: a live playlist needs at least 6 segments). They then
+            # start as far behind the live edge as with a short one, only later.
+            size = ffmpeg.playlist_size(s, self.for_apple)
+            await self._wait_for_segments(
+                playlist, count=size, timeout=25 + size * ffmpeg.segment_seconds(s, self.for_apple),
+                master=self._work_dir / ffmpeg.MASTER_PLAYLIST,
+            )
 
     async def _stop_encoder(self) -> None:
         if self._feeder:
@@ -303,39 +325,61 @@ class CastSession:
         self._proc = None
 
     def _tv_activity(self) -> Activity:
-        """What the TV fetched. A TV on two networks at once may fetch from an address
-        other than its AirPlay one, so any client counts until the TV's own shows up."""
+        """What the TV fetched. Only its own address counts: a player opened on the PC or
+        a phone must neither hide a TV that cannot reach AirCast nor keep a cast going."""
         if self._server is None:
             return Activity()
-        tv = self._server.activity(self.device.address)
-        return tv if tv.requests else self._server.activity()
+        return self._server.activity(self.device.address)
+
+    def _other_clients(self) -> str:
+        """Who else fetched the stream, for an error that says the TV did not."""
+        clients = self._server.clients() if self._server else {}
+        others = [f"{ip} ({c.user_agent or 'no User-Agent'})"
+                  for ip, c in clients.items() if ip != self.device.address and c.requests]
+        if not others:
+            return ""
+        return (f" ({', '.join(others)} did download it, but that is not the TV's address, "
+                f"{self.device.address}.)")
 
     def _check_startup(self, tv: Activity, now: float, started_at: float) -> None:
         """Fail with the likely cause when the TV took the video but does not play it."""
         accepted = self._cast.accepted_at if self._cast else None
         if tv.first_playlist_at is None:
             if accepted is not None and now - accepted > PLAYLIST_TIMEOUT:
+                if tv.missing:
+                    raise StreamNotFetched(
+                        f"The TV reached AirCast but asked for {tv.missing_path}, which AirCast does "
+                        f"not serve, instead of the stream at {self.stream_url}. Please report this "
+                        "TV, with aircast.log."
+                    )
                 port = self._server.port if self._server else self.settings.http_port
                 raise StreamNotFetched(
                     f"The TV accepted the video but never downloaded it from {self.stream_url}. "
                     f"Allow AirCast (or inbound TCP port {port}) in Windows Firewall on private "
                     "networks, and check that the PC and the TV are on the same network."
+                    + self._other_clients()
                 )
             if accepted is None and now - started_at > NO_REQUEST_TIMEOUT:
                 raise RuntimeError(
                     f"The TV did not start the video within {NO_REQUEST_TIMEOUT} s and never asked for "
                     f"it at {self.stream_url}. Allow AirCast in Windows Firewall on private networks, "
-                    "and check that the PC and the TV are on the same network."
+                    "and check that the PC and the TV are on the same network." + self._other_clients()
                 )
         elif tv.first_segment_at is None and now - tv.first_playlist_at > SEGMENT_TIMEOUT:
             smooth = ffmpeg.LATENCY_SEGMENT_SECONDS["smooth"]
-            if ffmpeg.segment_seconds(self.settings, self.for_apple) < smooth:
-                hint = "Try Delay > Smooth."
+            if self.no_codecs and self.encoder != "libx264":
+                label = ffmpeg.ENCODER_LABELS.get(self.encoder, self.encoder)
+                hint = (f"FFmpeg could not tell the TV which codecs {label} produces: choose "
+                        "Quality > Encoder > x264 (CPU).")
+            elif ffmpeg.segment_seconds(self.settings, self.for_apple) < smooth:
+                hint = "Try Quality > Delay > Smooth."
             else:
                 hint = "Try a lower resolution or 30 frames per second."
+            asked = (f" (it also asked for {tv.missing_path}, which AirCast does not have)"
+                     if tv.missing else "")
             raise StreamRejected(
-                "The TV downloaded the playlist but none of the video, so it probably does not "
-                f"accept this video format. {hint}"
+                f"The TV downloaded the playlist but none of the video{asked}, so it probably "
+                f"does not accept this video format. {hint}"
             )
 
     async def _supervise(self) -> None:
