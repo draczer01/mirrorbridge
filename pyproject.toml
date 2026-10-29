@@ -3,14 +3,14 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "aircast"
-version = "0.2.0"
-description = "Cast your Windows screen and audio to Apple TV / AirPlay receivers"
+name = "mirrorbridge"
+version = "0.3.0"
+description = "Cast your Windows screen and audio to Apple TV and other AirPlay TVs (LG, Samsung, TCL...)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
-    "pyatv>=0.16,<0.19",
+    "pyatv==0.18.0",  # airplay_patch.py, airplay_queue.py and mirror/ take over parts of pyatv 0.18.0
     "srptools>=1.0,<2",  # srptools 2.0 breaks pyatv PIN pairing (keyword-only arg)
     "aiohttp>=3.9",
     "mss>=9",
@@ -21,17 +21,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "pyyaml>=6", "pytest-xdist>=3"]  # pyyaml: the tests read the workflows; xdist: pytest -n auto
 build = ["pyinstaller>=6", "imageio-ffmpeg>=0.6"]
 
 [project.scripts]
-aircast = "aircast.cli:main"
+mirrorbridge = "mirrorbridge.cli:main"
 
 [project.gui-scripts]
-aircast-gui = "aircast.gui.app:run_gui"
+mirrorbridge-gui = "mirrorbridge.gui.app:run_gui"
 
 [tool.setuptools.packages.find]
-include = ["aircast*"]
+include = ["mirrorbridge*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# A test still running after 2 minutes prints where every thread is, so a hang shows its place.
+faulthandler_timeout = 120

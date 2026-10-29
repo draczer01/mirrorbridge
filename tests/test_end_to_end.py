@@ -34,7 +34,7 @@ def _device(fake_atv, properties=None):
     from pyatv.conf import AppleTV, ManualService
     from pyatv.const import Protocol
 
-    from aircast.devices import Device
+    from mirrorbridge.devices import Device
 
     conf = AppleTV("127.0.0.1", "Living Room")
     conf.add_service(
@@ -58,21 +58,25 @@ def recorded_keys():
         yield
 
 
-async def test_pair_with_pin_then_cast_screen(fake_atv, recorded_keys, tmp_path):
+@pytest.mark.parametrize("model, playlist", [
+    ({"model": "AppleTV3,2"}, "stream.m3u8"),  # Apple TVs: the same stream as always
+    ({"model": "55QM7L", "manufacturer": "TCL"}, "master.m3u8"),
+])
+async def test_pair_with_pin_then_cast_screen(fake_atv, recorded_keys, tmp_path, model, playlist):
     from pyatv.const import Protocol
     from pyatv.storage.memory_storage import MemoryStorage
     from tests.fake_device.airplay import DEVICE_PIN
 
-    from aircast.config import Settings
-    from aircast.devices import DeviceManager
-    from aircast.session import CastSession, State
+    from mirrorbridge.config import Settings
+    from mirrorbridge.devices import DeviceManager
+    from mirrorbridge.session import CastSession, State
 
     usecase = fake_atv.get_usecase(Protocol.AirPlay)
     state = fake_atv.get_state(Protocol.AirPlay)
     usecase.airplay_require_authentication()
 
     manager = DeviceManager(asyncio.get_running_loop(), storage=MemoryStorage())
-    device = _device(fake_atv)
+    device = _device(fake_atv, {"features": "0x1,0x0", **model})
 
     asked = []
 
@@ -95,7 +99,10 @@ async def test_pair_with_pin_then_cast_screen(fake_atv, recorded_keys, tmp_path)
     await asyncio.wait_for(session.run(), timeout=60)
 
     assert state.last_airplay_url == session.stream_url
+    assert session.stream_url.endswith("/" + playlist)
     assert state.last_airplay_content.startswith(b"#EXTM3U")  # the receiver fetched our playlist
+    if playlist == "master.m3u8":
+        assert b"CODECS=" in state.last_airplay_content
     assert State.CASTING in states and states[-1] == State.STOPPED
     assert session._proc is None and session.encoder_returncode is not None  # encoder shut down
 
@@ -106,7 +113,7 @@ async def test_hap_pairing_used_by_modern_apple_tv(fake_atv, recorded_keys):
     from pyatv.storage.memory_storage import MemoryStorage
     from tests.fake_device.airplay import DEVICE_PIN
 
-    from aircast.devices import DeviceManager
+    from mirrorbridge.devices import DeviceManager
 
     fake_atv.get_usecase(Protocol.AirPlay).airplay_require_authentication()
     storage = MemoryStorage()
@@ -126,7 +133,7 @@ async def test_wrong_pin_fails(fake_atv):
     from pyatv.const import Protocol
     from pyatv.storage.memory_storage import MemoryStorage
 
-    from aircast.devices import DeviceManager
+    from mirrorbridge.devices import DeviceManager
 
     fake_atv.get_usecase(Protocol.AirPlay).airplay_require_authentication()
     manager = DeviceManager(asyncio.get_running_loop(), storage=MemoryStorage())
@@ -144,9 +151,9 @@ async def test_stop_from_app(fake_atv, tmp_path):
     from pyatv.const import Protocol
     from pyatv.storage.memory_storage import MemoryStorage
 
-    from aircast.config import Settings
-    from aircast.devices import DeviceManager
-    from aircast.session import CastSession, State
+    from mirrorbridge.config import Settings
+    from mirrorbridge.devices import DeviceManager
+    from mirrorbridge.session import CastSession, State
 
     usecase = fake_atv.get_usecase(Protocol.AirPlay)
     for _ in range(200):
@@ -170,10 +177,10 @@ async def test_falls_back_when_first_capture_method_dies(fake_atv, tmp_path, mon
     from pyatv.const import Protocol
     from pyatv.storage.memory_storage import MemoryStorage
 
-    from aircast import ffmpeg as ff
-    from aircast.config import Settings
-    from aircast.devices import DeviceManager
-    from aircast.session import CastSession, State
+    from mirrorbridge import ffmpeg as ff
+    from mirrorbridge.config import Settings
+    from mirrorbridge.devices import DeviceManager
+    from mirrorbridge.session import CastSession, State
 
     real_input = ff._video_input
 
@@ -201,9 +208,9 @@ async def test_stop_while_starting_ends_at_once_and_stops_ffmpeg(fake_atv, tmp_p
     """Stop (or Quit) pressed while the encoder is still buffering must not be ignored."""
     from pyatv.storage.memory_storage import MemoryStorage
 
-    from aircast.config import Settings
-    from aircast.devices import DeviceManager
-    from aircast.session import CastSession, State
+    from mirrorbridge.config import Settings
+    from mirrorbridge.devices import DeviceManager
+    from mirrorbridge.session import CastSession, State
 
     async def never_ready(self, *_a, **_k):
         await asyncio.sleep(3600)

@@ -1,4 +1,4 @@
-# Pinned versions for the standalone AirCast.exe build (reproducible).
+# Pinned versions for the standalone MirrorBridge.exe build (reproducible).
 # PySide6 6.10+ needs the Windows ICU DLL (missing before Windows 10 1903 and in Wine),
 # so the exe uses 6.9.x.
 pyatv==0.18.0

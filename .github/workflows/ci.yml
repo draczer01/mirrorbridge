@@ -12,7 +12,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      # libegl1/libgl1: PySide6.QtWidgets loads them, and the Extend dialog tests import it.
+      # libxkbcommon0/libfontconfig1: Qt's offscreen platform, where the language tests build the menu.
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg libegl1 libgl1 libxkbcommon0 libfontconfig1
       - run: pip install -e ".[dev]"
       - name: Fetch pyatv sources for the fake Apple TV
         run: |
@@ -23,6 +25,7 @@ jobs:
 
   windows-build:
     runs-on: windows-latest
+    timeout-minutes: 45  # the tests and the build take about 15; a hang should not hold the runner for 6 h
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -30,16 +33,36 @@ jobs:
           python-version: "3.12"
       - run: pip install -r packaging/requirements-build.txt pytest pytest-asyncio
       - run: pip install --no-deps -e .
-      - run: pytest -q tests/test_ffmpeg.py tests/test_hls_server.py tests/test_patch.py
+      - run: pytest -q tests/test_ffmpeg.py tests/test_hls_server.py tests/test_patch.py tests/test_vdisplay.py tests/test_migration.py tests/test_session.py tests/test_devices.py tests/test_release.py tests/test_i18n.py tests/test_probe.py tests/test_mirror.py tests/test_mirror_loopback.py tests/test_mirror_gui.py tests/test_mirror_extend.py tests/test_latency_meter.py tests/test_googlecast.py tests/test_capture.py tests/test_ptp.py
+      # The FFmpeg inside the exe (packaging/ffmpeg_pin.json), checked by size and SHA-256; build_exe.ps1
+      # finds it in place and checks that it is 8.1.1 with scale_d3d11 before it builds.
+      - name: Fetch the pinned FFmpeg
+        run: python -I packaging/fetch_ffmpeg.py
       - run: .\packaging\build_exe.ps1
         shell: pwsh
       - name: Smoke test the exe
         shell: pwsh
         run: |
-          $out = & .\dist\AirCast.exe --version | Out-String
+          $out = & .\dist\MirrorBridge.exe --version | Out-String
           Write-Host $out
-          if ($out -notmatch "AirCast") { throw "AirCast.exe --version printed nothing" }
+          if ($out -notmatch "MirrorBridge") { throw "MirrorBridge.exe --version printed nothing" }
+      # The release package as release.yml makes it, less FFmpeg's source, so every change proves it still builds.
+      - name: Third-party notices and the release zip
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python packaging/third_party_notices.py --out build/notices
+          $ffmpeg = python packaging/third_party_notices.py --ffmpeg-version
+          $pinned = (Get-Content -Raw packaging/ffmpeg_pin.json | ConvertFrom-Json).version
+          if ($ffmpeg -ne $pinned) { throw "MirrorBridge.exe has FFmpeg '$ffmpeg', not the pinned $pinned" }
+          python packaging/package_release.py --exe dist/MirrorBridge.exe --notices build/notices --out release
+          Get-Content release/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: AirCast-windows
-          path: dist/AirCast.exe
+          name: MirrorBridge-windows
+          path: dist/MirrorBridge.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MirrorBridge-windows-zip
+          path: release/*.zip
+          if-no-files-found: error

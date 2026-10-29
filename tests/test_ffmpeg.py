@@ -1,11 +1,12 @@
+import logging
 import shutil
 import subprocess
 import time
 
 import pytest
 
-from aircast import audio, ffmpeg
-from aircast.config import Settings
+from mirrorbridge import audio, ffmpeg
+from mirrorbridge.config import Settings
 
 FF = shutil.which("ffmpeg")
 needs_ffmpeg = pytest.mark.skipif(FF is None, reason="ffmpeg not installed")
@@ -27,7 +28,7 @@ def _cmd(tmp_path, **kw):
     return ffmpeg.build_command(
         "ffmpeg", settings, tmp_path,
         encoder=kw.get("encoder", "libx264"), backend=kw.get("backend", "test"),
-        monitor=kw.get("monitor"), audio_port=kw.get("audio_port"),
+        monitor=kw.get("monitor"), audio_port=kw.get("audio_port"), for_apple=kw.get("for_apple", True),
     )
 
 
@@ -58,6 +59,32 @@ def test_latency_controls_segment_and_gop(tmp_path):
     assert cmd[cmd.index("-g") + 1] == "15"
 
 
+def test_apple_tv_stream_is_unchanged(tmp_path):
+    """Apple TVs get exactly the HLS output they always had."""
+    for mode, seg in (("low", "0.5"), ("balanced", "1.0"), ("smooth", "2.0")):
+        cmd = _cmd(tmp_path, latency_mode=mode)
+        assert cmd[cmd.index("-f", cmd.index("-map")):] == [
+            "-f", "hls", "-hls_time", seg, "-hls_list_size", "6",
+            "-hls_flags", "delete_segments+independent_segments+omit_endlist+temp_file",
+            "-hls_allow_cache", "0", "-hls_segment_type", "mpegts",
+            "-hls_segment_filename", str(tmp_path / "seg_%05d.ts"), str(tmp_path / "stream.m3u8"),
+        ]
+        assert cmd[cmd.index("-force_key_frames") + 1] == f"expr:gte(t,n_forced*{seg})"
+
+
+def test_other_tvs_get_two_second_segments_a_long_window_and_a_master_playlist(tmp_path):
+    cmd = _cmd(tmp_path, latency_mode="low", framerate=30, for_apple=False)
+    assert cmd[cmd.index("-hls_time") + 1] == "2.0"
+    assert cmd[cmd.index("-g") + 1] == "60"
+    assert cmd[cmd.index("-force_key_frames") + 1] == "expr:gte(t,n_forced*2.0)"
+    assert cmd[cmd.index("-hls_list_size") + 1] == "6"  # 6 x 2 s = 12 s
+    assert cmd[cmd.index("-hls_delete_threshold") + 1] == "6"
+    assert "+program_date_time" in cmd[cmd.index("-hls_flags") + 1]
+    assert cmd[cmd.index("-master_pl_name") + 1] == "master.m3u8"
+    assert cmd[-1] == str(tmp_path / "stream.m3u8")
+    assert ffmpeg.segment_seconds(Settings(latency_mode="smooth"), for_apple=False) == 2.0
+
+
 def test_audio_input_or_silence(tmp_path):
     assert any("anullsrc" in a for a in _cmd(tmp_path))
     cmd = _cmd(tmp_path, audio_port=5555)
@@ -76,8 +103,8 @@ def test_scaled_height_is_even_and_never_upscaled(tmp_path):
 
 
 def test_window_region_crops_ddagrab_relative_to_its_display(tmp_path):
-    from aircast.ffmpeg import Monitor, Region, build_command
-    from aircast.config import Settings
+    from mirrorbridge.ffmpeg import Monitor, Region, build_command
+    from mirrorbridge.config import Settings
 
     mon = Monitor(1, left=1920, top=0, width=2560, height=1440, dxgi_output=1)
     cmd = build_command("ffmpeg", Settings(window_title="Video"), tmp_path, encoder="libx264",
@@ -87,8 +114,8 @@ def test_window_region_crops_ddagrab_relative_to_its_display(tmp_path):
 
 
 def test_window_region_with_gdigrab_uses_desktop_coordinates(tmp_path):
-    from aircast.ffmpeg import Monitor, Region, build_command
-    from aircast.config import Settings
+    from mirrorbridge.ffmpeg import Monitor, Region, build_command
+    from mirrorbridge.config import Settings
 
     mon = Monitor(0, 0, 0, 1920, 1080)
     cmd = build_command("ffmpeg", Settings(window_title="Video"), tmp_path, encoder="libx264",
@@ -98,8 +125,8 @@ def test_window_region_with_gdigrab_uses_desktop_coordinates(tmp_path):
 
 
 def test_window_region_picks_display_and_clips_to_even(monkeypatch):
-    import aircast.ffmpeg as ff
-    from aircast import winmonitors
+    import mirrorbridge.ffmpeg as ff
+    from mirrorbridge import winmonitors
 
     monkeypatch.setattr(ff.sys, "platform", "win32")
     left, right = ff.Monitor(0, 0, 0, 1920, 1080, True), ff.Monitor(1, 1920, 0, 1920, 1080)
@@ -114,8 +141,8 @@ def test_window_region_picks_display_and_clips_to_even(monkeypatch):
 
 
 def test_window_without_region_falls_back_to_gdigrab(monkeypatch):
-    import aircast.ffmpeg as ff
-    from aircast.config import Settings
+    import mirrorbridge.ffmpeg as ff
+    from mirrorbridge.config import Settings
 
     monkeypatch.setattr(ff.sys, "platform", "win32")
     monkeypatch.setattr(ff, "has_filter", lambda *_a: True)
@@ -127,10 +154,81 @@ def test_window_without_region_falls_back_to_gdigrab(monkeypatch):
     assert ff.pick_capture_backend("ffmpeg", Settings(capture_backend="ddagrab"), other_gpu) == "gdigrab"
 
 
+def test_display_drawn_by_another_gpu_is_captured_with_gdigrab(monkeypatch, tmp_path, caplog):
+    """A virtual screen on a laptop's integrated GPU is not on DXGI adapter 0, which is the only
+    one `-f lavfi -i ddagrab` opens: it gets gdigrab over its desktop rectangle."""
+    import logging
+
+    import mirrorbridge.ffmpeg as ff
+    from mirrorbridge import winmonitors
+    from mirrorbridge.config import Settings
+
+    monkeypatch.setattr(ff.sys, "platform", "win32")
+    monkeypatch.setattr(ff, "has_filter", lambda *_a: True)
+    monkeypatch.setattr(winmonitors, "list_displays", lambda: [
+        winmonitors.WinDisplay(r"\\.\DISPLAY1", 0, 0, 2560, 1440, True, dxgi_output=0, dxgi_adapter=0),
+        winmonitors.WinDisplay(r"\\.\DISPLAY5", 2560, 0, 1920, 1080, False, dxgi_output=0, dxgi_adapter=1),
+    ])
+    main, virtual = ff.list_monitors()
+    assert (main.device, main.dxgi_output, main.dxgi_adapter) == (r"\\.\DISPLAY1", 0, 0)
+    assert (virtual.device, virtual.dxgi_output, virtual.dxgi_adapter) == (r"\\.\DISPLAY5", None, 1)
+    assert ff.pick_capture_backend("ffmpeg", Settings(), main) == "ddagrab"
+    with caplog.at_level(logging.INFO, logger="mirrorbridge.ffmpeg"):
+        assert ff.pick_capture_backend("ffmpeg", Settings(), virtual) == "gdigrab"
+    assert "DISPLAY5" in caplog.text and "adapter 1" in caplog.text
+    cmd = ff.build_command("ffmpeg", Settings(), tmp_path, encoder="h264_nvenc", backend="gdigrab", monitor=virtual)
+    assert cmd[cmd.index("-f") + 1] == "gdigrab" and cmd[cmd.index("-i") + 1] == "desktop"
+    assert cmd[cmd.index("-offset_x") + 1] == "2560" and cmd[cmd.index("-video_size") + 1] == "1920x1080"
+    assert not any("ddagrab" in a or "init_hw_device" in a for a in cmd)
+
+
 @needs_ffmpeg
 def test_libx264_is_detected():
     assert ffmpeg.encoder_works(FF, "libx264")
     assert ffmpeg.pick_encoder(FF, "auto") in ffmpeg.ENCODER_PREFERENCE
+
+
+# What FFmpeg 8.1.1 says with an NVIDIA driver older than 570, then a page of more.
+OLD_DRIVER = ("[h264_nvenc @ 000001] Driver does not support the required nvenc API version. Required: 13.0 Found: 12.2\n"
+              "[h264_nvenc @ 000001] The minimum required Nvidia driver for nvenc is 570.0 or newer\n"
+              + "[vost#0:0/h264_nvenc @ 000002] some later line\n" * 10 + "Error while opening encoder")
+
+
+def test_the_encoder_probe_says_why_an_encoder_does_not_work(monkeypatch, caplog):
+    """A warning for each reason, once a run, with the driver line even when it is far up; the
+    mirroring probe is made, and kept, for each keyframe mode."""
+    probes = []
+
+    def run(args, timeout=15):
+        probes.append(args)
+        if "h264_nvenc" in args:
+            return subprocess.CompletedProcess(args, 1, "", OLD_DRIVER)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(ffmpeg, "_run", run)
+    monkeypatch.setattr(ffmpeg, "_WORKING_ENCODERS", set())
+    monkeypatch.setattr(ffmpeg, "_WARNED", set())
+    with caplog.at_level(logging.DEBUG, logger="mirrorbridge.ffmpeg"):
+        assert ffmpeg.pick_encoder("ff", "auto", True, keyframes=0) == "h264_qsv"
+        assert not ffmpeg.encoder_works("ff", "h264_nvenc", True, 0)  # again: no second warning
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and warnings[0].startswith("Encoder NVIDIA NVENC does not work here: ")
+    assert "The minimum required Nvidia driver for nvenc is 570.0 or newer" in warnings[0]
+    assert warnings[0].endswith("Error while opening encoder")
+    qsv = next(args for args in probes if "h264_qsv" in args)
+    assert qsv[qsv.index("-g") + 1] == "300"  # only when needed: Quick Sync still every 10 s
+    probed = len(probes)
+    assert ffmpeg.encoder_works("ff", "h264_qsv", True, 0) and len(probes) == probed  # kept
+    assert ffmpeg.pick_encoder("ff", "h264_qsv", True) == "h264_qsv" and len(probes) == probed + 1  # every 2 s
+    assert probes[-1][probes[-1].index("-g") + 1] == "60"
+    assert ffmpeg.encoder_works("ff", "h264_qsv") and len(probes) == probed + 2  # a cast's options
+
+    def missing(args, timeout=15):
+        raise FileNotFoundError(2, "No such file", args[0])
+
+    monkeypatch.setattr(ffmpeg, "_run", missing)
+    assert not ffmpeg.encoder_works("nowhere/ffmpeg", "libx264")
+    assert "Encoder x264 (CPU) does not work here: FFmpeg did not answer" in caplog.text
 
 
 def _wait_segments(path, n, timeout=20):
@@ -180,3 +278,33 @@ def test_pipeline_produces_live_hls_with_audio(tmp_path):
         proc.stdin.flush()
         proc.wait(10)
     assert feeder.error is None
+
+
+@needs_ffmpeg
+def test_stream_for_other_tvs_declares_codecs_and_program_date_time(tmp_path):
+    """FFmpeg's master playlist must carry what Apple's rules for AirPlay 2 TVs ask for."""
+    import re
+
+    from mirrorbridge.hls_server import complete_variants, fix_target_duration
+
+    settings = Settings(latency_mode="low", output_height=360)
+    cmd = ffmpeg.build_command(FF, settings, tmp_path, encoder="libx264", backend="test", for_apple=False)
+    proc = ffmpeg.popen(cmd)
+    try:
+        media = _wait_segments(tmp_path / "stream.m3u8", 2)
+        master = (tmp_path / "master.m3u8").read_text()
+    finally:
+        proc.stdin.write(b"q")
+        proc.stdin.flush()
+        proc.wait(10)
+    variant = next(line for line in master.splitlines() if line.startswith("#EXT-X-STREAM-INF"))
+    assert re.search(r'CODECS="avc1\.64[0-9a-f]{4},mp4a\.40\.2"', variant), variant
+    assert re.search(r"BANDWIDTH=\d+", variant) and "RESOLUTION=640x360" in variant
+    # FFmpeg leaves these out while the stream is live; HlsServer adds them as it serves it.
+    assert "FRAME-RATE=" not in variant
+    average = (settings.video_bitrate_kbps + settings.audio_bitrate_kbps) * 1000
+    served = complete_variants(variant.encode(), settings.framerate, average).decode()
+    peak = int(re.search(r"[:,]BANDWIDTH=(\d+)", served).group(1))
+    assert served.endswith(f",FRAME-RATE=30.000,AVERAGE-BANDWIDTH={average}") and average <= peak
+    assert "#EXT-X-PROGRAM-DATE-TIME:" in media
+    assert b"#EXT-X-TARGETDURATION:2\n" in fix_target_duration(media.encode())
