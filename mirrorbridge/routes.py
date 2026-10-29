@@ -64,7 +64,12 @@ class Screen:
 
     @property
     def name(self) -> str:
-        return self.airplay.name if self.airplay is not None else self.cast.name
+        if self.airplay is not None:
+            return self.airplay.name
+        name = self.cast.name
+        if _serial(name) or name == self.cast.host:  # a receiver with no name of its own (izzi's TV box)
+            return f"{self.cast.model or 'Google Cast'} ({self.cast.host})"
+        return name
 
     @property
     def host(self) -> str:
@@ -86,6 +91,11 @@ class Screen:
         if identifier == self.identifier:
             return True
         return self.cast is not None and identifier == CAST_PREFIX + (self.cast.identifier or self.cast.host)
+
+
+def _serial(name: str) -> bool:
+    """A name that is only a serial number, such as "1001B026D756D451"."""
+    return len(name) >= 12 and all(ch in "0123456789abcdefABCDEF-" for ch in name)
 
 
 def merge(devices: list["Device"], casts: list["CastDevice"]) -> list[Screen]:

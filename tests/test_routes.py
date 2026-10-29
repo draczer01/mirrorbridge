@@ -198,3 +198,10 @@ def test_nothing_on_the_tv_tries_the_next_way(controller, monkeypatch):
     controller.try_another_way()
     controller.stop_cast()  # Stop wins: nothing else starts
     assert not controller._go_on()  # pylint: disable=protected-access
+
+
+def test_a_receiver_named_by_its_serial_number_gets_a_readable_name():
+    box = routes.Screen(cast=CastDevice(name="1001B026D756D451", host="192.168.1.2", identifier="x", model="IZZI BOX"))
+    assert box.name == "IZZI BOX (192.168.1.2)"
+    assert routes.Screen(cast=CastDevice(name="1001B026D756D451", host="192.168.1.2")).name == "Google Cast (192.168.1.2)"
+    assert routes.Screen(cast=_cast()).name == "TCL 55QM7L"
