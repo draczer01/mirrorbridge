@@ -205,6 +205,41 @@ def test_the_main_item_shows_the_screen_on_the_chosen_tv(controller, monkeypatch
     assert _items(tray)["Play a video file…"].isEnabled()
 
 
+def test_nothing_on_the_tv_tries_another_way_from_the_menu(controller, monkeypatch):
+    """While the main item's way runs and the TV takes another, the menu has the window's "Try
+    another way" under Stop; the TV's last way has none."""
+    from mirrorbridge import routes
+    from mirrorbridge.googlecast import CastDevice
+
+    started = []  # the ways started, in place of the sessions
+    monkeypatch.setattr(controller, "_start_route", lambda screen, route: started.append(route))
+    monkeypatch.setattr(type(controller), "is_active", property(lambda self: bool(started)))
+    controller.casts = [CastDevice("TCL 55QM7L", "127.0.0.1", identifier="tcl")]  # the TCL by Google Cast too
+    _choose(controller, _device())
+    another = "Nothing on the TV? Try another way"
+    assert another not in _texts(_tray(controller))  # nothing runs
+    controller.start_primary()
+    tray = _tray(controller)
+    assert _texts(tray)[2:4] == ["Stop casting", another]
+
+    def next_way(tray) -> None:
+        count = len(started)
+        _items(tray)[another].trigger()
+        assert controller._go_on()  # pylint: disable=protected-access  # once the session has stopped
+        _until(lambda: len(started) == count + 1)
+
+    next_way(tray)
+    assert started == [routes.AIRPLAY_MIRROR, routes.CAST_MIRROR]
+    assert controller.routes.last(controller.selected_screen.identifier, routes.AIRPLAY_MIRROR) == "failed"
+    controller.set_language("es")
+    tray = _tray(controller)
+    assert _texts(tray)[2:4] == ["Detener transmisión", "¿No se ve en la TV? Probar otra forma"]  # the old cast
+    controller.set_language("en")
+    next_way(_tray(controller))
+    assert started == [routes.AIRPLAY_MIRROR, routes.CAST_MIRROR, routes.AIRPLAY_CAST]
+    assert _texts(_tray(controller))[2] == "Stop casting" and another not in _texts(_tray(controller))  # the last way
+
+
 def test_mirror_screen_pairs_first(controller, monkeypatch):
     """Without MirrorBridge's pairing, the main item still mirrors: it pairs (the TV shows a PIN),
     then mirrors."""

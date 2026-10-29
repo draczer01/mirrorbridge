@@ -117,7 +117,9 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   way, 3-7 s delay)*, for a TV that does not show the screen otherwise. *Play a video file*
   stays where it was. *Device* lists every TV once, those found by Google Cast too, with what
   choosing it means (*Ready*, *A speaker*...), and *Include computer sound* says that it is only
-  for casts: Mirror screen has no sound yet.
+  for casts: Mirror screen has no sound yet. While the main item's way runs and the TV takes
+  another, *Nothing on the TV? Try another way*, under *Stop*, goes to the next one, as the
+  window's button does.
 - The video says which colours it carries: the processor's picture is now converted and tagged
   as BT.709 (HD's colours), and the graphics card's carries BT.709 primaries and transfer, where
   NVENC fed the screen directly said BT.601.

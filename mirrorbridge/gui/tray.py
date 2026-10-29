@@ -138,10 +138,13 @@ class TrayMenu(QObject):
         self._action(menu, c.status()[1], enabled=False)
 
         # The main item: the best way to show the screen on the chosen TV (Mirror screen, or a
-        # cast to an Apple TV), as the window's big button; while anything runs, its Stop.
+        # cast to an Apple TV), as the window's big button; while anything runs, its Stop, and
+        # while the big button's way runs with more to try, the window's "Try another way".
         device, screen = c.selected_device, c.selected_screen
         if c.is_active:
             self._action(menu, tr("stop_mirror") if c.mirroring else tr("stop"), c.stop_cast)
+            if c.can_try_another_way():
+                self._action(menu, tr("ui_try_another"), c.try_another_way)
         else:
             text = tr("ui_show_on", device=_escape(screen.name)) if screen else tr("show_no_device")
             show = self._action(menu, text, c.start_primary, enabled=bool(c.primary_action()))
