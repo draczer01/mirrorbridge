@@ -10,7 +10,7 @@ from mirrorbridge.config import Settings
 from mirrorbridge.session import State
 from mirrorbridge.googlecast import CastDevice
 from mirrorbridge.text import Text
-from test_mirror_gui import APPLE_TV_TXT, _device
+from test_mirror_gui import APPLE_TV_TXT, NO_SCREEN_TXT, _device
 
 _APP = None
 
@@ -155,7 +155,7 @@ def test_the_big_button_stops_trying_for_this_pcs_own_failures_and_after_stop(co
 
 
 def test_the_last_way_failing_is_reported(controller):
-    controller.devices, controller.casts = [_device(txt=APPLE_TV_TXT, name="Living Room")], []
+    controller.devices, controller.casts = [_device(txt=NO_SCREEN_TXT, name="Kitchen")], []  # it only casts
     controller.settings.last_device_id = controller.devices[0].identifier
     controller.start_primary()
     assert controller.started == [routes.AIRPLAY_CAST]

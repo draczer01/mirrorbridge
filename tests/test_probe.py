@@ -348,7 +348,7 @@ def test_a_video_the_tv_ended_early_says_so():
 # -- the fourth test: screen mirroring ---------------------------------------------------------------
 
 
-async def test_an_unpaired_tv_skips_the_mirroring_test(mirror_tv):
+async def test_an_unpaired_apple_tv_skips_the_mirroring_test(mirror_tv):
     watched = []
     device = _device(mirror_tv, features=APPLE_TV_FEATURES, is_apple=True)
     device.airplay.credentials = None
@@ -777,7 +777,7 @@ def test_test_this_tv_does_not_promise_a_moving_pattern_it_will_not_send(control
     from PySide6.QtWidgets import QApplication, QMessageBox
 
     controller.set_language("es")
-    device = _device(features=APPLE_TV_FEATURES, is_apple=True, airplay=PAIRED)
+    device = _device(features=TCL_FEATURES & ~(1 << 7), airplay=PAIRED)  # no bit 7: no screen mirroring
     controller.devices = [device]
     controller.settings.last_device_id = device.identifier
     intro = []
@@ -791,8 +791,8 @@ def test_test_this_tv_does_not_promise_a_moving_pattern_it_will_not_send(control
     controller.test_tv()
     assert intro and intro[0].startswith("MirrorBridge probará tres formas de enviar un video a Sala familiar, una "
                                          "tras otra, durante unos dos minutos en total.")
-    assert ("La cuarta prueba, la duplicación de pantalla, se omite: la TV necesita FairPlay para duplicar la "
-            "pantalla, como los Apple TV y los Mac, y MirrorBridge todavía no lo tiene.") in intro[0]
+    assert ("La cuarta prueba, la duplicación de pantalla, se omite: la TV no indica que admita la duplicación de "
+            "pantalla.") in intro[0]
     assert "en movimiento" not in intro[0] and controller.probe_future is None
 
 

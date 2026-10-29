@@ -166,8 +166,8 @@ def test_mirror_screen_is_offered_for_a_paired_tv_of_another_brand(controller):
     item = _items(tray)[MIRROR]
     assert item.isEnabled() and item.toolTip() == (
         "Your screen on the TV a fraction of a second behind, instead of a cast's few seconds: the display, window or "
-        "extended screen chosen under What to cast. For paired AirPlay 2 TVs of other brands (TCL, Roku, Samsung, "
-        "LG…); no sound yet.")
+        "extended screen chosen under What to cast. For paired AirPlay 2 TVs (TCL, Roku, Samsung, LG…) and Apple "
+        "TVs; no sound yet.")
 
 
 def test_mirror_screen_pairs_first(controller, monkeypatch):
@@ -187,16 +187,14 @@ def test_mirror_screen_pairs_first(controller, monkeypatch):
     assert not controller.is_active and len(asked) == 1  # nothing starts, and it does not pair again in a loop
 
 
-def test_an_apple_tv_is_told_mirroring_is_coming(controller):
+def test_an_apple_tv_is_offered_mirror_screen(controller):
+    """An Apple TV mirrors with FairPlay: Mirror screen is there, next to Start casting."""
     _choose(controller, _device(txt=APPLE_TV_TXT, name="Living Room"))
     tray = _tray(controller)
     item = _items(tray)[MIRROR]
-    assert not item.isEnabled() and item.toolTip() == (
-        "Screen mirroring to Apple TVs and Macs is coming in a later version. For now, cast to them with Start "
-        "casting.")
+    assert item.isEnabled() and item.toolTip().endswith("and Apple TVs; no sound yet.")
     assert _items(tray)["Start casting to Living Room"].isEnabled()  # casting is still there
-    controller.start_mirror()
-    assert not controller.is_active
+    assert controller.primary_action() == "mirror"
 
 
 @pytest.mark.parametrize("txt", [NO_SCREEN_TXT, SPEAKER_TXT], ids=["no-bit-7", "speaker"])
@@ -237,12 +235,7 @@ def test_mirror_screen_in_spanish(controller):
                               "pantalla aparece en la TV.")
     _choose(controller, _device(txt=APPLE_TV_TXT))
     item = _items(_tray(controller))["Duplicar pantalla (baja latencia, experimental)"]
-    assert item.toolTip() == ("La duplicación de pantalla en Apple TV y Mac llegará en una versión futura. Por ahora, "
-                              "transmite a ellos con Transmitir.")
-    controller.set_language("en")  # the window says it again, for the Apple TV now chosen: it casts
-    assert window.show_btn.text() == "Show my screen on TCL 55QM7L" and window.show_btn.isEnabled()
-    assert window.action_hint.text().startswith("On an Apple TV your screen appears a few seconds behind")
-    assert window.cast_btn.isHidden()  # the big button already casts
+    assert item.isEnabled() and item.toolTip().endswith("y Apple TV; todavía sin sonido.")
 
 
 # -- a session, from the tray menu ---------------------------------------------------------------------
