@@ -4,16 +4,47 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import dataclasses
 import getpass
 import logging
+import math
 import os
+import statistics
 import sys
 
-from . import (APP_NAME, CLI_NAME, __version__, airplay_patch, audio, ffmpeg, googlecast, mirror, probe, vdisplay,
-               winmonitors)
+from . import (APP_NAME, CLI_NAME, __version__, airplay_patch, audio, ffmpeg, googlecast, mirror, probe, speakers,
+               vdisplay, winmonitors)
 from .config import Settings, app_data_dir, credentials_file
 from .devices import Device, DeviceManager
+from .mirror import profiles as mirror_profiles
+from .mirror import sound as mirror_sound
 from .session import CastSession, State
+
+_LOGGER = logging.getLogger(__name__)
+
+LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-7s %(name)s: %(message)s"
+LOG_DATE_FORMAT = "%H:%M:%S"
+
+# mirror --sound-trial: the ways of sending the sound to try on a TV, in this order, each one
+# change from the default (as MIRRORBRIDGE_MIRROR_SOUND_* names it, and the knobs it sets).
+SOUND_TRIAL = [
+    ("default", {}),
+    ("VOLUME=-20", {"volume_db": -20.0}),
+    ("IS_MEDIA=1", {"is_media": True}),
+    ("SHAPE=minmax", {"shape": "minmax"}),
+    ("SHAPE=apple", {"shape": "apple"}),
+    ("CODEC=alac-sized", {"codec": "alac-sized"}),
+    ("CODEC=pcm", {"codec": "pcm"}),
+    ("CODEC=pcmle", {"codec": "pcmle"}),
+    ("SHAPE=media", {"shape": "media"}),
+    ("SYNC_FLAGS=7", {"sync_flags": 7}),
+    ("HOLD=0", {"hold": False}),
+    ("REDUNDANT=2", {"redundant": 2}),
+]
+SOUND_TRIAL_SECONDS = 12  # each try, unless --seconds says otherwise
+SOUND_CHECK_SECONDS = 10  # doctor --sound records this long
+SOUND_RATE_TOLERANCE = 0.01  # and the capture must give 44100 frames a second within this
 
 
 _QT_APP = None
@@ -59,6 +90,7 @@ def _cli_words(message: str, device: Device) -> str:
         "Show my screen should work": f'mirror -d "{device.name}" should work',
         "Show my screen did not work": f'mirror -d "{device.name}" did not work',
         "Choose Show my screen again": f'Run mirror -d "{device.name}" again',
+        "Play a video file": f'cast -d "{device.name}" --file VIDEO',
     }
     for item, option in paths.items():
         message = message.replace(item, option)
@@ -237,10 +269,29 @@ async def cmd_probe(args) -> int:
     return 0 if report.worked else 1
 
 
+def _printer(device: Device):
+    """What a mirroring session says (on_status), on the command line."""
+
+    def status(state: State, message: str) -> None:
+        message = _cli_words(message, device)
+        print(f"[{state.value}] {message}" if message else f"[{state.value}]")
+
+    return status
+
+
+def _noticer(device: Device):
+    """What the person should know of the sound (a session's on_notice), on the command line."""
+    return lambda text: print(f"[note] {_cli_words(str(text), device)}")
+
+
 async def cmd_mirror(args) -> int:
     """Screen mirroring (experimental), or with --probe, how the TV takes it."""
     settings = Settings.load()
     _what_to_send(settings, args)
+    if args.no_audio:
+        settings.capture_audio = False
+    if args.keep_pc_sound:
+        settings.mute_pc_audio = False
     # This run only, in place of Mirror screen settings > Frame rate: settings.json is not written.
     fps = args.framerate or int(os.environ.get("MIRRORBRIDGE_FPS", "0") or 0)  # MIRRORBRIDGE_FPS: experiment
     manager = DeviceManager(asyncio.get_running_loop())
@@ -260,19 +311,109 @@ async def cmd_mirror(args) -> int:
             print(_cli_words(line, device))
         return 0 if result.worked else 1
 
-    def status(state: State, message: str) -> None:
-        message = _cli_words(message, device)
-        print(f"[{state.value}] {message}" if message else f"[{state.value}]")
+    # The sound, for this run (off unless asked for, for now): the test switches of
+    # MIRRORBRIDGE_MIRROR_SOUND_*, with --beep and --sound-delay over them.
+    knobs = mirror_sound.SoundKnobs.from_env()
+    if args.beep or args.sound_trial:
+        knobs = knobs.replace(tone=True)
+    if args.sound_delay is not None:
+        knobs = knobs.replace(delay_ms=args.sound_delay)
+    if args.sound_trial:
+        return await _sound_trial(target, settings, device, args, knobs, fps if fps > 0 else None)
 
     source = mirror.TEST_PATTERN if args.test_pattern else mirror.DESKTOP
-    session = mirror.MirrorSession(target, settings, status, source=source, seconds=args.seconds,
-                                   timing=args.timing, fps=fps if fps > 0 else None)
+    session = mirror.MirrorSession(target, settings, _printer(device), source=source, seconds=args.seconds,
+                                   timing=args.timing, fps=fps if fps > 0 else None,
+                                   sound=True if args.sound or args.beep else None, sound_knobs=knobs,
+                                   on_notice=_noticer(device))
     print("Press Ctrl+C to stop mirroring.")
     try:
         await session.run()
     except Exception:  # pylint: disable=broad-except
         return 1
     return 0
+
+
+async def _sound_trial(target, settings: Settings, device: Device, args, base: "mirror_sound.SoundKnobs",
+                       fps) -> int:
+    """mirror --sound-trial: the test pattern with its beep, sent the ways SOUND_TRIAL lists, one
+    after the other, until the person hears it on the TV. 0 once they did. Heard the default
+    way, it is kept for the TV (mirroring.json), so that the PC is muted while the TV plays the
+    sound from then on."""
+    seconds = args.seconds or SOUND_TRIAL_SECONDS
+    if not args.no_audio:  # Include computer sound off in the app: the trial sends only its beep
+        settings = dataclasses.replace(settings, capture_audio=True)
+    print(f"Sound trial on {device.name}: up to {len(SOUND_TRIAL)} tries of {seconds:g} s, each with the test "
+          f"pattern and a beep every second. Listen to the TV, and after each try say whether it beeped.")
+    warned = False
+    for number, (name, changes) in enumerate(SOUND_TRIAL, 1):
+        knobs = base.replace(**changes)
+        if knobs.codec in ("pcm", "pcmle") and not warned:
+            warned = True
+            await _prompt("Turn the TV volume down to about 10 now (raw PCM in the wrong byte order is loud noise), "
+                          "then press Enter ")
+        print(f"\nTry {number} of {len(SOUND_TRIAL)}: {name}")
+        session = mirror.MirrorSession(target, settings, _printer(device), source=mirror.TEST_PATTERN,
+                                       seconds=seconds, remember=False, timing=args.timing, fps=fps, sound=True,
+                                       sound_knobs=knobs, on_notice=_noticer(device))
+        try:
+            await session.run()
+        except Exception:  # pylint: disable=broad-except
+            pass  # the session said why ([Failed]); some beeps may have played before
+        answer = await _heard()
+        report = session.report
+        stats = report.sound_stats
+        _LOGGER.info("Sound trial %d (%s; %s): %s; %s; resends %d of %d asked (%d gone)", number, name,
+                     knobs.describe(), answer, report.sound, stats.get("resent", 0), stats.get("asked", 0),
+                     stats.get("missed", 0))
+        if answer == "q":
+            print("Sound trial stopped.")
+            return 1
+        if answer == "y":
+            print(f"{device.name} beeped with try {number} ({name}).")
+            if number == 1:
+                _keep_heard(target, session, knobs)
+            return 0
+    print(f"{device.name} did not beep with any of them. Please send the log (--log) with a bug report.")
+    return 1
+
+
+async def _heard() -> str:
+    """The person's answer after a try of the sound trial: "y", "n" or "q" (stop)."""
+    if _ask_in_dialogs():
+        answer = await _prompt("Did you hear one beep a second?", choices=["Yes", "No", "Stop the trial"])
+        return {"1": "y", "2": "n"}.get(answer, "q")
+    while True:
+        answer = (await _prompt("Did you hear one beep a second? [y/n/q] ")).lower()
+        if answer in ("y", "yes", "s", "si", "sí"):  # and in Spanish
+            return "y"
+        if answer in ("n", "no"):
+            return "n"
+        if answer in ("q", "quit"):
+            return "q"
+
+
+def _keep_heard(target, session, knobs: "mirror_sound.SoundKnobs") -> None:
+    """The TV played the default way's sound: mirroring.json keeps that it does (and, for a TV with
+    nothing saved yet, how this session mirrored to it). Not when MIRRORBRIDGE_MIRROR_SOUND_* test
+    switches changed what the TV got: what is kept must be what a session sends."""
+    if knobs.replace(enable=None, tone=False, delay_ms=0.0, mute=False) != mirror_sound.SoundKnobs():
+        print("Not kept for the TV: MIRRORBRIDGE_MIRROR_SOUND_* test switches were set.")
+        return
+    est = session.report.established
+    profile = None
+    if est is not None:  # with the TV's own lead, as a session saves it
+        plan = dataclasses.replace(est.plan, lead_ms=session.profile.lead_ms)
+        profile = mirror_profiles.MirrorProfile.of(plan, session.report.trailer)
+    try:
+        kept = mirror_profiles.set_sound(target.identifier, mirror_profiles.SOUND_HEARD, profile=profile,
+                                         name=target.name)
+    except OSError as ex:
+        print(f"Could not keep that for the TV: {ex}")
+        return
+    if kept is not None:
+        print(f"Kept for {target.name}: it plays the PC's sound. From now on mirroring with the sound mutes this PC "
+              f"while the TV plays it (--keep-pc-sound: not).")
 
 
 async def cmd_googlecast(args) -> int:
@@ -318,6 +459,8 @@ async def cmd_googlecast(args) -> int:
 
 
 async def cmd_doctor(args) -> int:
+    if args.sound:
+        return await _sound_check()
     settings = Settings.load()
     print(f"{APP_NAME} {__version__}  (data folder: {app_data_dir()})")
     try:
@@ -340,6 +483,117 @@ async def cmd_doctor(args) -> int:
     print("\nScanning network...")
     _print_devices(await manager.scan(timeout=args.timeout, hosts=args.host), args.verbose)
     return 0
+
+
+async def _sound_check() -> int:
+    """doctor --sound: this PC's side of Mirror screen's sound, without a TV. SOUND_CHECK_SECONDS
+    of what it plays, recorded as a session records it (WASAPI loopback at 44.1 kHz, blocks of
+    one packet), and what the session's sample line would make of it. 0 when the blocks came at
+    44100 frames a second (within SOUND_RATE_TOLERANCE)."""
+    print(f"{APP_NAME} {__version__}: the sound check for Mirror screen")
+    await _prompt("Play some sound on this PC (music or a video), then press Enter ")
+    blocks: list[tuple[int, int, bool]] = []  # (frames, when it came, fresh)
+    peak = [0.0]
+
+    def sink(arr, arrived: int, fresh: bool) -> None:
+        blocks.append((len(arr), arrived, fresh))
+        if len(arr):
+            peak[0] = max(peak[0], float(abs(arr).max()))
+
+    feeder = audio.LoopbackFeeder(sink=sink, samplerate=mirror_sound.SR, block_frames=mirror_sound.SPF,
+                                  buffer_frames=mirror_sound.CAPTURE_BUFFER_FRAMES, name="mirrorbridge-audio")
+    print(f"Recording this PC's sound for {SOUND_CHECK_SECONDS:g} s...")
+    feeder.start()
+    await asyncio.sleep(SOUND_CHECK_SECONDS)
+    feeder.stop()
+    await asyncio.get_running_loop().run_in_executor(None, feeder.join, 2.0)
+    got = list(blocks)
+    figures = _line_figures(got)
+    rate = figures["rate"]
+    worked = bool(got) and abs(rate - mirror_sound.SR) <= mirror_sound.SR * SOUND_RATE_TOLERANCE
+    level = f"peak {20 * math.log10(peak[0]):.1f} dBFS" if peak[0] > 0 else "silence (did anything play?)"
+    lines = [f"Speaker:   {feeder.speaker_name or 'none'}"
+             + (f" ({figures['opened']} recorders opened: the output changed)" if figures["opened"] > 1 else "")]
+    if not got:
+        lines.append(f"Blocks:    none{f' ({feeder.error})' if feeder.error else ''}: Windows has no sound output "
+                     f"to record")
+    else:
+        lines += [
+            f"Blocks:    {len(got)}, {figures['frames']} frames, {rate:.0f} frames/s ({mirror_sound.SR} asked)",
+            f"Arrival:   {figures['late_p50']:.1f} ms late (median), {figures['late_p99']:.1f} ms (99%), against "
+            f"the earliest of the last 2 s",
+            f"Line:      error {figures['error_min']:+.1f}..{figures['error_max']:+.1f} ms, corrections "
+            f"+{figures['inserted']}/-{figures['deleted']}, filled {figures['filled_ms']:.0f} ms, kept "
+            f"{figures['kept_ms']:.0f} ms, cut {figures['cut_ms']:.0f} ms, base steps {figures['steps']}, re-anchored "
+            f"{figures['reanchors']}",
+            f"Level:     {level}",
+        ]
+    lines.append(f"Mute:      {await _mute_round_trip()}")
+    lines.append(f"Result:    {'OK' if worked else 'NOT OK: the sound is not recorded at 44100 frames a second'}")
+    for line in lines:
+        print(line)
+    _LOGGER.info("Sound check: %s", "; ".join(" ".join(line.split()) for line in lines))
+    return 0 if worked else 1
+
+
+def _line_figures(blocks: list[tuple[int, int, bool]]) -> dict:
+    """What a session's sample line (mirror.sound.SampleLine) makes of recorded blocks (frames,
+    when each came in ns, fresh), each sent as it came, with the keeper looking at each block's
+    time: the frame rate the recording really gave (fitted to the blocks' times), how late the
+    blocks came against the line's base, and the corrections it would make."""
+    line = mirror_sound.SampleLine()
+    figures = dict(rate=0.0, frames=0, opened=0, late_p50=0.0, late_p99=0.0, error_min=0.0, error_max=0.0,
+                   inserted=0, deleted=0, filled_ms=0.0, kept_ms=0.0, cut_ms=0.0, steps=0, reanchors=0)
+    late, errors, times, counts = [], [], [], []
+    filled = kept = cut = 0
+    for n, arrived, fresh in blocks:
+        figures["opened"] += int(fresh)
+        figures["frames"] += n
+        times.append(arrived / mirror_sound.NS)
+        counts.append(figures["frames"])
+        c0 = line.observe(n, arrived, fresh)
+        late.append((arrived - line.t_cap(line.c)) / 1e6)
+        if line.A is None:
+            line.start(c0)
+        else:
+            zeros = line.keep(arrived)
+            line.advance(zeros)
+            kept += zeros
+        corr = line.correction(c0, n)
+        made = len(mirror_sound.apply(bytes(4 * n), corr)) // 4
+        net = made - (n - min(corr.cut, n)) - corr.fill
+        figures["inserted"] += max(0, net)
+        figures["deleted"] += max(0, -net)
+        filled += corr.fill
+        cut += min(corr.cut, n)
+        line.advance(made)
+        if made:
+            line.fed_real()
+        errors.append(line.error_ns / 1e6)
+    if len(times) > 1 and times[-1] > times[0]:
+        figures["rate"] = statistics.linear_regression(times, counts).slope
+    if late:
+        ordered = sorted(late)
+        figures["late_p50"] = ordered[(len(ordered) - 1) // 2]
+        figures["late_p99"] = ordered[int(0.99 * (len(ordered) - 1))]
+    if errors:
+        figures["error_min"], figures["error_max"] = min(errors), max(errors)
+    ms = 1000 / mirror_sound.SR
+    figures.update(filled_ms=filled * ms, kept_ms=kept * ms, cut_ms=cut * ms, steps=line.steps,
+                   reanchors=line.reanchors)
+    return figures
+
+
+async def _mute_round_trip() -> str:
+    """Mute this PC's speakers as Mirror screen would, and turn them on again half a second later."""
+    muted = speakers.MutedSpeakers()
+    if muted.mute():
+        await asyncio.sleep(0.5)
+        muted.restore()
+        return "muted, and on again 0.5 s later"
+    if muted.error:
+        return f"could not mute: {muted.error}"
+    return "left as they were: muted already" if sys.platform == "win32" else "only on Windows"
 
 
 _VDD_STATUS_TEXT = {
@@ -430,6 +684,13 @@ async def _vdd_install(args) -> int:
     return 0 if status in (vdisplay.DriverStatus.OK, vdisplay.DriverStatus.RESTART_REQUIRED) else 1
 
 
+def _sound_delay(text: str) -> float:
+    value = float(text)
+    if not -500 <= value <= 500:  # NaN too
+        raise argparse.ArgumentTypeError(f"{text} is not from -500 to 500 ms")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=CLI_NAME,
                                      description="Cast your Windows screen to Apple TV and other AirPlay TVs.")
@@ -443,6 +704,8 @@ def build_parser() -> argparse.ArgumentParser:
         # Also accepted after the command ("scan -v"); SUPPRESS keeps a -v given before it.
         p.add_argument("-v", "--verbose", action="store_true", default=argparse.SUPPRESS,
                        help="debug logging, and what each receiver advertises")
+        p.add_argument("--log", metavar="PATH", help="also write the debug log to this file (added to it), for a "
+                                                     "bug report")
         return p
 
     def what_to_send(p, command: str) -> None:
@@ -455,7 +718,10 @@ def build_parser() -> argparse.ArgumentParser:
                        help="size of that screen (default: the app's choice, 1080p at first)")
 
     common(sub.add_parser("scan", help="list AirPlay receivers"))
-    common(sub.add_parser("doctor", help="check FFmpeg, encoders, audio and network"))
+    doctor = common(sub.add_parser("doctor", help="check FFmpeg, encoders, audio and network"))
+    doctor.add_argument("--sound", action="store_true",
+                        help=f"check only this PC's sound for Mirror screen: record {SOUND_CHECK_SECONDS} s of what "
+                             f"it plays, as a session would, and mute its speakers for a moment")
     for name, text in (("pair", "pair with a receiver using the on-screen PIN"), ("forget", "remove saved pairing")):
         common(sub.add_parser(name, help=text)).add_argument("-d", "--device", help="name, IP or id")
 
@@ -496,6 +762,20 @@ def build_parser() -> argparse.ArgumentParser:
                            help="how the TV gets the time, for this run only (default: MIRRORBRIDGE_TIMING, else "
                                 "NTP). ptp is an experiment: MirrorBridge as the TV's PTP clock, which needs inbound "
                                 "UDP 319-320; NTP if the TV does not follow it")
+    # The sound (experimental, off unless asked for), for this run only.
+    mirroring.add_argument("--sound", action="store_true",
+                           help="send this PC's sound with the picture (experimental; MIRRORBRIDGE_MIRROR_SOUND=1 "
+                                "turns it on for every session)")
+    mirroring.add_argument("--beep", action="store_true",
+                           help="send a beep every second instead of this PC's sound (implies --sound)")
+    mirroring.add_argument("--sound-delay", type=_sound_delay, metavar="MS",
+                           help="the sound this many ms later (or earlier, below 0) than the picture, -500 to 500")
+    mirroring.add_argument("--no-audio", action="store_true", help="no sound, as Include computer sound off")
+    mirroring.add_argument("--keep-pc-sound", action="store_true",
+                           help="do not mute this PC's speakers while the TV plays the sound")
+    mirroring.add_argument("--sound-trial", action="store_true",
+                           help="the test pattern with a beep, sent up to 12 ways (--seconds each, 12 by default) "
+                                "until you hear it on the TV; heard the first way, the TV is known to play the sound")
 
     gcast = common(sub.add_parser("googlecast", help="mirror the screen to a Chromecast or a TV with Chromecast "
                                                      "built-in (experimental)"))
@@ -535,11 +815,8 @@ def main(argv: list[str] | None = None) -> int:
                                 format="%(asctime)s %(levelname)-7s %(name)s: %(message)s", datefmt="%H:%M:%S")
         return run_gui(open_window=getattr(args, "open", False))
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s.%(msecs)03d %(levelname)-7s %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format=LOG_FORMAT,
+                        datefmt=LOG_DATE_FORMAT)
     if not args.verbose:
         logging.getLogger("pyatv").setLevel(logging.WARNING)
 
@@ -547,7 +824,42 @@ def main(argv: list[str] | None = None) -> int:
                "probe": cmd_probe, "vdd": cmd_vdd, "mirror": cmd_mirror,
                "googlecast": cmd_googlecast}[args.command]
     try:
-        return asyncio.run(handler(args))
+        with _log_file(getattr(args, "log", None), args.verbose):
+            _LOGGER.debug("%s %s: %s", APP_NAME, __version__, " ".join(sys.argv[1:] if argv is None else argv))
+            return asyncio.run(handler(args))
     except KeyboardInterrupt:
         print("\nStopped.")
         return 0
+
+
+@contextlib.contextmanager
+def _log_file(path, verbose: bool):
+    """--log PATH: every line of the log, down to DEBUG, also goes to PATH (added to what it has),
+    while the console shows what it shows without it."""
+    if not path:
+        yield
+        return
+    try:
+        handler = logging.FileHandler(path, encoding="utf-8")
+    except OSError as ex:
+        raise SystemExit(f"Cannot write the log to {path}: {ex}") from ex
+    handler.setFormatter(logging.Formatter(LOG_FORMAT, LOG_DATE_FORMAT))
+    root = logging.getLogger()
+    # Put back afterwards: the root's level (DEBUG for the file), its handlers' (the console's
+    # stays the root's of before), and without -v these at INFO, as in the app's own log, where
+    # their DEBUG lines would bury the session's.
+    noisy = [] if verbose else [logging.getLogger(name) for name in ("zeroconf", "aiohttp", "asyncio")]
+    saved = [(item, item.level) for item in (root, *root.handlers, *noisy)]
+    for other in root.handlers:
+        other.setLevel(max(other.level, root.level))
+    for logger in noisy:
+        logger.setLevel(max(logger.level, logging.INFO))
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+    try:
+        yield
+    finally:
+        root.removeHandler(handler)
+        handler.close()
+        for item, level in saved:
+            item.setLevel(level)

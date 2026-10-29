@@ -789,7 +789,7 @@ async def test_the_mirror_command_takes_timing_for_one_run(monkeypatch, capsys):
     sessions = []
 
     class Session:
-        def __init__(self, target, settings, on_status, *, source, seconds, timing, fps) -> None:
+        def __init__(self, target, settings, on_status, *, source, seconds, timing, fps, **_sound) -> None:
             sessions.append(timing)
 
         async def run(self) -> None:

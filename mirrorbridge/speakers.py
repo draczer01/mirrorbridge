@@ -95,6 +95,7 @@ class MutedSpeakers:
 
     def __init__(self) -> None:
         self._volume: Optional[_Volume] = None
+        self.error = ""  # why the last mute() could not mute ("" if it could, or had nothing to do)
 
     def mute(self) -> bool:
         """Mute the default output if it is not muted; True if this did it."""
@@ -104,11 +105,14 @@ class MutedSpeakers:
             volume = _Volume()
             if volume.muted():
                 volume.release()
+                self.error = ""
                 return False
             volume.set_muted(True)
         except Exception as ex:  # pylint: disable=broad-except
             _LOGGER.warning("Could not mute this PC's speakers: %s", ex)
+            self.error = str(ex) or type(ex).__name__
             return False
+        self.error = ""
         self._volume = volume
         _LOGGER.info("This PC's speakers are muted while the TV plays the sound")
         return True

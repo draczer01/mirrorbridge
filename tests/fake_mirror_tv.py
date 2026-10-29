@@ -11,23 +11,31 @@ Under PTP timing it answers SETUP as Apple's SDK for receivers does (a timingPee
 ClockID, and no NTP), takes SETPEERS with the SDK's answers, and then starts a PTP clock of the
 kind TvProfile.ptp names (fake_ptp.py) on the ports ptp_ports() gives.
 
-It reads the wire on its own (struct offsets, HKDF with pyatv's hkdf_expand), not with
-mirrorbridge.mirror.packets, so that the two sides check each other.
+A type-96 (screen audio) stream gets two UDP ports of its own (AudioReceiver): the data port
+opens each packet as shairport-sync does, with the SETUP's shk, decodes it (ALAC verbatim frames
+or PCM), and asks for lost ones on the control port, where the syncs come in.
+
+It reads the wire on its own (struct offsets, HKDF with pyatv's hkdf_expand, cryptography's
+ChaCha20-Poly1305), not with mirrorbridge.mirror.packets or audiopackets, so that the two sides
+check each other.
 """
 
 from __future__ import annotations
 
+import array
 import asyncio
 import dataclasses
 import logging
 import plistlib
 import socket
 import struct
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from pyatv.auth.hap_channel import AbstractHAPChannel
 from pyatv.auth.hap_session import HAPSession
 from pyatv.auth.hap_srp import hkdf_expand
@@ -87,9 +95,20 @@ class TvProfile:
     setpeers_status: int = 200  # what a SETPEERS the SDK would take is answered with (400: SetPeers failed)
     ptp_video_status: Optional[int] = None  # the video stream's SETUP in a PTP session is answered with this
     ptp_info: Optional[dict] = None  # GET /info's PTPInfo
+    screen_formats: int = 0x1C0000  # GET /info's supportedFormats.screenStream
+    audio_ports: bool = True  # name the type-96 stream's dataPort and controlPort in the SETUP answer
+    audio_control_port: bool = True  # (the controlPort alone)
+    audio_answer_type: bool = True  # say "type": 96 in that answer
+    audio_lose: tuple[int, ...] = ()  # audio packets (by number) lost the first time they come
+    audio_resend: bool = True  # ask for lost audio packets again
+    close_on_audio: Optional[float] = None  # s after the first audio packet: close the video and control connections
+    record_headers: dict = field(default_factory=dict)  # more headers in RECORD's answer, e.g. Audio-Latency
+    feedback_body: Optional[dict] = None  # POST /feedback's answer (None: empty, as TCL's TVs answer)
+    answer_volume: bool = True  # answer SET_PARAMETER (False: never)
 
 
 TCL = TvProfile()
+TCL_CONTROL_FIRST = TvProfile(refuse=())  # a TCL that takes the session's SETUP alone first, as Apple's do
 
 
 @dataclass
@@ -108,6 +127,237 @@ class VideoReceived:
     annexb: bytearray = field(default_factory=bytearray)
     errors: list[str] = field(default_factory=list)
     closed_by_us: bool = False
+
+
+@dataclass
+class AudioPacket:
+    """One audio packet as it came (the first copy)."""
+
+    seq: int  # unwrapped: the packet's number
+    rtp: int
+    ssrc: int
+    marker: bool
+    nonce8: bytes
+    arrived_ns: int  # time.perf_counter_ns()
+    pcm_be: bytes  # ALAC decoded to s16 BE; PCM as it came
+    resent: bool = False  # it came in a resend answer
+    copies: int = 1
+
+
+@dataclass
+class Sync:
+    first: bool  # 0x90
+    flags: int
+    field1: int
+    ntp: int
+    field3: int
+    arrived_ns: int
+
+
+@dataclass
+class AudioReceived:
+    """What came over one type-96 stream's UDP ports."""
+
+    stream: dict  # the stream's SETUP dict
+    session: dict = field(default_factory=dict)  # the session's SETUP fields
+    data_port: int = 0
+    control_port: int = 0
+    packets: dict[int, AudioPacket] = field(default_factory=dict)  # by number
+    syncs: list[Sync] = field(default_factory=list)
+    requests: list[tuple[int, int]] = field(default_factory=list)  # (first seq, count) we asked for again
+    missing: list[int] = field(default_factory=list)  # seqs the sender answered it no longer has
+    errors: list[str] = field(default_factory=list)
+    control_peer: Optional[tuple] = None  # where the first control datagram came from
+    datagrams: int = 0  # everything that came, on either port
+    first_ns: Optional[int] = None  # when the first audio packet came
+
+    def pcm(self, order: str = ">") -> tuple[bytes, list[int]]:
+        """The samples of every packet in order, as s16 BE (PCM read as `order`), and the numbers
+        of the packets missing between the first and the last."""
+        if not self.packets:
+            return b"", []
+        lo, hi = min(self.packets), max(self.packets)
+        gaps = [i for i in range(lo, hi + 1) if i not in self.packets]
+        data = b"".join(self.packets[i].pcm_be for i in range(lo, hi + 1) if i in self.packets)
+        if self.stream.get("ct") == 1 and order == "<":
+            samples = array.array("h", data)
+            samples.byteswap()
+            data = samples.tobytes()
+        return data, gaps
+
+    def heard_ns(self, rtp: int, rule: str = "A", lat_min: int = 0, x: int = 11025) -> int:
+        """When stream sample `rtp` is heard, by the latest sync before its packet came: at the
+        sync's time plus (rtp - field1) samples (rule A, UxPlay's), plus lat_min (B) or x (D)."""
+        spf = self.stream.get("spf", 352)
+        packet = self.packets.get(rtp // spf)
+        came = packet.arrived_ns if packet is not None else 1 << 62
+        sync = next((s for s in reversed(self.syncs) if s.arrived_ns <= came), self.syncs[0])
+        late = (rtp - sync.field1) & 0xFFFFFFFF
+        late -= (1 << 32) if late >= 1 << 31 else 0
+        extra = {"A": 0, "B": lat_min, "D": x}[rule]
+        return _from_ntp(sync.ntp) + (late + extra) * 1_000_000_000 // 44100
+
+    def onsets(self) -> list[int]:
+        """The stream samples (RTP time, unwrapped) where a beep starts: the first sample not
+        zero after at least 50 ms of zeros. Missing packets count as zeros."""
+        if not self.packets:
+            return []
+        spf = self.stream.get("spf", 352)
+        lo, hi = min(self.packets), max(self.packets)
+        samples = array.array("h")
+        for i in range(lo, hi + 1):
+            samples.frombytes(self.packets[i].pcm_be if i in self.packets else bytes(4 * spf))
+        if sys.byteorder == "little":
+            samples.byteswap()
+        found, zeros = [], 0
+        for frame in range(len(samples) // 2):
+            if samples[2 * frame] or samples[2 * frame + 1]:
+                if zeros >= 2205:
+                    found.append(lo * spf + frame)
+                zeros = 0
+            else:
+                zeros += 1
+        return found
+
+
+def _from_ntp(value: int) -> int:
+    """A sync's NTP time (1900 epoch) as ns of the sender's clock."""
+    return ((value >> 32) - NTP_EPOCH) * 1_000_000_000 + (((value & 0xFFFFFFFF) * 1_000_000_000 + (1 << 31)) >> 32)
+
+
+class _Datagrams(asyncio.DatagramProtocol):
+    def __init__(self, received: Callable[[bytes, tuple], None]) -> None:
+        self.received = received
+
+    def datagram_received(self, data: bytes, addr) -> None:
+        self.received(data, addr)
+
+
+class AudioReceiver:
+    """The TV's end of one type-96 stream: a data port and a control port on 127.0.0.1."""
+
+    def __init__(self, profile: TvProfile, stream: dict, session: Optional[dict] = None,
+                 on_first: Optional[Callable[[], None]] = None) -> None:
+        self.profile = profile
+        self.received = AudioReceived(stream, dict(session or {}))
+        self._on_first = on_first
+        self._highest: Optional[int] = None  # the highest packet number that came the first time
+        self._lost: set[int] = set()
+        self._transports: list = []
+        key = stream.get("shk")
+        self._aead = ChaCha20Poly1305(key) if isinstance(key, bytes) and len(key) == 32 else None
+
+    async def open(self, host: str = "127.0.0.1") -> AudioReceived:
+        loop = asyncio.get_running_loop()
+        data, _ = await loop.create_datagram_endpoint(lambda: _Datagrams(self._data), local_addr=(host, 0))
+        control, _ = await loop.create_datagram_endpoint(lambda: _Datagrams(self._control), local_addr=(host, 0))
+        self._transports = [data, control]
+        self.received.data_port = data.get_extra_info("sockname")[1]
+        self.received.control_port = control.get_extra_info("sockname")[1]
+        return self.received
+
+    def close(self) -> None:
+        for transport in self._transports:
+            transport.close()
+        self._transports = []
+
+    def _data(self, data: bytes, addr, resent: bool = False) -> None:
+        r = self.received
+        arrived = time.perf_counter_ns()
+        if not resent:
+            r.datagrams += 1
+        if len(data) <= 36 or data[0] != 0x80 or data[1] & 0x7F != 0x60:
+            r.errors.append(f"not an audio packet: {len(data)} bytes, {data[:12].hex()}")
+            return
+        seq, rtp, ssrc = struct.unpack_from(">HII", data, 2)
+        index = seq if self._highest is None else self._highest + ((seq - self._highest + 32768) & 0xFFFF) - 32768
+        if self._aead is None:
+            r.errors.append("no shk in the stream's SETUP to open packets with")
+            return
+        try:  # as shairport-sync: the nonce is 4 zero bytes and the last 8, the additional data [4:12]
+            plain = self._aead.decrypt(b"\0" * 4 + data[-8:], data[12:-8], data[4:12])
+        except Exception:  # pylint: disable=broad-except
+            r.errors.append(f"packet {index} does not open")
+            return
+        if data[-8:] != struct.pack("<Q", index):
+            r.errors.append(f"packet {index} has the nonce {data[-8:].hex()}")
+        try:
+            pcm = parse_alac(plain) if r.stream.get("ct") == 2 else plain
+        except ValueError as ex:
+            r.errors.append(f"packet {index}: {ex}")
+            return
+        if not resent and index in self.profile.audio_lose and index not in self._lost:
+            self._lost.add(index)
+            return
+        if r.first_ns is None:
+            r.first_ns = arrived
+            if self._on_first is not None:
+                self._on_first()
+        if index in r.packets:
+            r.packets[index].copies += 1
+            if r.packets[index].pcm_be != pcm:
+                r.errors.append(f"packet {index} came again with other samples")
+        else:
+            r.packets[index] = AudioPacket(index, rtp, ssrc, bool(data[1] & 0x80), data[-8:], arrived, pcm, resent)
+        if resent:
+            return
+        if self._highest is not None and index > self._highest + 1 and self.profile.audio_resend:
+            self._ask(self._highest + 1, index - self._highest - 1)
+        self._highest = index if self._highest is None else max(self._highest, index)
+
+    def _ask(self, first: int, count: int) -> None:
+        r = self.received
+        r.requests.append((first & 0xFFFF, count))
+        if r.control_peer is None:
+            r.errors.append(f"lost {count} packets from {first} before anything came on the control port")
+            return
+        self._transports[1].sendto(struct.pack(">BBHHH", 0x80, 0xD5, 1, first & 0xFFFF, count), r.control_peer)
+
+    def _control(self, data: bytes, addr) -> None:
+        r = self.received
+        r.datagrams += 1
+        if r.control_peer is None:
+            r.control_peer = addr
+        kind = data[1] & 0x7F if len(data) >= 2 else None
+        if kind == 0x54 and len(data) == 20 and data[0] in (0x80, 0x90):
+            flags, field1, ntp, field3 = struct.unpack_from(">HIQI", data, 2)
+            r.syncs.append(Sync(data[0] == 0x90, flags, field1, ntp, field3, time.perf_counter_ns()))
+        elif kind == 0x56 and len(data) == 8:
+            r.missing.append(struct.unpack_from(">H", data, 4)[0])
+        elif kind == 0x56 and len(data) > 8:
+            if data[2:4] != data[6:8]:
+                r.errors.append(f"a resend answer for seq {data[2:4].hex()} holds seq {data[6:8].hex()}")
+            self._data(data[4:], addr, resent=True)
+        else:
+            r.errors.append(f"control packet {data[:8].hex()} ({len(data)} bytes)")
+
+
+def parse_alac(frame: bytes) -> bytes:
+    """The s16 BE samples of an ALAC frame in the verbatim (escape) form, with its sample count
+    or without it (352 then), or ValueError: anything else in the header, no END tag, or bits
+    other than zeros after it."""
+    bits = len(frame) * 8
+    v = int.from_bytes(frame, "big")
+    pos = bits - 23
+    if pos < 0:
+        raise ValueError(f"{len(frame)} bytes")
+    head = v >> pos
+    tag, instance, unused = head >> 20, (head >> 16) & 0xF, (head >> 4) & 0xFFF
+    has_size, shift, escape = (head >> 3) & 1, (head >> 1) & 3, head & 1
+    if (tag, instance, unused, shift, escape) != (1, 0, 0, 0, 1):
+        raise ValueError(f"header {head:#08x}")
+    count = 352
+    if has_size:
+        pos -= 32
+        count = (v >> pos) & 0xFFFFFFFF
+    pos -= count * 32 + 3
+    if pos < 0 or pos >= 8:
+        raise ValueError(f"{len(frame)} bytes for {count} samples")
+    if (v >> pos) & 7 != 7:
+        raise ValueError("no END tag")
+    if v & ((1 << pos) - 1):
+        raise ValueError("bits after the END tag")
+    return ((v >> (pos + 3)) & ((1 << (count * 32)) - 1)).to_bytes(count * 4, "big")
 
 
 def _avcc_params(record: bytes) -> tuple[list[bytes], list[bytes], bytes]:
@@ -197,11 +447,13 @@ class _Handler(AirPlayServerAuth):
         self.tasks: list[asyncio.Task] = []
         self.servers: list[asyncio.AbstractServer] = []
         self.ntp: Optional[_NtpClient] = None
+        self.receivers: list[AudioReceiver] = []
         self.add_route("SETUP", ".*", self.handle_setup)
         self.add_route("RECORD", ".*", self.handle_record)
         self.add_route("POST", "^/feedback$", self.handle_feedback)
         self.add_route("TEARDOWN", ".*", self.handle_teardown)
         self.add_route("SETPEERS", ".*", self.handle_setpeers)
+        self.add_route("SET_PARAMETER", ".*", self.handle_set_parameter)
 
     def enable_encryption(self, output_key: bytes, input_key: bytes) -> None:
         self.conn.pending_keys = (output_key, input_key)  # after the M4 answer has gone out
@@ -255,7 +507,7 @@ class _Handler(AirPlayServerAuth):
             "model": p.model,
             "sourceVersion": p.srcvers,
             "features": p.features,
-            "supportedFormats": {"screenStream": 0x1C0000, "audioStream": 0x1FFFFFC},
+            "supportedFormats": {"screenStream": p.screen_formats, "audioStream": 0x1FFFFFC},
             "statusFlags": 4,
             "deviceID": "AA:BB:CC:DD:EE:FF",
         }
@@ -324,7 +576,19 @@ class _Handler(AirPlayServerAuth):
         for stream in streams:
             if stream.get("type") == 96:
                 self.audio = True
-                answered.append({"type": 96, "dataPort": 7001, "controlPort": 7002, "streamID": 1})
+                receiver = AudioReceiver(p, stream, {k: v for k, v in self.mirror.items() if k != "streams"},
+                                         self._audio_started)
+                audio = await receiver.open()
+                self.receivers.append(receiver)
+                self.tv.audios.append(audio)
+                answer = {"type": 96, "dataPort": audio.data_port, "controlPort": audio.control_port, "streamID": 1}
+                if not p.audio_ports:
+                    del answer["dataPort"], answer["controlPort"]
+                elif not p.audio_control_port:
+                    del answer["controlPort"]
+                if not p.audio_answer_type:
+                    del answer["type"]
+                answered.append(answer)
             elif stream.get("type") == 110:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 if p.video_buffer:
@@ -344,6 +608,10 @@ class _Handler(AirPlayServerAuth):
         if answered:
             reply["streams"] = answered
         return self._answer(request, 200, reply)
+
+    def _audio_started(self) -> None:
+        if self.tv.profile.close_on_audio is not None:
+            asyncio.get_running_loop().call_later(self.tv.profile.close_on_audio, self.tv.end_mirroring)
 
     async def _events(self, port: int) -> None:
         server = await asyncio.get_running_loop().create_server(
@@ -445,10 +713,10 @@ class _Handler(AirPlayServerAuth):
         if request.headers.get("Session") != self.mirror.get("sessionUUID"):
             return self._answer(request, 454)
         self.tv.records += 1
-        return self._answer(request, 200, None, **{"Audio-Latency": "0"})
+        return self._answer(request, 200, None, **{"Audio-Latency": "0", **self.tv.profile.record_headers})
 
     def handle_feedback(self, request: HttpRequest):
-        return self._answer(request, 200)  # with nothing in it, as TCL's TVs answer
+        return self._answer(request, 200, self.tv.profile.feedback_body)  # by default empty, as TCL's TVs answer
 
     def handle_setpeers(self, request: HttpRequest):
         """As the SDK's receiver: 454 without a session, 451 for anything but a binary-plist
@@ -471,6 +739,22 @@ class _Handler(AirPlayServerAuth):
             self.tv.ptp.begin(self.tv.profile.ptp)
         return self._answer(request, 200)
 
+    def handle_set_parameter(self, request: HttpRequest):
+        body = request.body if isinstance(request.body, bytes) else str(request.body).encode()
+        self.tv.parameters.append((body, time.perf_counter_ns()))
+        if self.tv.profile.answer_volume:
+            return self._answer(request, 200)
+        task = asyncio.ensure_future(self._unanswered())
+        self.tasks.append(task)
+        return task
+
+    @staticmethod
+    async def _unanswered() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return None  # the connection closed: no answer at all
+
     def handle_teardown(self, request: HttpRequest):
         self.tv.teardowns += 1
         self.close()
@@ -488,6 +772,9 @@ class _Handler(AirPlayServerAuth):
         if self.ntp is not None:
             self.ntp.transport.close()
             self.ntp = None
+        for receiver in self.receivers:
+            receiver.close()
+        self.receivers.clear()
 
 
 def _free_port() -> int:
@@ -554,6 +841,8 @@ class FakeMirrorTV:
         self.peers: list = []  # what the last SETPEERS it took named
         self.ptp: Optional[FakePtp] = None  # its PTP clock, once ptp_ports() opened it
         self.event_ports: list[int] = []  # the port of each event channel the sender opened
+        self.audios: list[AudioReceived] = []  # each type-96 stream set up, with what came over it
+        self.parameters: list[tuple[bytes, int]] = []  # each SET_PARAMETER's body, and when it came
 
     def ptp_ports(self) -> tuple[int, int]:
         """The UDP ports of its PTP clock (event, general), opened at the first call."""

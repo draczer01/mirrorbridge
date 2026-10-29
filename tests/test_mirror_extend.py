@@ -437,7 +437,7 @@ async def test_the_mirror_command_chooses_what_to_send_as_cast_does(monkeypatch,
     sessions = []
 
     class Session:
-        def __init__(self, target, settings, on_status, *, source, seconds, timing, fps) -> None:
+        def __init__(self, target, settings, on_status, *, source, seconds, timing, fps, **_sound) -> None:
             sessions.append((target.name, settings, source))
 
         async def run(self) -> None:

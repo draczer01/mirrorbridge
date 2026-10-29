@@ -273,9 +273,9 @@ included.
   stays for the whole session and goes when the session ends; if it goes away first (sleep),
   the session ends and says so. *Test this TV* and `mirror --probe` never add it. Each is sent
   with the encoder and bitrate of the *Quality* menu, at the frame rate of *Mirror screen
-  settings*. There is no sound yet. If FFmpeg cannot capture or encode at the start (the
-  graphics driver refuses ddagrab, the GPU encoder is busy), it goes on with GDI capture, then
-  with x264 (CPU), as a cast does.
+  settings*. It has no sound unless you try it (below). If FFmpeg cannot capture or encode at
+  the start (the graphics driver refuses ddagrab, the GPU encoder is busy), it goes on with GDI
+  capture, then with x264 (CPU), as a cast does.
 * With NVENC and Desktop Duplication the picture stays on the graphics card at the TV's size: it
   goes from the capture to the encoder untouched. A bigger screen is scaled on the processor,
   unless FFmpeg's Windows Graphics Capture (`gfxcapture`) can repeat its last frame while the
@@ -311,15 +311,26 @@ included.
   MirrorBridge is the TV's PTP clock, also needs inbound UDP 319 and 320; if the TV does not
   follow that clock within a few seconds (`MIRRORBRIDGE_PTP_LOCK_S`), the session goes on with
   NTP, and says why in the log. Nothing about PTP is saved for the next session.
-* TVs differ in the order they want the session set up in, whether they need an (empty) audio
-  stream, whether they offer PTP timing, and how they want the H.264 header to end.
-  `mirror --probe` tries each, prints what the TV answered, and saves what worked in
-  `%APPDATA%\MirrorBridge\mirroring.json`, which Mirror screen and every `mirror` after it ask
-  for first. The last test of *Test this TV* does the same in 75 seconds: the test pattern goes
-  as soon as the TV takes a SETUP, and the other shapes are tried in the time left (the report
-  names any it had no time for). If screen mirroring fails, please send that output with
-  `mirrorbridge.log`. Before a probe, a TV that drops the video at once gets one more try with
-  the other H.264 header ending.
+* **Trying the sound** (experimental, off unless asked for, not yet heard on a real TV): `mirror
+  --sound` sends the PC's sound with the picture for that run, `mirror --beep` a beep every
+  second instead (the test pattern always beeps), and `MIRRORBRIDGE_MIRROR_SOUND=1` turns it on
+  for every session, Mirror screen's too (`=0` keeps it off, as do *Include computer sound* off
+  and `--no-audio`). `mirror --sound-trial` sends the beep up to 12 ways, 12 seconds each, and
+  asks after each whether the TV beeped: heard the first way, the TV is remembered as playing
+  the sound, and the PC is then muted while it does (not with `--keep-pc-sound`; until then
+  both play). `doctor --sound` checks the PC's side alone, and `--log file.log` keeps the whole
+  log for a bug report. The TV asks for lost sound packets on the same UDP ports 7880-7889.
+  With `MIRRORBRIDGE_MIRROR_SOUND=1`, a TV that ends the session as the sound starts gets it
+  once more without sound, and is remembered for that.
+* TVs differ in the order they want the session set up in, whether they need an audio stream
+  (silent unless the sound is tried), whether they offer PTP timing, and how they want the
+  H.264 header to end. `mirror --probe` tries each, prints what the TV answered, and saves what
+  worked in `%APPDATA%\MirrorBridge\mirroring.json`, which Mirror screen and every `mirror`
+  after it ask for first. The last test of *Test this TV* does the same in 75 seconds: the test
+  pattern goes as soon as the TV takes a SETUP, and the other shapes are tried in the time left
+  (the report names any it had no time for). If screen mirroring fails, please send that output
+  with `mirrorbridge.log`. Before a probe, a TV that drops the video at once gets one more try
+  with the other H.264 header ending.
 * When the network holds the video up for a moment, as Wi-Fi does now and then, the frames that
   waited still go, a little late, and the TV catches up. Only when frames have been late for
   more than about a second (the network or the TV cannot keep up) are they dropped, up to a
@@ -550,8 +561,8 @@ CI (`.github/workflows/ci.yml`) runs the tests on Linux and builds the exe on Wi
 2. **Audio-only casting to HomePods and AirPlay speakers** (RAOP), which pyatv supports.
 3. **Multi-room**: send the same stream to several Apple TVs.
 4. **Screen mirroring for Apple TVs, and with sound**: *Mirror screen* sends TVs of other
-   brands the screen with about 100 ms of delay (experimental), but no sound yet; Apple TVs and
-   Macs also need the FairPlay setup step. See the research report in the project files
-   (`research/airplay-mirroring-windows.html`).
+   brands the screen with about 100 ms of delay (experimental), with the sound only to try so
+   far (`mirror --sound`); Apple TVs and Macs also need the FairPlay setup step. See the
+   research report in the project files (`research/airplay-mirroring-windows.html`).
 5. **Lower CPU use with Quick Sync and AMF**: keep ddagrab frames on the GPU for them too,
    as Mirror screen does for NVENC.

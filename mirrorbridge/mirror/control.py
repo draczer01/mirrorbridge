@@ -138,6 +138,10 @@ class ReceiverInfo:
     max_width: Optional[int] = None  # widthPixelsMax / heightPixelsMax, where given
     max_height: Optional[int] = None
     screen_formats: Optional[int] = None  # supportedFormats.screenStream
+    audio_formats: Optional[int] = None  # supportedFormats.audioStream
+    audio_latencies: Optional[list] = None  # audioLatencies, as given
+    initial_volume: Optional[float] = None  # initialVolume (dB)
+    volume_control_type: Optional[int] = None  # volumeControlType
     event_port: Optional[int] = None
     timing_peer: Optional[dict] = None  # timingPeerInfo
     features: Optional[int] = None
@@ -162,6 +166,16 @@ class ReceiverInfo:
         formats = plist.get("supportedFormats")
         if isinstance(formats, dict) and isinstance(formats.get("screenStream"), int):
             info.screen_formats = formats["screenStream"]
+        if isinstance(formats, dict) and isinstance(formats.get("audioStream"), int):
+            info.audio_formats = formats["audioStream"]
+        if isinstance(plist.get("audioLatencies"), list):
+            info.audio_latencies = plist["audioLatencies"]
+        volume = plist.get("initialVolume")
+        if isinstance(volume, (int, float)) and not isinstance(volume, bool):
+            info.initial_volume = float(volume)
+        control = plist.get("volumeControlType")
+        if isinstance(control, int) and not isinstance(control, bool):
+            info.volume_control_type = control
         info.event_port = _number(plist, "eventPort")
         peer = plist.get("timingPeerInfo")
         info.timing_peer = peer if isinstance(peer, dict) else None
@@ -177,6 +191,15 @@ class ReceiverInfo:
         if self.max_width and self.max_height:
             parts.append(f"max {self.max_width}x{self.max_height}")
         parts.append(f"screenStream formats: {hex(self.screen_formats) if self.screen_formats is not None else 'none'}")
+        # What says how the TV takes the sound, only where the TV gives it.
+        if self.audio_formats is not None:
+            parts.append(f"audioStream formats: {hex(self.audio_formats)}")
+        if self.audio_latencies is not None:
+            parts.append(f"audioLatencies: {self.audio_latencies}")
+        if self.initial_volume is not None:
+            parts.append(f"initialVolume: {self.initial_volume:g}")
+        if self.volume_control_type is not None:
+            parts.append(f"volumeControlType: {self.volume_control_type}")
         parts.append(f"eventPort: {self.event_port if self.event_port is not None else 'none'}")
         parts.append(f"timingPeerInfo: {self.timing_peer if self.timing_peer else 'none'}")
         if self.features is not None:

@@ -11,7 +11,7 @@ import json
 import logging
 import os
 import time
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Optional
 
@@ -24,16 +24,22 @@ _LOGGER = logging.getLogger(__name__)
 
 FILE_NAME = "mirroring.json"
 MIN_LEAD_MS, MAX_LEAD_MS = 20, 1000  # a lead outside these is not taken
+# What is known of the TV and the PC's sound (MirrorProfile.sound): nothing yet, it closed the
+# session when the sound started (no sound unless asked for), or someone heard it there.
+SOUND_UNKNOWN, SOUND_OFF, SOUND_HEARD = "", "off", "heard"
+SOUND_VERDICTS = (SOUND_UNKNOWN, SOUND_OFF, SOUND_HEARD)
 
 
 @dataclass
 class MirrorProfile:
     ordering: str = CONTROL_FIRST
-    audio: bool = True  # send the silent type-96 audio stream
+    audio: bool = True  # set up the type-96 audio stream (silent unless the sound is on)
     timing: str = NTP
     trailer: str = DEFAULT_TRAILER  # how the avcC record ends (h264.TRAILERS)
     lead_ms: int = DEFAULT_LEAD_MS
     checked: str = ""  # when it last worked (local time), "" for the defaults
+    sound: str = SOUND_UNKNOWN  # SOUND_VERDICTS: what is known of the PC's sound on this TV
+    sound_note: str = ""  # when and why, for "off"
 
     def plan(self, fallback: bool = True) -> Plan:
         return Plan(ordering=self.ordering, audio=self.audio, timing=self.timing, lead_ms=self.lead_ms,
@@ -65,6 +71,10 @@ class MirrorProfile:
         if not isinstance(profile.lead_ms, int) or not MIN_LEAD_MS <= profile.lead_ms <= MAX_LEAD_MS:
             profile.lead_ms = defaults.lead_ms
         profile.audio = bool(profile.audio)
+        if profile.sound not in SOUND_VERDICTS:
+            profile.sound = defaults.sound
+        if not isinstance(profile.sound_note, str):
+            profile.sound_note = defaults.sound_note
         return profile
 
 
@@ -102,8 +112,37 @@ def save(identifier: str, profile: MirrorProfile, *, name: str = "", info: str =
     if info:
         entry["info"] = info
     data[identifier] = entry
+    _write(path, data)
+    _LOGGER.info("Saved how to mirror to %s: %s%s", name or identifier, profile.describe(),
+                 f"; sound {profile.sound}" if profile.sound else "")
+    return path
+
+
+def set_sound(identifier: str, value: str, note: str = "", path: Optional[Path] = None, *,
+              profile: Optional[MirrorProfile] = None, name: str = "") -> Optional[Path]:
+    """Keep what is known of the PC's sound on this device (SOUND_VERDICTS) in its saved entry,
+    the rest of it as it was. With nothing saved for it yet, `profile` (what the session that
+    found it out used) is saved with it; without one, nothing is, and None is returned: the
+    defaults are not to pass for what worked."""
+    if value not in SOUND_VERDICTS:
+        raise ValueError(f"not a sound verdict: {value!r}")
+    path = path or profiles_file()
+    data = _read(path)
+    entry = data.get(identifier)
+    if not identifier or not isinstance(entry, dict) or not isinstance(entry.get("profile"), dict):
+        if identifier and profile is not None:
+            return save(identifier, replace(profile, sound=value, sound_note=note), name=name, path=path)
+        _LOGGER.info("Nothing saved for %s yet: its sound (%s) is not kept", identifier or "this TV",
+                     value or "unknown")
+        return None
+    entry["profile"] = {**entry["profile"], "sound": value, "sound_note": note}
+    _write(path, data)
+    _LOGGER.info("Saved the sound of %s: %s%s", entry.get("name") or identifier, value or "unknown",
+                 f" ({note})" if note else "")
+    return path
+
+
+def _write(path: Path, data: dict) -> None:
     temporary = path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(data, indent=2), encoding="utf-8")
     os.replace(temporary, path)
-    _LOGGER.info("Saved how to mirror to %s: %s", name or identifier, profile.describe())
-    return path
