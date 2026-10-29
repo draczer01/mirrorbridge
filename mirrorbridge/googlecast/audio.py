@@ -8,9 +8,11 @@ cast), and writes Ogg to the pipe, one page per frame, which OggReader takes apa
 The frames' RTP times count the samples (AUDIO_CLOCK a second) from when the first one
 came, less LEAD_MS, the time it took to record and encode it; so the sound is shown with the
 picture, both being timed by the session's Clock. AudioTimer keeps that count on the clock:
-the sound card's clock is not quite the PC's, and the system audio stops while nothing
-plays. When the frames come later than the count says (a gap, or a slower sound card), the
-count jumps ahead; when they come earlier, a frame is left out.
+the sound card's clock is not quite the PC's, the system audio stops while nothing plays,
+and sound held up on the way (FFmpeg starting, a busy moment) comes in a burst. When the
+frames come later than the count says (a gap, or a slower sound card), the count jumps
+ahead; when they come earlier, frames are left out until it is on time again, so a burst
+does not leave the sound behind the picture for good.
 """
 
 from __future__ import annotations
@@ -50,7 +52,8 @@ def opus_command(ff: str, bps: int, port: Optional[int] = None) -> list[str]:
     if port is None:
         source = ["-re", "-f", "lavfi", "-i", TEST_TONE]
     else:
-        source = ["-thread_queue_size", "1024", "-f", "f32le", "-ar", str(AUDIO_CLOCK), "-ac",
+        source = ["-thread_queue_size", "1024", "-probesize", "32", "-analyzeduration", "0", "-fflags", "nobuffer",
+                  "-f", "f32le", "-ar", str(AUDIO_CLOCK), "-ac",
                   str(AUDIO_CHANNELS), "-i", f"tcp://127.0.0.1:{port}?listen=1"]
     return [ff, "-hide_banner", "-nostats", "-loglevel", "warning", *source,
             "-ac", str(AUDIO_CHANNELS), "-ar", str(AUDIO_CLOCK), "-c:a", ENCODER, "-application", "lowdelay",
@@ -124,15 +127,17 @@ class AudioTimer:
             self._anchor, self._samples = arrived_ns - lead, 0
             self._window_start, self._window_min = arrived_ns, None
         lag = arrived_ns - self._expected()
+        if lag - lead < -DRIFT_MS * NS // 1000:
+            # Recorded earlier than the count says (sound held up and then let go at once, or a
+            # sound card faster than the PC): leave frames out until the count is back on time.
+            self.skipped += 1
+            return None
         self._window_min = lag if self._window_min is None else min(self._window_min, lag)
         if arrived_ns - self._window_start > WINDOW_SECONDS * NS:
             off = self._window_min - lead
             self._window_start, self._window_min = arrived_ns, None
-            if off > DRIFT_MS * NS // 1000:
+            if off > DRIFT_MS * NS // 1000:  # a slower sound card: the count jumps ahead
                 self._anchor += off
-            elif off < -DRIFT_MS * NS // 1000:
-                self.skipped += 1
-                return None
         rtp = self.clock.rtp(self._anchor, AUDIO_CLOCK) + self._samples
         self._samples += samples
         return rtp & 0xFFFFFFFF

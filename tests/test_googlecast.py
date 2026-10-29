@@ -326,12 +326,13 @@ def test_audio_timer_follows_the_clock():
     assert timer.stamp(start + 10 * NS // 1000, 480) == first + 480  # on time: counted on
     later = timer.stamp(start + NS, 480)  # a second of silence: started again
     assert timer.restarts == 1 and later == clock.rtp(start + NS - 25 * NS // 1000, 48000)
-    # A sound card faster than the PC: the frames come ever earlier, until one is left out.
+    # Half a second of sound held up and let go at once: left out until the count is on time.
     t, stamps = start + NS, []
-    for _ in range(400):
-        t += 9 * NS // 1000
+    for _ in range(50):
         stamps.append(timer.stamp(t, 480))
-    assert None in stamps and timer.skipped >= 1
+    assert stamps[:4].count(None) == 0 and stamps.count(None) == 46
+    t += 10 * NS // 1000
+    assert timer.stamp(t, 480) is not None
 
 
 def _need_opus() -> str:
