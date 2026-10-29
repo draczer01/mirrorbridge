@@ -54,6 +54,7 @@ class SenderStats:
     decoded: int = 0  # frames the receiver says it decoded (its event log)
     played: int = 0  # ...and showed
     played_late: int = 0  # ...after their time
+    logs: int = 0  # event logs received: without any, decoded and played say nothing
     spare_ms: Optional[int] = None  # the last frame shown: ms before its time (negative: late)
 
 
@@ -116,6 +117,7 @@ class VideoSender(asyncio.DatagramProtocol):
         if rtcp.pli:
             self.stats.plis += 1
             self.pli_pending = True
+        self.stats.logs += rtcp.log
         self.stats.decoded += rtcp.decoded
         for spare in rtcp.played:
             self.stats.played += 1

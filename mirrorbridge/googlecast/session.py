@@ -141,6 +141,7 @@ class GoogleCastMirror:
         self._first_sent_ns: Optional[int] = None
         self._dropped = 0
         self._shown = 0
+        self._reported = False
         self._xscreen: Optional[extended.ExtendedScreen] = None
 
     @property
@@ -149,6 +150,13 @@ class GoogleCastMirror:
         TV (frames sent, even acknowledged, can still leave it black)."""
         sender = self._sender
         return sender.stats.played if sender is not None else self._shown
+
+    @property
+    def frames_reported(self) -> bool:
+        """Whether the receiver sends an event log at all: without one, frames_shown stays 0
+        even with the picture on the TV."""
+        sender = self._sender
+        return sender.stats.logs > 0 if sender is not None else self._reported
 
     def _set(self, state: State, message: str = "") -> None:
         self.state = state
@@ -481,6 +489,7 @@ class GoogleCastMirror:
         if self._sender is not None:
             self._log_stats()
             self._shown = self._sender.stats.played
+            self._reported = self._sender.stats.logs > 0
             self._sender.close()
             self._sender = None
         channel, self._channel = self._channel, None

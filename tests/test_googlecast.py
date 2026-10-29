@@ -156,11 +156,13 @@ async def test_mirrors_a_test_pattern(tv, tmp_path):
     assert _decoded_frames(ff, tv.annexb(), tmp_path) == len(tv.frames)
     assert session.canvas == (640, 360)
     assert session.frames_shown == len(tv.frames)  # from the receiver's event log
+    assert session.frames_reported
 
 
 async def test_lost_packets_are_sent_again(tmp_path):
     ff = _ffmpeg()
     tv = await FakeCastTV(drop_every=4).start()
+    tv.show_log = False  # a receiver without an event log: nothing to say what it showed
     try:
         session, _states = await _mirror(tv, seconds=3)
     finally:
@@ -168,6 +170,7 @@ async def test_lost_packets_are_sent_again(tmp_path):
     assert tv.dropped > 10 and tv.resent_got >= tv.dropped - 3
     assert session._sender is None  # closed at the end
     assert len(tv.frames) >= 60
+    assert session.frames_shown == 0 and not session.frames_reported
     assert _decoded_frames(ff, tv.annexb(), tmp_path) == len(tv.frames)
 
 
@@ -261,7 +264,7 @@ def test_receiver_event_log():
     items = struct.pack(">IIhHhHhH", 3000, 2 << 24, 0, 13 << 12, -20, 12 << 12, 7, 14 << 12)
     body = struct.pack(">I4s", RECEIVER_SSRC, CAST) + items
     rtcp = parse_rtcp(struct.pack(">BBH", 0x82, 204, len(body) // 4) + body)
-    assert rtcp.decoded == 1 and rtcp.played == [-20]
+    assert rtcp.log and rtcp.decoded == 1 and rtcp.played == [-20]
 
 
 def test_codec_from_environment(monkeypatch):
