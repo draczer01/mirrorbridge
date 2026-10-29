@@ -8,6 +8,17 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ### Added
 
+- Screen mirroring to Apple TVs and Macs (experimental, not yet tried on a real Apple TV):
+  receivers that advertise FairPlay (feature bit 14) get the FairPlay SAP handshake
+  (`POST /fp-setup`, m1 to m4) right after pair-verify, and the video stream's `shk` is
+  FairPlay's key mixed with the pair-verify secret, as doubletake sends it. The handshake is a
+  Python port of doubletake's Go code (`mirrorbridge/fairplay`, LGPL-3.0, named in
+  THIRD-PARTY-NOTICES.txt), checked against doubletake's own test vectors and pyatv's receiver.
+  *Mirror screen* and the main button now try mirroring on Apple TVs first and cast when it
+  fails; *Test this TV* runs its mirroring test on them. An Apple TV that turns the saved
+  pairing down for mirroring (at pair-verify, FairPlay or SETUP) gets one more try with
+  transient pairing, which needs no PIN where the Apple TV lets everyone on the network AirPlay
+  to it. `MIRRORBRIDGE_FP_ROOT=1` also sends the ekey and eiv in the SETUP.
 - TVs that have no `POST /play`, the first AirPlay video request (TCL, LG and others built on
   Apple's AirPlay SDK for TVs, which answer it with 404), get the stream through the play queue
   (AirPlay video v2), as an iPhone sends it: chosen from the feature bits the TV advertises

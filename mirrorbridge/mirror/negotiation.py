@@ -10,6 +10,10 @@ plist:
 * the screen-video stream (type 110) on a URI of its own; the answer names the TCP port the
   video goes to (dataPort).
 
+An Apple TV or a Mac (feature bit 14) first wants the FairPlay handshake on each new connection
+(ControlChannel.fair_play_setup, right after pair-verify); the video stream's shk is then
+FairPlay's key mixed with the pair-verify secret, and shiv FairPlay's IV.
+
 TVs differ in the order they take these in. Apple's receivers take the session alone first
 ("control-first", with updateSessionRequest and combinedGetInfoWithControlSetup), TVs of other
 brands may refuse that and want the session fields on the first stream's SETUP ("media-first").
@@ -69,6 +73,9 @@ try:  # experiment: MIRRORBRIDGE_FEEDBACK_S, to tell a hitch every 2 s apart fro
 except (KeyError, ValueError):
     FEEDBACK_INTERVAL = 2.0
 FEEDBACK_SECONDS = 5
+# Experiment: MIRRORBRIDGE_FP_ROOT=1 puts FairPlay's ekey, eiv and et in the SETUP that makes the
+# session, as senders do on a connection without pair-verify; on an encrypted one they do not.
+FAIRPLAY_ROOT = os.environ.get("MIRRORBRIDGE_FP_ROOT") == "1"
 DEFAULT_LEAD_MS = 100  # how long after capture the TV shows a frame (75 is enough on a cable)
 
 
@@ -212,26 +219,67 @@ class Negotiator:
         # Our PTP ClockID while our own PTP clock runs (ptp.py): a PTP SETUP is then kept, not
         # only tried. None: a PTP SETUP only finds out what the TV answers (the probe).
         self.ptp_clock_id: Optional[int] = None
+        # Transient pairing instead of the saved one: an Apple TV that turned the saved one down
+        # (_transient_next), for this negotiator's connections from then on.
+        self.transient = False
+        self.transient_note = ""
 
     async def connect(self) -> ControlChannel:
-        """A new control connection with a fresh pair-verify."""
+        """A new control connection with a fresh pair-verify (and FairPlay for an Apple TV)."""
+        try:
+            return await self._connect()
+        except MirrorError as ex:
+            if not self._transient_next(ex):
+                raise
+        return await self._connect()
+
+    async def _connect(self) -> ControlChannel:
         if self.channel is not None:
             self.channel.close()
         self.channel = None
         try:
-            self.channel = await ControlChannel.open(self.target)
+            self.channel = await ControlChannel.open(self.target, transient=self.transient)
+            self.steps["pair-verify"] = "transient" if self.transient else "ok"
+            if self.target.needs_fairplay:
+                await self.channel.fair_play_setup()
+                self.steps["fp-setup"] = "ok"
         except MirrorError as ex:
             self.steps.update(ex.steps)
             ex.steps = dict(self.steps)
             raise
-        self.steps["pair-verify"] = "ok"
         return self.channel
+
+    def _transient_next(self, ex: MirrorError) -> bool:
+        """An Apple TV that turned down the saved (HomeKit) pairing for mirroring, at pair-verify,
+        FairPlay or SETUP: worth one more try with transient pairing, which an Apple TV that
+        lets everyone on the network AirPlay to it takes without a PIN."""
+        if self.transient or not self.target.needs_fairplay:
+            return False
+        if not (ex.step == "pair-verify" or ex.step.startswith("fp-setup") or ex.code in (401, 403, 470)):
+            return False
+        note = f"{ex.step} failed with the saved pairing ({format_steps(ex.steps) or ex}): transient pairing"
+        _LOGGER.info("%s", note)
+        self.transient = True
+        self.transient_note = note
+        return True
 
     async def establish(self, plan: Plan) -> Established:
         """Set the session up as `plan` says: on the open connection, or a new one if it is
         closed or out of step (a request on it went unanswered)."""
+        try:
+            est = await self._establish(plan)
+        except MirrorError as ex:
+            if not self._transient_next(ex):
+                raise
+            await self._connect()
+            est = await self._establish(plan)
+        if self.transient_note:
+            est.fallbacks.insert(0, self.transient_note)
+        return est
+
+    async def _establish(self, plan: Plan) -> Established:
         if self.channel is None or self.channel.closed or self.channel.out_of_step:
-            await self.connect()
+            await self._connect()
         try:
             return await self._set_up(plan)
         except _PtpTried as tried:
@@ -345,13 +393,19 @@ class Negotiator:
 
     def _video_stream(self, stream_id: int, plan: Plan) -> dict:
         assert self.channel is not None
-        write_key, read_key = self.channel.derive(CONTROL_SALT, CONTROL_WRITE, CONTROL_READ)
+        if self.channel.fairplay is not None:
+            # An Apple TV: FairPlay's key, mixed with the pair-verify secret, and its IV. The
+            # frames are still encrypted with the key from pair-verify (packets.video_key).
+            shk, shiv = self.channel.fairplay.shk, self.channel.fairplay.iv
+        else:
+            write_key, read_key = self.channel.derive(CONTROL_SALT, CONTROL_WRITE, CONTROL_READ)
+            shk, shiv = write_key[:16], read_key[:16]
         return {
             "latencyMs": plan.lead_ms,
             # The video key comes from pair-verify (packets.video_key); TVs paired the HomeKit way
             # get these as well, as other senders send them.
-            "shiv": read_key[:16],
-            "shk": write_key[:16],
+            "shiv": shiv,
+            "shk": shk,
             "streamConnectionID": stream_id,
             "timestampInfo": [{"name": name} for name in TIMESTAMP_INFO],
             "type": VIDEO_STREAM,
@@ -390,6 +444,8 @@ class Negotiator:
             body = {**session, "updateSessionRequest": False, "combinedGetInfoWithControlSetup": True}
         else:
             body = {**session, "streams": [audio or video]}
+        if FAIRPLAY_ROOT and self.channel is not None and self.channel.fairplay is not None:
+            body.update(ekey=self.channel.fairplay.ekey, eiv=self.channel.fairplay.iv, et=32)
         replies.append(await self._setup(first_step, uri, body, first=True))
         addresses: list[str] = []
         kept = False  # a PTP session with our clock, which a refusal from here on turns into NTP

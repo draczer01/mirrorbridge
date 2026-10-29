@@ -580,18 +580,16 @@ class Controller(QObject):
 
     @classmethod
     def can_mirror(cls, device: Optional[Device]) -> bool:
-        """Mirror screen (experimental) needs a receiver that mirrors and does not need FairPlay
-        (Apple TVs and Macs do). Without MirrorBridge's pairing, whose pair-verify keys the video,
-        it pairs first: the TV shows a PIN."""
-        return bool(device and cls._mirrors(device) and not mirror.Target.from_device(device).needs_fairplay)
+        """Mirror screen (experimental) needs a receiver that mirrors (Apple TVs and Macs with
+        FairPlay). Without MirrorBridge's pairing, whose pair-verify keys the video, it pairs
+        first: the TV shows a PIN."""
+        return bool(device and cls._mirrors(device))
 
     @classmethod
     def mirror_tip(cls, device: Optional[Device]) -> str:
         """What Mirror screen does, or why it cannot start with `device`: its tooltip."""
         if device is not None and not cls._mirrors(device):
             return tr("mirror_not_offered")
-        if device is not None and mirror.Target.from_device(device).needs_fairplay:
-            return tr("mirror_apple_tv")
         if device is not None and not device.is_paired:
             return tr("mirror_pairs_first")
         return tr("mirror_hint")
@@ -603,8 +601,9 @@ class Controller(QObject):
 
     def primary_action(self, device: Optional[Device] = None) -> str:
         """What the window's one big button does first with `device` (the chosen TV by default):
-        "mirror" (AirPlay or Google Cast screen mirroring), "cast" (the AirPlay cast: Apple TVs and
-        Macs, until MirrorBridge has FairPlay), or "" for a receiver that shows no picture."""
+        "mirror" (AirPlay or Google Cast screen mirroring), "cast" (the AirPlay cast, for a TV
+        that does not mirror or whose mirroring failed last time), or "" for a receiver that shows
+        no picture."""
         if device is not None:
             screen = next((s for s in self.screens if s.airplay is device), routes.Screen(airplay=device))
         else:
@@ -616,7 +615,7 @@ class Controller(QObject):
 
     @staticmethod
     def is_apple(device: Device) -> bool:
-        """An Apple TV or a Mac: Mirror screen needs FairPlay there, so it is cast to."""
+        """An Apple TV or a Mac: Mirror screen goes there with FairPlay."""
         return mirror.Target.from_device(device).needs_fairplay
 
     def device_line(self, screen) -> str:

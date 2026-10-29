@@ -61,6 +61,15 @@ def needs_fairplay(device: str) -> MirrorError:
     ), step="classify")
 
 
+def fairplay_failed(device: str, step: str, answer: str, code: Optional[int] = None) -> MirrorError:
+    """The FairPlay handshake an Apple TV or a Mac wants before mirroring did not go through."""
+    return MirrorError(Text(
+        "mirror_fairplay_failed", "{device} did not complete the FairPlay handshake that screen mirroring to an "
+        "Apple TV needs ({step}: {answer}). Please report this TV, with mirrorbridge.log; casting still works.",
+        device=device, step=step, answer=answer,
+    ), step=step, code=code, steps={step: answer})
+
+
 def no_timing(port: int, steps: dict) -> MirrorError:
     """The TV never asked for the time: almost always a firewall in the way of its requests."""
     return MirrorError(Text(

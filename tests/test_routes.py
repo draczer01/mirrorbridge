@@ -46,7 +46,8 @@ def test_a_tv_found_by_airplay_and_google_cast_is_listed_once():
 def test_the_ways_each_tv_takes(history):
     assert routes.plan(routes.Screen(airplay=_device(), cast=_cast()), history) == [
         routes.AIRPLAY_MIRROR, routes.CAST_MIRROR, routes.AIRPLAY_CAST]
-    assert routes.plan(routes.Screen(airplay=_device(txt=APPLE_TV_TXT)), history) == [routes.AIRPLAY_CAST]
+    assert routes.plan(routes.Screen(airplay=_device(txt=APPLE_TV_TXT)), history) == [  # with FairPlay
+        routes.AIRPLAY_MIRROR, routes.AIRPLAY_CAST]
     assert routes.plan(routes.Screen(cast=_cast()), history) == [routes.CAST_MIRROR]
     assert routes.plan(routes.Screen(cast=_speaker_cast()), history) == []
 
