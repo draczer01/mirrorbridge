@@ -28,7 +28,10 @@ FRAME_HEADER = 12
 def vp8_command(h264_cmd: list[str], kbps: int, fps: int, keyframe_seconds: int) -> list[str]:
     """mirror.source.build_command's command (made for libx264), encoding VP8 into IVF instead."""
     cut = h264_cmd.index("-c:v")
-    gop = max(1, round(fps * ffmpeg.mirror_keyframe_seconds(keyframe_seconds)))
+    # Cast Streaming needs real periodic keyframes: "only when needed" (0) means every
+    # MIRROR_KEYFRAME_SECONDS here, as for any caller that does not start FFmpeg again for one.
+    seconds = ffmpeg.mirror_keyframe_seconds(keyframe_seconds) or ffmpeg.MIRROR_KEYFRAME_SECONDS
+    gop = max(1, round(fps * seconds))
     return h264_cmd[:cut] + [
         "-c:v", ENCODER, "-deadline", "realtime", "-cpu-used", "8", "-lag-in-frames", "0", "-auto-alt-ref", "0",
         "-error-resilient", "1", "-threads", str(max(1, min(8, (os.cpu_count() or 2) // 2))),
