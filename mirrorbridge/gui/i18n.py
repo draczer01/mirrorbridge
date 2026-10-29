@@ -1125,6 +1125,9 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "ui_advanced": {"en": "Advanced settings", "es": "Ajustes avanzados"},
     "ui_cast_latency": {"en": "Delay when casting", "es": "Retraso al transmitir"},
+    "ui_cast_framerate": {"en": "Frame rate when casting", "es": "Cuadros por segundo al transmitir"},
+    "ui_mirror_latency": {"en": "Delay when mirroring", "es": "Retraso al duplicar"},
+    "ui_mirror_framerate": {"en": "Frame rate when mirroring", "es": "Cuadros por segundo al duplicar"},
     "ui_details": {"en": "Technical details (for reporting a problem)",
                    "es": "Detalles técnicos (para reportar un problema)"},
 }
