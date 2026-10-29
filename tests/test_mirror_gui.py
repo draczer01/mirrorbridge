@@ -414,6 +414,42 @@ def test_mirror_screen_settings_are_for_the_next_session(controller):
     assert _checked(_submenu(mirror_settings, "Frame rate")) == ["Automatic"]
 
 
+
+def test_the_window_has_the_mirror_screen_settings_too(controller):
+    """Advanced settings: Delay when mirroring, with what it means under it, and Frame rate when
+    mirroring, beside the casts' own; the same settings as the tray's, saved at once."""
+    from mirrorbridge.gui.window import MainWindow
+
+    controller.update_settings(mirror_lead_ms=200)
+    window = MainWindow(controller)
+    labels = {key: label.text() for key, label in window._row_labels.items()}  # pylint: disable=protected-access
+    assert labels["ui_cast_framerate"] == "Frame rate when casting"
+    assert labels["ui_mirror_latency"] == "Delay when mirroring"
+    assert labels["ui_mirror_framerate"] == "Frame rate when mirroring"
+    combo, fps = window.mirror_latency_combo, window.mirror_fps_combo
+    assert [combo.itemText(i) for i in range(combo.count())] == ["Low", "Normal", "Smooth"]
+    assert combo.currentText() == "Normal"
+    assert window.mirror_latency_hint.text().startswith("The TV shows each frame 100 ms after it was captured")
+    assert [fps.itemText(i) for i in range(fps.count())] == ["Automatic", "30 fps", "60 fps"]
+    assert fps.currentText() == "Automatic"
+
+    fps.setCurrentIndex(fps.findData(60))
+    s = controller.settings
+    assert (s.mirror_framerate, s.mirror_lead_ms) == (60, 200)  # the frame rate leaves the TV wait alone
+    combo.setCurrentIndex(combo.findData("low"))
+    assert (s.mirror_latency, s.mirror_lead_ms) == ("low", 0)
+    assert window.mirror_latency_hint.text().startswith("The TV shows each frame 60 ms")
+    assert Settings.load().mirror_latency == "low"
+
+    # Chosen in the tray: the window follows; and in Spanish
+    controller.update_settings(mirror_latency="smooth", mirror_framerate=30)
+    assert (combo.currentText(), fps.currentText()) == ("Smooth", "30 fps")
+    controller.set_language("es")
+    assert (combo.currentText(), fps.currentText()) == ("Suave", "30 fps")
+    assert window._row_labels["ui_mirror_latency"].text() == "Retraso al duplicar"  # pylint: disable=protected-access
+    assert window.mirror_latency_hint.text().startswith("La TV muestra cada cuadro 200 ms")
+
+
 # -- a session, from the tray menu ---------------------------------------------------------------------
 
 
