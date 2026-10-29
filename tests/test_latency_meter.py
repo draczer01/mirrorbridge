@@ -1,7 +1,7 @@
 """More options > Debug > Latency meter: a big clock on every screen, closed with Esc, which shows
 the last "Mirroring:" line of the log; and next to it Mirror screen's test switches (the TV's wait,
-how often a keyframe comes, frames shown on arrival). Qt runs offscreen, on a controller that
-neither scans the network nor tests encoders."""
+how often a keyframe comes, where the picture is scaled, frames shown on arrival). Qt runs
+offscreen, on a controller that neither scans the network nor tests encoders."""
 
 import logging
 import os
@@ -163,13 +163,17 @@ def test_the_menu_is_in_spanish_too(controller):
     tray = TrayMenu(controller, lambda: None, lambda: None)
     tray._rebuild()  # pylint: disable=protected-access
     assert _latency_action(tray).text() == "Medidor de latencia"
+    more = next(a.menu() for a in tray.menu.actions() if a.text() == "Más opciones")
+    assert "Depuración (para pruebas)" in [a.text() for a in more.actions()]
     items = _debug(tray)
-    assert list(items) == ["Medidor de latencia", "Espera de la TV (prueba)", "Cuadros clave",
+    assert list(items) == ["Medidor de latencia", "Espera de la TV (prueba)", "Cuadros clave", "Escalado",
                            "Mostrar cuadros al llegar (prueba)"]
     assert list(_choices(items["Espera de la TV (prueba)"])) == [
-        "Automática (la guardada para la TV)", "60 ms", "100 ms", "150 ms", "200 ms", "300 ms"]
+        "Automática (según la Latencia)", "60 ms", "100 ms", "150 ms", "200 ms", "300 ms"]
     assert list(_choices(items["Cuadros clave"])) == ["Solo cuando hace falta", "Cada 10 s", "Cada 2 s"]
     assert _checked(items["Cuadros clave"]) == ["Solo cuando hace falta"]
+    assert list(_choices(items["Escalado"])) == ["Automático (tarjeta de video)", "Procesador (como antes)"]
+    assert _checked(items["Escalado"]) == ["Automático (tarjeta de video)"]
 
 
 def test_mirror_screens_test_switches_are_next_to_the_latency_meter(controller):
@@ -178,36 +182,47 @@ def test_mirror_screens_test_switches_are_next_to_the_latency_meter(controller):
 
     tray = TrayMenu(controller, lambda: None, lambda: None)
     tray._rebuild()  # pylint: disable=protected-access
+    more = next(a.menu() for a in tray.menu.actions() if a.text() == "More options")
+    assert "Debug (for testing)" in [a.text() for a in more.actions()]
     items = _debug(tray)
-    assert list(items) == ["Latency meter", "TV wait (test)", "Keyframes", "Show frames on arrival (test)"]
+    assert list(items) == ["Latency meter", "TV wait (test)", "Keyframes", "Scaling", "Show frames on arrival (test)"]
     waits, keyframes, arrival = items["TV wait (test)"], items["Keyframes"], items["Show frames on arrival (test)"]
-    assert list(_choices(waits)) == ["Automatic (saved for the TV)", "60 ms", "100 ms", "150 ms", "200 ms", "300 ms"]
-    assert _checked(waits) == ["Automatic (saved for the TV)"]
+    scaling = items["Scaling"]
+    assert list(_choices(waits)) == ["Automatic (from Latency)", "60 ms", "100 ms", "150 ms", "200 ms", "300 ms"]
+    assert _checked(waits) == ["Automatic (from Latency)"]
     assert list(_choices(keyframes)) == ["Only when needed", "Every 10 s", "Every 2 s"]
     assert _checked(keyframes) == ["Only when needed"]
+    assert list(_choices(scaling)) == ["Automatic (graphics card)", "Processor (as before)"]
+    assert _checked(scaling) == ["Automatic (graphics card)"]
     assert arrival.isCheckable() and not arrival.isChecked()
 
     _choices(waits)["200 ms"].trigger()
     _choices(keyframes)["Every 10 s"].trigger()
+    _choices(scaling)["Processor (as before)"].trigger()
     arrival.trigger()
     s = controller.settings
-    assert (s.mirror_lead_ms, s.mirror_keyframes, s.mirror_on_arrival) == (200, 10, True)
+    assert (s.mirror_lead_ms, s.mirror_keyframes, s.mirror_scaler, s.mirror_on_arrival) == (200, 10, "cpu", True)
     saved = Settings.load()
-    assert (saved.mirror_lead_ms, saved.mirror_keyframes, saved.mirror_on_arrival) == (200, 10, True)
+    assert (saved.mirror_lead_ms, saved.mirror_keyframes, saved.mirror_scaler, saved.mirror_on_arrival) == (
+        200, 10, "cpu", True)
 
     tray._rebuild()  # pylint: disable=protected-access
     items = _debug(tray)
     assert _checked(items["TV wait (test)"]) == ["200 ms"] and _checked(items["Keyframes"]) == ["Every 10 s"]
+    assert _checked(items["Scaling"]) == ["Processor (as before)"]
+    _choices(items["Scaling"])["Automatic (graphics card)"].trigger()
+    assert s.mirror_scaler == "auto"
     assert items["Show frames on arrival (test)"].isChecked()
-    _choices(items["TV wait (test)"])["Automatic (saved for the TV)"].trigger()
+    _choices(items["TV wait (test)"])["Automatic (from Latency)"].trigger()
     items["Show frames on arrival (test)"].trigger()
     assert (s.mirror_lead_ms, s.mirror_on_arrival) == (0, False)
 
     # A settings.json edited by hand: each shows what a session uses (only when needed, the TV's
     # own lead, at their time), and the menu is still made.
-    s.mirror_keyframes, s.mirror_lead_ms, s.mirror_on_arrival = 3, -5, "false"
+    s.mirror_keyframes, s.mirror_lead_ms, s.mirror_on_arrival, s.mirror_scaler = 3, -5, "false", "gpu"
     tray._rebuild()  # pylint: disable=protected-access
     items = _debug(tray)
     assert _checked(items["Keyframes"]) == ["Only when needed"]
-    assert _checked(items["TV wait (test)"]) == ["Automatic (saved for the TV)"]
+    assert _checked(items["Scaling"]) == ["Automatic (graphics card)"]
+    assert _checked(items["TV wait (test)"]) == ["Automatic (from Latency)"]
     assert not items["Show frames on arrival (test)"].isChecked()

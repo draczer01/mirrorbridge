@@ -39,14 +39,41 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   takes no video for 5 seconds ends the session with an error, and ending mirroring on the TV
   stops it. If FFmpeg cannot capture or encode at the start (the driver refuses ddagrab, the
   GPU encoder is busy), it goes on with GDI capture, then with x264, as a cast does.
-- *Mirror screen (low latency, experimental)* in the tray menu, next to *Start casting*, and in
-  the window: mirrors what *What to cast* names (a display, a window or the virtual screen) with
-  the *Quality* settings (and what *Test this TV* or `mirror --probe` found for the TV), showing
-  Connecting, Casting and Stopping as a cast does. *Stop mirroring* and *Quit* end it, and a
-  failure is explained in the app's language like a failed cast. It is offered only for a
-  paired TV that offers screen mirroring and does not need FairPlay; otherwise it is greyed
-  out, and its tooltip says why (Apple TVs and Macs: coming in a later version). Only one
+- *Show my screen on (your TV)*, the tray menu's main item, right under the status line, does
+  what the window's big button does: Mirror screen on a TV that takes it (pairing first, with
+  the PIN the TV shows, when MirrorBridge is not paired with it yet), the cast on an Apple TV or
+  a Mac. Mirror screen sends what *What to cast* names (a display, a window or the virtual
+  screen) with *Quality*'s resolution, bitrate and encoder (and what *Test this TV* or
+  `mirror --probe` found for the TV), showing Connecting, Casting and Stopping as a cast does.
+  *Stop mirroring* and *Quit* end it, and a failure is explained in the app's language like a
+  failed cast. The item's tooltip says what it will do, or why it is off (a speaker). Only one
   cast, mirroring or test runs at a time.
+- *Mirror screen settings* in the tray menu, for the next Mirror screen: *Latency* Low (the TV
+  shows each frame 60 ms after it was captured), Normal (the wait saved for the TV, 100 ms
+  unless it needed more; the default) or Smooth (200 ms, for Wi-Fi that falters), and *Frame
+  rate* Automatic (60 fps with a hardware encoder and Desktop Duplication, 30 with x264 or GDI
+  capture, and never more than the TV takes; the default), 30 or 60 fps. Choosing a Latency
+  puts *Debug > TV wait* back on Automatic. *Quality*'s frame rate and delay are now the casts'
+  only, and say so.
+- Mirror screen sends a keyframe (a whole picture) only when it is needed: at the start, and
+  after frames were dropped, when FFmpeg is started again for a fresh one at once (at most every
+  2 seconds). The keyframe every 2 seconds made text blur every 2 seconds: in a one-frame
+  buffer, a 1440p desktop at 8 Mbit/s on NVENC got its keyframes at quantizer 39 against 7 for
+  the other frames. NVENC and x264 make no other keyframe; Quick Sync, AMF and Media Foundation,
+  not yet tried that way, still make one every 10 seconds. *Test this TV* keeps one every
+  2 seconds.
+- When Windows takes the screen capture away (a display driver installed or removed, a logoff,
+  a change of resolution), Mirror screen starts FFmpeg again on the same display, looked up
+  again (the virtual screen too): up to five times in 10 seconds, the first a quarter of a
+  second after; only then does it stop, saying that Windows stopped the screen capture. It
+  never falls back to GDI capture for that. The log has FFmpeg's last 30 lines whenever it
+  stops.
+- With NVENC and Desktop Duplication, the picture stays on the graphics card: at the size the TV
+  gets it goes from the capture to the encoder untouched, and otherwise it is scaled there with
+  `scale_d3d11`, which the FFmpeg 8.1.1 inside `MirrorBridge.exe` has (an FFmpeg without it
+  scales on the processor). A picture of another size than asked for sends that display back to
+  the processor, at once and until MirrorBridge quits. Quick Sync, AMF and Media Foundation
+  scale on the processor, as before.
 - With *Extend screen* on, *Mirror screen* (and `mirror --extend`, with `--extend-mode`) sends
   the virtual screen, as a cast does, instead of the PC's main display: the TV works as a second
   screen a fraction of a second behind, for PowerPoint's Presenter View with the notes on the
@@ -74,16 +101,26 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   mirroring: the difference between the two clocks is the whole delay from screen to TV, which
   the log cannot see. The last "Mirroring:" line of the log (frame rate, age of the frames,
   lead) shows below the clock. Esc or a click closes every window.
-- *More options* > *Debug*, next to *Latency meter*: switches for tests of *Mirror screen* and
-  `mirror`, which start from the defaults. *TV wait (test)*: 60, 100, 150, 200 or 300 ms in
-  place of the lead saved for the TV (*Automatic*), and never saved in its place; *Keyframe
-  every* 1, 2 (the default) or 5 seconds; *Show frames on arrival (test)*:
-  codec packets without RespectTimestamps, so that a TV shows each frame as it comes. The log
-  says, as each session starts, what it used. *Test this TV* and `mirror --probe` leave them
-  out.
+- *More options* > *Debug (for testing)*, next to *Latency meter*: switches for tests of
+  *Mirror screen* and `mirror`, which start from the defaults. *TV wait (test)*: 60, 100, 150,
+  200 or 300 ms in place of the Latency's (*Automatic*, where choosing a Latency puts it back),
+  and never saved for the TV; *Keyframes*: only when needed (the default), every 10 seconds or
+  every 2 seconds; *Scaling*: *Automatic (graphics card)* (the default) or *Processor (as
+  before)*; *Show frames on arrival (test)*: codec packets without RespectTimestamps, so that a
+  TV shows each frame as it comes. The log says, as each session starts, what it used, and
+  each time FFmpeg starts again, why. *Test this TV* and `mirror --probe` leave them out.
 
 ### Changed
 
+- The tray menu: *Start casting to (your TV)* gave its place to *Show my screen on (your TV)*,
+  and the cast (HLS, 3 to 7 seconds behind, with sound) is now *More options > Transmit (old
+  way, 3-7 s delay)*, for a TV that does not show the screen otherwise. *Play a video file*
+  stays where it was. *Device* lists every TV once, those found by Google Cast too, with what
+  choosing it means (*Ready*, *A speaker*...), and *Include computer sound* says that it is only
+  for casts: Mirror screen has no sound yet.
+- The video says which colours it carries: the processor's picture is now converted and tagged
+  as BT.709 (HD's colours), and the graphics card's carries BT.709 primaries and transfer, where
+  NVENC fed the screen directly said BT.601.
 - *Mirror screen* rides out short network stalls: the picture freezes only while the network
   holds the video up, no longer until the next keyframe. With the PC on Ethernet and a TCL TV
   on Wi-Fi, the network now and then took 100 to 480 ms to take a frame, and each time every

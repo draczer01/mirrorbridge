@@ -868,8 +868,8 @@ class MirrorSession:
         reason = self._lost or "no picture"
         self.report.steps["picture"] = f"capture lost ({reason})"
         return MirrorError(Text(
-            "mirror_capture_lost", "Windows stopped the screen capture and it did not come back ({reason}). Try "
-            "Mirror screen again.", reason=reason,
+            "mirror_capture_lost", "Windows stopped the screen capture and it did not come back ({reason}). Start "
+            "mirroring again.", reason=reason,
         ), step="capture", steps=self.report.steps)
 
     async def _video_closed(self, reason: str) -> str:

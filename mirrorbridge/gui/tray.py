@@ -10,9 +10,10 @@ from PySide6.QtCore import QObject
 from PySide6.QtGui import QAction, QActionGroup, QCursor, QFont
 from PySide6.QtWidgets import QFileDialog, QMenu, QSystemTrayIcon
 
-from .. import APP_NAME, ffmpeg, vdisplay
-from ..config import app_data_dir
-from ..mirror.session import lead_override, on_arrival
+from .. import APP_NAME, ffmpeg, routes, vdisplay
+from ..config import CHOICES, app_data_dir
+from ..mirror.negotiation import DEFAULT_LEAD_MS
+from ..mirror.session import MIRROR_LATENCIES, lead_override, mirror_latency, on_arrival
 from . import winintegration
 from .controller import Controller
 from .extend import EXTEND_SIZES, error_text, size_label, size_name
@@ -23,14 +24,22 @@ from .theme import app_icon
 _LOGGER = logging.getLogger(__name__)
 
 RESOLUTIONS = [("720p", 720), ("1080p", 1080), ("1440p", 1440), ("4K", 2160), ("native", 0)]
-FRAMERATES = [24, 30, 60]
-LATENCIES = [("lat_low", "low"), ("lat_balanced", "balanced"), ("lat_smooth", "smooth")]
+FRAMERATES = [24, 30, 60]  # Quality > Frame rate: for casts (Mirror screen's is MIRROR_FRAMERATES)
+LATENCIES = [("lat_low", "low"), ("lat_balanced", "balanced"), ("lat_smooth", "smooth")]  # Quality > Delay: casts
 BITRATES = [4, 8, 12, 20, 30]
+MIRROR_LEVELS = CHOICES["mirror_latency"]  # Mirror screen settings > Latency: low, normal, smooth
+MIRROR_FRAMERATES = CHOICES["mirror_framerate"]  # Mirror screen settings > Frame rate: 0 = Automatic, 30, 60
 DEBUG_LEADS = [0, 60, 100, 150, 200, 300]  # More options > Debug > TV wait, in ms; 0 = what is saved for the TV
+SCALERS = CHOICES["mirror_scaler"]  # More options > Debug > Scaling: auto (the graphics card when it can), cpu
 
 
 def display_label(mon: ffmpeg.Monitor) -> str:
     return tr("display_n", n=mon.index + 1, w=mon.width, h=mon.height) + (tr("primary") if mon.primary else "")
+
+
+def _escape(name: str) -> str:
+    """A TV's name as a menu shows it: a "&" in it would mark the next letter as a shortcut."""
+    return name.replace("&", "&&")
 
 
 class TrayMenu(QObject):
@@ -42,7 +51,7 @@ class TrayMenu(QObject):
         self.icons = {state: app_icon(state) for state in ("idle", "active", "busy")}
         self.tray = QSystemTrayIcon(self.icons["idle"])
         self.menu = QMenu()
-        self.menu.setToolTipsVisible(True)  # Mirror screen says why it is off, when it is
+        self.menu.setToolTipsVisible(True)  # the main item says what it does, or why it is off
         self._submenus: list[QMenu] = []
         self._meter: LatencyMeter | None = None  # More options > Debug > Latency meter, while open
         self.menu.aboutToShow.connect(self._rebuild)
@@ -128,27 +137,33 @@ class TrayMenu(QObject):
 
         self._action(menu, c.status()[1], enabled=False)
 
-        device = c.selected_device
+        # The main item: the best way to show the screen on the chosen TV (Mirror screen, or a
+        # cast to an Apple TV), as the window's big button; while anything runs, its Stop.
+        device, screen = c.selected_device, c.selected_screen
         if c.is_active:
             self._action(menu, tr("stop_mirror") if c.mirroring else tr("stop"), c.stop_cast)
-        elif device and device.can_cast_video:
-            self._action(menu, tr("start_to", device=device.name), c.start_cast)
         else:
-            self._action(menu, tr("start_no_device"), enabled=False)
-        mirror = self._action(menu, tr("mirror_screen"), c.start_mirror,
-                              enabled=c.can_mirror(device) and not c.is_active)
-        mirror.setToolTip(c.mirror_tip(device))
+            text = tr("ui_show_on", device=_escape(screen.name)) if screen else tr("show_no_device")
+            show = self._action(menu, text, c.start_primary, enabled=bool(c.primary_action()))
+            show.setToolTip(self._show_tip(screen))
         menu.addSeparator()
 
-        self._device_menu(self._submenu(menu, tr("device_menu") + (f": {device.name}" if device else "")))
+        self._device_menu(self._submenu(menu, tr("device_menu") + (f": {_escape(screen.name)}" if screen else "")))
         self._source_menu(self._submenu(menu, tr("source_menu")))
+        self._mirror_menu(self._submenu(menu, tr("mirror_settings")))
         self._quality_menu(self._submenu(menu, tr("quality_menu")))
-        self._action(menu, tr("audio"), lambda on: c.update_settings(capture_audio=on),
+        # Mirror screen has no sound yet
+        self._action(menu, tr("audio_cast"), lambda on: c.update_settings(capture_audio=on),
                      checkable=True, checked=s.capture_audio)
         self._action(menu, tr("play_file"), self._choose_file, enabled=bool(device) and not c.is_active)
         menu.addSeparator()
 
         more = self._submenu(menu, tr("more"))
+        more.setToolTipsVisible(True)
+        old_way = self._action(more, tr("cast_old_way"), c.start_cast,
+                               enabled=bool(device and device.can_cast_video) and not c.is_active)
+        old_way.setToolTip(tr("cast_old_way_hint"))
+        more.addSeparator()
         self._action(more, tr("autostart"), self._toggle_autostart, checkable=True,
                      checked=winintegration.autostart_enabled())
         self._action(more, tr("desktop_shortcut"), self._create_shortcut)
@@ -164,20 +179,42 @@ class TrayMenu(QObject):
         menu.addSeparator()
         self._action(menu, tr("quit"), lambda: self.quit_app())
 
-    def _device_menu(self, sub: QMenu) -> None:
+    def _show_tip(self, screen) -> str:
+        """What the main item does on `screen` (a routes.Screen, or None), or why it is off: the
+        window's line under its big button, said for the menu."""
         c = self.c
+        if screen is None:
+            if c.screens:
+                return ""  # the item itself says to choose one
+            return tr("ui_searching") if c.scanning else tr("ui_no_tv")
+        steps = c.plan(screen)
+        if not steps:
+            return c.device_line(screen)  # a speaker, or AirPlay restricted to some senders
+        if steps[0] in routes.MIRRORING:
+            first = steps[0] == routes.AIRPLAY_MIRROR and not screen.airplay.is_paired
+            return (tr("ui_hint_mirror_first") + " " if first else "") + tr("ui_hint_mirror")
+        dev = screen.airplay
+        hint = tr("ui_hint_apple") if c.is_apple(dev) else tr("ui_hint_cast")
+        return (tr("ui_hint_cast_first") + " " if dev.needs_pairing or dev.needs_password else "") + hint
+
+    def _device_menu(self, sub: QMenu) -> None:
+        """Every TV once, however it was found (AirPlay, Google Cast or both), with what choosing
+        it means; then the search, and the pairing and Forget of the chosen TV's AirPlay side."""
+        c = self.c
+        screens = c.screens
+        chosen = c.selected_screen
         selected = c.selected_device
         if c.scanning:
             self._action(sub, tr("searching"), enabled=False)
-        elif not c.devices:
+        elif not screens:
             self._action(sub, tr("no_devices"), enabled=False)
         group = QActionGroup(sub)
         group.setExclusive(True)
-        for dev in c.devices:
-            label = f"{dev.name}  ({tr('st_' + dev.status_key)})"
-            self._action(sub, label, (lambda _=False, i=dev.identifier: c.select_device(i)),
-                         checkable=True, checked=dev is selected, group=group,
-                         enabled=dev.can_cast_video and not c.is_active)
+        for screen in screens:
+            label = f"{_escape(screen.name)}  ({c.device_line(screen)})"
+            self._action(sub, label, (lambda _=False, i=screen.identifier: c.select_device(i)),
+                         checkable=True, checked=chosen is not None and screen.identifier == chosen.identifier,
+                         group=group, enabled=screen.shows_video and not c.is_active)
         sub.addSeparator()
         self._action(sub, tr("refresh"), c.refresh_devices, enabled=not c.scanning)
         self._action(sub, tr("add_ip"), c.ask_add_host)
@@ -227,20 +264,40 @@ class TrayMenu(QObject):
             self._action(sub, name, (lambda _=False, code=code: self.c.set_language(code)),
                          checkable=True, checked=language() == code, group=group)
 
-    def _radio(self, parent: QMenu, title: str, options, current, key: str) -> None:
-        """A submenu of (label, value) choices for the setting `key`, the current one checked."""
+    def _radio(self, parent: QMenu, title: str, options, current, key: str, **also: Any) -> QMenu:
+        """A submenu of (label, value) choices for the setting `key`, the current one checked;
+        choosing one also sets the settings in `also`."""
         menu = self._submenu(parent, title)
         group = QActionGroup(menu)
         for label, value in options:
-            self._action(menu, label, (lambda _=False, v=value: self.c.update_settings(**{key: v})),
+            self._action(menu, label, (lambda _=False, v=value: self.c.update_settings(**{key: v}, **also)),
                          checkable=True, checked=current == value, group=group)
+        return menu
+
+    def _mirror_menu(self, sub: QMenu) -> None:
+        """Mirror screen settings, for the sessions after they are set; each shows what a session
+        would use, whatever a hand-edited settings.json holds. Choosing a Latency puts More options >
+        Debug > TV wait back on Automatic, which would win over it."""
+        s = self.c.settings
+        levels = self._radio(sub, tr("mirror_latency"), [(tr("mirror_lat_" + level), level) for level in MIRROR_LEVELS],
+                             mirror_latency(s), "mirror_latency", mirror_lead_ms=0)
+        levels.setToolTipsVisible(True)
+        for action, level in zip(levels.actions(), MIRROR_LEVELS):
+            action.setToolTip(tr(f"mirror_lat_{level}_hint", ms=MIRROR_LATENCIES[level] or DEFAULT_LEAD_MS))
+        fps = s.mirror_framerate if s.mirror_framerate in MIRROR_FRAMERATES else 0
+        rates = self._radio(sub, tr("mirror_framerate"), [(f"{f} fps" if f else tr("mirror_fps_auto"), f)
+                                                          for f in MIRROR_FRAMERATES], fps, "mirror_framerate")
+        rates.setToolTipsVisible(True)
+        rates.actions()[MIRROR_FRAMERATES.index(0)].setToolTip(tr("mirror_fps_auto_hint"))
 
     def _quality_menu(self, sub: QMenu) -> None:
+        """The picture's size, bitrate and encoder; its frame rate and delay are the casts' only
+        (Mirror screen has its own, in Mirror screen settings)."""
         c, s = self.c, self.c.settings
         radio = self._radio
         radio(sub, tr("resolution"), [(tr("native") if v == 0 else n, v) for n, v in RESOLUTIONS],
               s.output_height, "output_height")
-        radio(sub, tr("framerate"), [(f"{f} fps", f) for f in FRAMERATES], s.framerate, "framerate")
+        radio(sub, tr("framerate_cast"), [(f"{f} fps", f) for f in FRAMERATES], s.framerate, "framerate")
         radio(sub, tr("latency"), [(tr(k), v) for k, v in LATENCIES], s.latency_mode, "latency_mode")
         radio(sub, tr("bitrate"), [(f"{b} Mbps", b * 1000) for b in BITRATES], s.video_bitrate_kbps,
               "video_bitrate_kbps")
@@ -250,8 +307,9 @@ class TrayMenu(QObject):
     def _mirror_switches(self, debug: QMenu) -> None:
         """Mirror screen's test switches, for the sessions after they are set (the mirror command
         too; Test this TV and mirror --probe leave them out): how long the TV waits to show a
-        frame, how often a keyframe comes, and frames shown as they come instead of at their time.
-        Each shows what a session would use, whatever a hand-edited settings.json holds."""
+        frame, how often a keyframe comes, where the picture is scaled, and frames shown as they
+        come instead of at their time. Each shows what a session would use, whatever a
+        hand-edited settings.json holds."""
         s = self.c.settings
         debug.addSeparator()
         self._radio(debug, tr("debug_lead"), [(f"{ms} ms" if ms else tr("debug_lead_auto"), ms) for ms in DEBUG_LEADS],
@@ -260,6 +318,8 @@ class TrayMenu(QObject):
                      for n in ffmpeg.MIRROR_KEYFRAME_CHOICES]
         self._radio(debug, tr("debug_keyframes"), keyframes, ffmpeg.mirror_keyframe_seconds(s.mirror_keyframes),
                     "mirror_keyframes")
+        self._radio(debug, tr("debug_scaler"), [(tr("debug_scaler_" + scaler), scaler) for scaler in SCALERS],
+                    "cpu" if s.mirror_scaler == "cpu" else "auto", "mirror_scaler")
         self._action(debug, tr("debug_on_arrival"), lambda on: self.c.update_settings(mirror_on_arrival=on),
                      checkable=True, checked=on_arrival(s))
 

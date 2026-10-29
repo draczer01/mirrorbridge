@@ -37,18 +37,24 @@ español, elige una vez **Language / Idioma** > **Español** en su menú.
    recuerda para la próxima vez. **English** lo vuelve a poner en inglés.
 4. Cuando el Firewall de Windows pregunte, **permite MirrorBridge en redes privadas**. La
    TV descarga el video desde tu PC.
-5. En el menú: **Dispositivo** > elige tu TV, luego **Transmitir a ...**. La primera vez
-   la TV muestra un PIN: escríbelo y queda emparejado para siempre.
+5. En el menú: **Dispositivo** > elige tu TV, luego **Mostrar mi pantalla en ...**. La
+   primera vez la TV muestra un PIN: escríbelo y queda emparejado para siempre. A una TV de
+   otra marca le duplica la pantalla con una fracción de segundo de retardo (ver *Duplicar la
+   pantalla*); a un Apple TV le transmite, con unos segundos de retardo.
 6. Todo lo demás también está en el menú:
    * **Qué transmitir**: la pantalla, una sola ventana, o **Extender pantalla** (la TV
      como segunda pantalla), y si se ve el puntero.
-   * **Calidad**: resolución, cuadros por segundo, retardo, calidad del video y codificador.
-   * **Incluir el sonido del equipo**.
+   * **Ajustes de Duplicar pantalla**: **Latencia** y **Cuadros por segundo** al duplicar
+     (ver *Duplicar la pantalla*).
+   * **Calidad**: resolución, calidad del video y codificador; sus cuadros por segundo y su
+     retraso son solo para transmitir.
+   * **Incluir el sonido del equipo (solo al transmitir)**: la duplicación todavía no lleva
+     sonido.
    * **Reproducir un archivo de video** en la TV.
-   * **Duplicar pantalla (baja latencia, experimental)**, justo debajo de **Transmitir a ...**:
-     ver *Duplicar la pantalla*.
-   * **Más opciones**: iniciar con Windows, crear acceso directo en el escritorio, abrir
-     la carpeta de registros y **Probar esta TV…** (ver *Avisar de una TV que no funciona*).
+   * **Más opciones**: **Transmitir (modo anterior, 3-7 s de retraso)**, para una TV que no
+     muestra la pantalla de la otra forma; iniciar con Windows, crear acceso directo en el
+     escritorio, abrir la carpeta de registros y **Probar esta TV…** (ver *Avisar de una TV
+     que no funciona*).
    * **Language / Idioma**: English o Español. La ventana completa también lo tiene, abajo.
 7. **Abrir MirrorBridge** muestra la ventana completa. Al cerrarla, MirrorBridge sigue en
    la bandeja. **Salir** detiene la transmisión y cierra MirrorBridge.
@@ -126,24 +132,36 @@ todavía no se probó con una TV real.
 
 ### Desde el menú de la bandeja
 
-1. Elige la TV en **Dispositivo** y emparéjala, como para transmitir (**Transmitir a ...** una
-   vez, o *Dispositivo* > *Emparejar con PIN…*).
+1. Elige la TV en **Dispositivo** y emparéjala (*Dispositivo* > *Emparejar con PIN…*:
+   escribe el PIN que muestra la TV).
 2. Una vez, usa **Más opciones** > **Probar esta TV…**. Su última prueba duplica una imagen de
    prueba en movimiento durante unos 10 segundos: cuando un aviso diga *Mira la TV ahora*, mira
    si aparece en la TV. Lo que funcionó queda guardado para esa TV, así que *Duplicar pantalla*
    lo pide de entrada (ver *Avisar de una TV que no funciona*).
-3. Elige **Duplicar pantalla (baja latencia, experimental)**, justo debajo de **Transmitir a
-   ...**. Igual que al transmitir, el texto del icono dice *Conectando con la TV…* y luego
-   *Duplicando la pantalla en (tu TV)*, y un aviso dice cuándo empieza, cuándo termina y, si
-   falla, por qué. **Detener la duplicación** (donde está *Detener transmisión*) o **Salir** la
-   terminan.
+3. Elige **Mostrar mi pantalla en (tu TV)**, justo debajo de la línea de estado (si te
+   saltaste el paso 1, primero la empareja). Igual que al transmitir, el texto del icono dice
+   *Conectando con la TV…* y luego *Duplicando la pantalla en (tu TV)*, y un aviso dice cuándo
+   empieza, cuándo termina y, si falla, por qué. **Detener la duplicación**, en el mismo
+   lugar, o **Salir** la terminan.
 
-*Duplicar pantalla* aparece en gris hasta que MirrorBridge está emparejado con la TV (al pasar
-el mouse lo dice), con los receptores que no ofrecen duplicar la pantalla, y con los Apple TV y
-los Mac, que necesitan FairPlay para duplicar la pantalla: llegarán en una versión futura, y
-mientras tanto se les transmite como siempre. Se hace una sola cosa a la vez: mientras hay una
-transmisión, una duplicación o una prueba de la TV, lo demás queda en gris hasta que termine.
-La ventana completa tiene el mismo botón, debajo de **Transmitir**.
+Al pasar el mouse, la opción dice qué va a hacer. A los receptores que no ofrecen duplicar la
+pantalla se les transmite, y también a los Apple TV y los Mac, que necesitan FairPlay para
+duplicar la pantalla (llegará en una versión futura). Si la duplicación falla antes de que la
+imagen llegue a la TV, se prueba la siguiente forma sin preguntar. La transmisión, con sonido,
+también está en *Más opciones* > *Transmitir (modo anterior, 3-7 s de retraso)*. Se hace una
+sola cosa a la vez: mientras hay una transmisión, una duplicación o una prueba de la TV, lo
+demás queda en gris hasta que termine. El botón grande de la ventana completa hace lo mismo.
+
+**Ajustes de Duplicar pantalla**, en el menú, cambian la siguiente duplicación:
+
+* *Latencia*: cuánto después de capturar un cuadro lo muestra la TV. *Baja* son 60 ms, para
+  cable o buena señal de Wi-Fi; *Normal* (la predeterminada) es lo guardado para la TV,
+  100 ms; *Suave* son 200 ms, un poco más de retardo y menos saltos cuando falla el Wi-Fi. Una
+  espera más corta solo baja el retardo si la TV respeta la hora de los cuadros.
+* *Cuadros por segundo*: *Automático* (lo predeterminado) son 60 cuando la tarjeta de video
+  codifica y la captura es Desktop Duplication, y 30 con x264 (el procesador) o con la captura
+  GDI; *30 fps* y *60 fps* se quedan en ese valor. Nunca más de lo que acepta la TV. Los
+  cuadros por segundo y el retraso de **Calidad** son solo para transmitir.
 
 **Qué mandar** después de probarlo con tu TV:
 
@@ -159,16 +177,17 @@ La ventana completa tiene el mismo botón, debajo de **Transmitir**.
   de 200 Hz muestra una hora nueva cada 5 ms). Esc o un clic lo cierra;
 * `%APPDATA%\MirrorBridge\mirroring.json`, donde queda lo que funcionó con la TV.
 
-Junto al *Medidor de latencia*, **Más opciones** > **Depuración** tiene tres opciones para
-hacer pruebas. Empiezan con los valores de siempre y cambian la siguiente duplicación (y
-`mirror`), no *Probar esta TV* ni `mirror --probe`: *Espera de la TV (prueba)* le pide a la TV
-que espere de 60 a 300 ms después de capturar cada cuadro antes de mostrarlo, en lugar de lo
-guardado para esa TV (*Automática*; un valor de prueba nunca se guarda); *Cuadro clave cada*
-manda un cuadro clave (una imagen completa) cada 1, 2 (lo normal) o 5 segundos; *Mostrar
-cuadros al llegar (prueba)* le pide a la TV que muestre cada cuadro en cuanto llega, en lugar
-de a su hora. Una espera más corta solo baja el retraso si la TV respeta la hora de los
-cuadros; por Wi-Fi, una más larga aguanta los momentos en que la red detiene el video. Al
-empezar cada sesión, el registro dice cuáles usó.
+Junto al *Medidor de latencia*, **Más opciones** > **Depuración (para pruebas)** tiene cuatro
+opciones para hacer pruebas. Empiezan con los valores de siempre y cambian la siguiente
+duplicación (y `mirror`), no *Probar esta TV* ni `mirror --probe`: *Espera de la TV (prueba)*
+le pide a la TV que espere de 60 a 300 ms después de capturar cada cuadro antes de mostrarlo,
+en lugar de lo que diga *Latencia* (*Automática*; elegir una Latencia la deja ahí, y un valor
+de prueba nunca se guarda); *Cuadros clave* manda un cuadro clave (una imagen completa) solo
+cuando hace falta (lo normal), cada 10 segundos o cada 2 segundos, como antes; *Escalado*
+cambia el tamaño de la imagen en la tarjeta de video cuando se puede (*Automático*, lo normal)
+o en el procesador (*Procesador (como antes)*); *Mostrar cuadros al llegar (prueba)* le pide a
+la TV que muestre cada cuadro en cuanto llega, en lugar de a su hora. Al empezar cada sesión,
+el registro dice cuáles usó, y cada vez que FFmpeg vuelve a arrancar, por qué.
 
 ### Desde la consola
 
@@ -196,10 +215,26 @@ Igual que `cast`, `mirror` parte de los ajustes de la app: sin `--monitor`, `--w
   la TV (la **Resolución** no se aplica, igual que al transmitir). Dura toda la sesión y
   desaparece al terminarla; si desaparece antes (al suspender el equipo), la sesión termina y
   lo dice. *Probar esta TV* y `mirror --probe` nunca la crean. Todo se envía con el
-  codificador, los cuadros por segundo y la tasa de bits de **Calidad**. Todavía no hay sonido.
-  Si FFmpeg no puede capturar o codificar al empezar (el controlador de video rechaza ddagrab,
-  el codificador de la GPU está ocupado), sigue con la captura GDI y luego con x264 (CPU), igual
-  que al transmitir.
+  codificador y la tasa de bits de **Calidad**, a los cuadros por segundo de **Ajustes de
+  Duplicar pantalla**. Todavía no hay sonido. Si FFmpeg no puede capturar o codificar al
+  empezar (el controlador de video rechaza ddagrab, el codificador de la GPU está ocupado),
+  sigue con la captura GDI y luego con x264 (CPU), igual que al transmitir.
+* Con NVENC y Desktop Duplication la imagen no sale de la tarjeta de video: al tamaño de la TV
+  va directo de la captura al codificador, y si no, se escala ahí con `scale_d3d11`, que tiene
+  el FFmpeg 8.1.1 que viene dentro de `MirrorBridge.exe` (otro FFmpeg sin él la escala en el
+  procesador). Si la imagen sale de otro tamaño que el pedido, esa pantalla vuelve al
+  procesador hasta que se cierra MirrorBridge. Quick Sync, AMF y Media Foundation escalan en el
+  procesador.
+* Un cuadro clave (una imagen completa) se manda solo cuando hace falta: al empezar, y después
+  de descartar cuadros, cuando FFmpeg vuelve a arrancar para dar uno enseguida (como mucho
+  cada 2 segundos). Un cuadro clave cada 2 segundos hacía que el texto se viera borroso cada
+  2 segundos. Quick Sync, AMF y Media Foundation, que todavía no se probaron así, siguen
+  mandando uno cada 10 segundos.
+* Si Windows corta la captura de pantalla (al instalar o quitar un controlador de video, al
+  cerrar sesión, al cambiar la resolución, con un aviso de UAC), FFmpeg vuelve a arrancar en
+  la misma pantalla, buscada de nuevo (también la virtual), hasta cinco veces en 10 segundos;
+  solo entonces la sesión termina y dice que Windows detuvo la captura de pantalla. El
+  registro guarda las últimas 30 líneas de FFmpeg cada vez que se detiene.
 * La TV le pide la hora al equipo por UDP: permite MirrorBridge, o los puertos UDP de entrada
   7880-7889, en el Firewall de Windows para redes privadas, o la TV no mostrará nada.
 * `mirror --probe` prueba las formas en que las TVs difieren, muestra qué contestó la TV y

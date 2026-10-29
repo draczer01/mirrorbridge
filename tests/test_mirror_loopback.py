@@ -884,7 +884,7 @@ async def test_a_screen_capture_that_does_not_come_back_ends_the_session_with_it
         await asyncio.wait_for(session.run(), 60)
     assert caught.value.args[0].key == "mirror_capture_lost" and caught.value.step == "capture"
     assert str(caught.value) == ("Windows stopped the screen capture and it did not come back (AcquireNextFrame "
-                                 "failed: 887a0026). Try Mirror screen again.")
+                                 "failed: 887a0026). Start mirroring again.")
     assert screen.ways() == [("ddagrab", capture.CPU)] * (6 if ends == "tries" else 2)
     assert session.state == State.FAILED and tv.teardowns == 1
 
