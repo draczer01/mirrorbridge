@@ -3,6 +3,7 @@ shairport-sync opens a packet (cryptography's ChaCha20-Poly1305) and pyatv's own
 (tests/test_mirror_sound_loopback.py has whole sessions)."""
 
 import asyncio
+import dataclasses
 import hashlib
 import math
 import random
@@ -227,7 +228,8 @@ def test_resend_requests_and_answers():
     packet = ap.rtp_header(1) + bytes(1436)
     answer = ap.resend_answer(packet)
     assert len(answer) == 1452 and answer[:8].hex() == "80d6000180600001" and answer[4:] == packet
-    assert ap.resend_missing(0xBD0D).hex() == "80d60001bd0d0000" and ap.resend_missing(0x1_0001).hex() == "80d6000100010000"
+    assert ap.resend_missing(0xBD0D).hex() == "80d60001bd0d0000"
+    assert ap.resend_missing(0x1_0001).hex() == "80d6000100010000"
 
 
 def test_packet_ring_finds_packets_by_seq_across_the_wrap():
@@ -646,12 +648,13 @@ def test_tone_feeder_beeps_at_whole_seconds():
     assert tone.name == "mirror-tone"
     tone.run()
     t0 = 5_700_000_123
-    assert all(n == 352 and stamp == t0 + (k + 1) * 352 * NS // R <= now for k, (_, n, stamp, _, now) in enumerate(blocks))
+    for k, (_, n, stamp, _, now) in enumerate(blocks):
+        assert n == 352 and stamp == t0 + (k + 1) * 352 * NS // R <= now
     assert [fresh for *_, fresh, _ in blocks] == [True] + [False] * (len(blocks) - 1)
     pcm = b"".join(block[0] for block in blocks)
     beep = sound.beep()
-    starts = [c for c in range(1, len(pcm) // 4) if pcm[4 * c:4 * c + 4] != bytes(4) and pcm[4 * c - 4:4 * c] == bytes(4)
-              and pcm[max(0, 4 * c - 8820):4 * c] == bytes(min(8820, 4 * c))]
+    starts = [c for c in range(1, len(pcm) // 4)
+              if pcm[4 * c:4 * c + 4] != bytes(4) and pcm[max(0, 4 * c - 8820):4 * c] == bytes(min(8820, 4 * c))]
     onsets = [c - 3 for c in starts]  # the fade-in makes the beep's first three samples 0
     assert len(onsets) == 3
     for second, c in zip((6, 7, 8), onsets):
@@ -705,3 +708,257 @@ async def test_tone_feeder_runs_as_its_own_thread():
     tone.join(2)
     assert not tone.is_alive() and len(got) >= 10 and got == sorted(got)
     assert all(b - a == 352 * NS // R or b - a == 352 * NS // R + 1 for a, b in zip(got, got[1:]))
+
+
+# -- the sender: packets, syncs, resends ------------------------------------------------------------------
+
+
+def _recording_sender(start_index: int = 0, packets: int = 0, **kw):
+    """An AudioSender whose sends are recorded: (sender, data sent, control datagrams sent, clock)."""
+    data, control, clock = [], [], [NS]
+    sender = sound.AudioSender(ap.ALAC_44100, ap.ChaChaShk(bytes(range(32))), ssrc=0, tv_ip="192.168.1.20",
+                               send_data=lambda packet: data.append(packet) or True,
+                               send_control=lambda packet, addr: control.append((packet, addr)),
+                               control_addr=("192.168.1.20", 6002), start_index=start_index, clock=lambda: clock[0],
+                               **kw)
+    sender.push(_ramp() * packets)
+    return sender, data, control, clock
+
+
+def test_the_sender_answers_resend_requests_across_the_seq_wrap():
+    sender, data, control, _ = _recording_sender(65500, 40)
+    tv = ("192.168.1.20", 6002)
+    sender.on_control(bytes.fromhex("80d50001fffe0003"), tv)
+    assert [(len(p), p[:2].hex(), p[2:4].hex(), addr) for p, addr in control] == [
+        (1452, "80d6", "fffe", tv), (1452, "80d6", "ffff", tv), (1452, "80d6", "0000", tv)]
+    assert [p[4:] for p, _ in control] == [data[34], data[35], data[36]]  # packets 65534, 65535, 65536
+    assert _shairport_open(bytes(range(32)), control[2][0][4:]) == ap.alac_verbatim(_ramp())
+    assert sender.stats.resend_requests == 1 and sender.stats.asked == 3 and sender.stats.resent == 3
+    control.clear()
+    sender.on_control(bytes.fromhex("80d500010010" "0002"), tv)  # seqs 16 and 17: packets 65552 and 65553, not sent
+    assert [p.hex() for p, _ in control] == ["80d6000100100000", "80d6000100110000"] and sender.stats.missed == 2
+
+
+def test_the_sender_ignores_what_it_cannot_answer():
+    sender, data, control, clock = _recording_sender(0, 300)
+    tv = ("192.168.1.20", 6002)
+    sender.on_control(bytes.fromhex("80d5000100100000"), tv)  # count 0
+    sender.on_control(bytes.fromhex("80d4000400000000ffffeec600000000"), tv)  # a sync, 0x54
+    assert control == [] and sender.stats.unknown_control == 2 and sender.stats.resend_requests == 0
+    sender.on_control(bytes.fromhex("80d5000100100002"), ("192.168.1.21", 6002))
+    assert control == [] and sender.stats.foreign_control == 1
+    sender.on_control(struct.pack(">BBHHH", 0x80, 0xD5, 1, 44, 300), tv)  # more than the ring holds
+    assert len(control) == 256 and sender.stats.asked == 256 and sender.stats.resent == 256
+    assert control[0][0][2:4] == struct.pack(">H", 44) and control[-1][0][2:4] == struct.pack(">H", 299)
+
+
+def test_the_sender_sends_a_packet_again_at_most_once_in_20_ms():
+    sender, data, control, clock = _recording_sender(0, 10)
+    tv = ("192.168.1.20", 6002)
+    request = bytes.fromhex("80d5000100030002")
+    sender.on_control(request, tv)
+    clock[0] += 15_000_000
+    sender.on_control(request, tv)
+    assert len(control) == 2 and sender.stats.deduped == 2
+    clock[0] += 10_000_000  # 25 ms after the first
+    sender.on_control(request, tv)
+    assert len(control) == 4 and sender.stats.resent == 4 and control[2][0][4:] == data[3]
+
+
+def test_the_sender_packs_whole_packets_and_marks_the_first():
+    sender, data, control, _ = _recording_sender()
+    assert sender.push(_ramp()[:1000]) == 0 and sender.carry == 250 and data == []
+    assert sender.push(_ramp()[1000:] + _ramp()) == 2 and sender.carry == 0 and sender.index == 2
+    sender.mark_next()
+    sender.push(_ramp())
+    assert [p[1] for p in data] == [0xE0, 0x60, 0xE0] and [p[2:4].hex() for p in data] == ["0000", "0001", "0002"]
+    assert all(len(p) == 1448 and _shairport_open(bytes(range(32)), p) == ap.alac_verbatim(_ramp()) for p in data)
+    assert sender.stats.packets == 3 and sender.stats.bytes == 3 * 1448
+    line = sound.SampleLine()
+    line.observe(352, 5_123_456_789 + 352 * NS // R, True)
+    line.start(0)
+    sent = sender.send_sync(line.sync_point(0, 4410), first=True)
+    assert sent.hex() == "90d40004ffffeec683aa7e851f9add3700000000" and control == [(sent, ("192.168.1.20", 6002))]
+    assert sender.stats.syncs == 1
+
+
+def test_the_sender_repeats_packets_and_counts_the_seq_wrap(caplog):
+    sender, data, _, _ = _recording_sender(65534, 0, redundant=2)
+    with caplog.at_level("INFO", logger="mirrorbridge.mirror.sound"):
+        sender.push(_ramp() * 4)
+    assert [struct.unpack_from(">H", p, 2)[0] for p in data] == [65534, 65534, 65535, 65534, 65535, 0, 65535, 0, 1]
+    assert sender.stats.repeats == 5 and sender.stats.seq_wraps == 1
+    assert "Sound: seq wrapped to 0 at packet 65536 (0.0 s)" in caplog.messages
+
+
+def test_packets_past_the_send_buffer_limit_are_dropped():
+    class Transport:
+        size = 70_000
+        sent = []
+
+        def is_closing(self):
+            return False
+
+        def get_write_buffer_size(self):
+            return self.size
+
+        def sendto(self, data, addr):
+            self.sent.append((data, addr))
+
+    transport = Transport()
+    send = sound.datagram_sender(transport, ("192.168.1.20", 6001))
+    sender = sound.AudioSender(ap.PCM_44100, ap.ChaChaShk(bytes(32)), ssrc=0, tv_ip="192.168.1.20", send_data=send,
+                               send_control=lambda packet, addr: None, control_addr=("192.168.1.20", 6002))
+    sender.push(_ramp() * 2)
+    assert transport.sent == [] and sender.stats.send_dropped == 2 and sender.stats.packets == 2
+    transport.size = 0
+    sender.push(_ramp())
+    assert len(transport.sent) == 1 and len(transport.sent[0][0]) == 1444 and sender.stats.send_dropped == 2
+    assert sound.SoundStats(packets=3).as_dict()["packets"] == 3 and "headroom_min_ms" in sound.SoundStats().as_dict()
+
+
+async def _udp_sender(audio, **kw):
+    """An AudioSender on real UDP sockets to the fake TV's ports: (sender, its control port,
+    the data transport)."""
+    loop = asyncio.get_running_loop()
+    _, control = await loop.create_datagram_endpoint(sound.AudioControl, local_addr=("127.0.0.1", 0))
+    data, _ = await loop.create_datagram_endpoint(asyncio.DatagramProtocol, local_addr=("127.0.0.1", 0))
+    sender = sound.AudioSender(ap.ALAC_44100, ap.ChaChaShk(audio.stream["shk"]), ssrc=0, tv_ip="127.0.0.1",
+                               send_data=sound.datagram_sender(data, ("127.0.0.1", audio.data_port)),
+                               send_control=control.send, control_addr=("127.0.0.1", audio.control_port), **kw)
+    control.attach(sender)
+    return sender, control, data
+
+
+async def _send_frames(sender, frames: list[bytes]) -> None:
+    line = sound.SampleLine()
+    line.observe(352, time.perf_counter_ns(), True)
+    line.start(0)
+    sender.send_sync(line.sync_point(0, 4410), first=True)
+    for k, frame in enumerate(frames):
+        sender.push(frame)
+        if k % 4 == 3:
+            await asyncio.sleep(0.002)  # about as fast as the stream itself, which the sockets' buffers take
+    await asyncio.sleep(0.2)
+
+
+@pytest.mark.parametrize("profile", [{}, {"audio_lose": (30, 31)}, {"redundant": 2}])
+async def test_the_sender_over_udp_to_the_fake_tvs_audio_ports(profile):
+    from fake_mirror_tv import AudioReceiver, TvProfile
+
+    redundant = profile.pop("redundant", 0)
+    receiver = AudioReceiver(TvProfile(**profile), {"type": 96, "ct": 2, "spf": 352, "shk": bytes(range(32))})
+    audio = await receiver.open()
+    sender, control, data = await _udp_sender(audio, redundant=redundant)
+    frames = _random_frames(200, seed=3)
+    port = control.port
+    try:
+        await _send_frames(sender, frames)
+    finally:
+        control.close()
+        data.close()
+        receiver.close()
+    assert audio.errors == [] and sorted(audio.packets) == list(range(200))
+    assert audio.pcm() == (b"".join(frames), [])
+    packets = [audio.packets[i] for i in range(200)]
+    assert [(p.seq, p.rtp, p.ssrc, p.marker) for p in packets] == [(i, 352 * i, 0, i == 0) for i in range(200)]
+    assert [p.nonce8 for p in packets] == [struct.pack("<Q", i) for i in range(200)]
+    assert len(audio.syncs) == 1 and audio.syncs[0].first and audio.syncs[0].field3 == 0
+    assert audio.control_peer == ("127.0.0.1", port)
+    if profile.get("audio_lose"):
+        assert audio.requests == [(30, 2)] and audio.packets[30].resent and audio.packets[31].resent
+        assert sender.stats.resend_requests == 1 and sender.stats.resent == 2 and sender.stats.missed == 0
+        assert not any(p.resent for i, p in audio.packets.items() if i not in (30, 31))
+    else:
+        assert audio.requests == [] and sender.stats.resent == 0
+    copies = [p.copies for p in packets]
+    assert copies == ([3] * 198 + [2, 1] if redundant else [1] * 200)
+    assert sender.stats.repeats == (397 if redundant else 0) and sender.stats.send_dropped == 0
+
+
+# -- the fake TV's audio stream ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("changes,keys", [
+    ({}, {"type", "dataPort", "controlPort", "streamID"}),
+    ({"audio_ports": False}, {"type", "streamID"}),
+    ({"audio_control_port": False}, {"type", "dataPort", "streamID"}),
+    ({"audio_answer_type": False, "refuse": ()}, {"dataPort", "controlPort", "streamID"}),
+])
+async def test_the_fake_tv_gives_the_audio_stream_ports_of_its_own(changes, keys):
+    from fake_mirror_tv import FakeMirrorTV, TvProfile
+    from mirrorbridge.mirror.control import decode_plist
+    from mirrorbridge.mirror.negotiation import CONTROL_FIRST, MEDIA_FIRST, Negotiator, Plan
+
+    profile = dataclasses.replace(TvProfile(screen_formats=0x800, record_headers={"Audio-Latency": "11025"},
+                                            feedback_body={"streams": []}), **changes)
+    tv = await FakeMirrorTV(profile).start()
+    negotiator = Negotiator(tv.target(), timing_port=7880, audio_port=7881)
+    try:
+        await negotiator.connect()
+        assert (await negotiator.channel.info()).screen_formats == 0x800
+        est = await negotiator.establish(Plan())
+        control_first = est.plan.ordering == CONTROL_FIRST
+        assert est.plan.ordering == (MEDIA_FIRST if profile.refuse else CONTROL_FIRST)
+        answer = est.replies[1 if control_first else 0]["streams"][0]
+        assert set(answer) == keys and len(tv.audios) == 1
+        audio = tv.audios[0]
+        assert answer.get("dataPort", audio.data_port) == audio.data_port > 0
+        assert answer.get("controlPort", audio.control_port) == audio.control_port > 0
+        offered = next(s for setup in tv.setups for s in setup.get("streams", []) if s["type"] == 96)
+        assert audio.stream == offered and audio.session["sessionUUID"] == est.uuid and "streams" not in audio.session
+        record = await negotiator.channel.request("RECORD", est.uri, headers={"Session": est.uuid})
+        assert record.headers["Audio-Latency"] == "11025"
+        feedback = await negotiator.channel.request("POST", "/feedback")
+        assert decode_plist(feedback) == {"streams": []}
+        await negotiator.teardown(est.uri)
+    finally:
+        negotiator.close()
+        await tv.stop()
+    assert audio.datagrams == 0 and audio.packets == {}
+
+
+async def test_the_tone_through_the_line_and_the_sender_is_heard_at_whole_seconds():
+    """The pieces in a row, as the session will put them: the tone's blocks on the sample line,
+    the sender to the fake TV over UDP, and the beeps found where rule A hears them: their
+    whole second plus the gap."""
+    from fake_mirror_tv import AudioReceiver, TvProfile
+
+    clock = [5_400_000_000]
+    blocks = []
+    tone = sound.ToneFeeder(lambda pcm, n, stamp, fresh: (blocks.append((pcm, n, stamp, fresh)),
+                                                          len(blocks) == R * 5 // 2 // 352 and tone.stop()),
+                            clock=lambda: clock[0], sleep=lambda s: clock.__setitem__(0, clock[0] + round(s * NS) + 1))
+    tone.run()
+    receiver = AudioReceiver(TvProfile(), {"type": 96, "ct": 2, "spf": 352, "shk": bytes(range(32))})
+    audio = await receiver.open()
+    sender, control, data = await _udp_sender(audio)
+    line = sound.SampleLine()
+    gap = 4410
+    try:
+        for k, (pcm, n, stamp, fresh) in enumerate(blocks):
+            c0 = line.observe(n, stamp, fresh)
+            if line.A is None:
+                line.start(c0)
+                sender.send_sync(line.sync_point(0, gap), first=True)
+            if k == len(blocks) // 2:
+                sender.send_sync(line.sync_point(sender.index, gap), first=False)
+            corr = line.correction(c0, n)
+            assert corr == sound.Correction()
+            out = sound.apply(pcm, corr)
+            line.advance(len(out) // 4)
+            sender.push(out)
+            if k % 4 == 3:
+                await asyncio.sleep(0.002)
+        await asyncio.sleep(0.2)
+    finally:
+        control.close()
+        data.close()
+        receiver.close()
+    assert audio.errors == [] and len(audio.syncs) == 2 and audio.pcm()[1] == []
+    onsets = audio.onsets()
+    assert len(onsets) == 2  # at 6 s and 7 s of the clock
+    for second, onset in zip((6, 7), onsets):
+        heard = audio.heard_ns(onset)
+        assert abs(heard - (second * NS + gap * NS // R)) < 100_000  # the fade-in's 3 silent samples: 68 us
+        assert abs(audio.heard_ns(onset, rule="D") - heard - 11025 * NS / R) <= 1
