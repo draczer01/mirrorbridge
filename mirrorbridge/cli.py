@@ -291,6 +291,8 @@ async def cmd_googlecast(args) -> int:
         settings.framerate = args.framerate
     if args.encoder:
         settings.encoder = args.encoder
+    if args.keep_pc_sound:
+        settings.mute_pc_audio = False
     device = await googlecast.find(args.device, args.timeout)
     if device is None:
         print(f"No Google Cast receiver called {args.device!r}. Try googlecast --list, or its IP address.")
@@ -495,6 +497,8 @@ def build_parser() -> argparse.ArgumentParser:
                                                  f"(default {googlecast.DEFAULT_DELAY_MS})")
     gcast.add_argument("--codec", choices=["h264", "vp8"], help="video codec (default vp8)")
     gcast.add_argument("--no-audio", action="store_true", help="the picture alone (the test pattern beeps)")
+    gcast.add_argument("--keep-pc-sound", action="store_true", help="do not mute this PC's speakers while the "
+                                                                    "TV plays the sound")
     gcast.add_argument("--fps", dest="framerate", type=int)
     gcast.add_argument("--bitrate", type=int, help="video kbps")
     gcast.add_argument("--encoder", choices=["auto", *ffmpeg.ENCODER_PREFERENCE])

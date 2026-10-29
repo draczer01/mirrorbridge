@@ -20,7 +20,8 @@ virtual screen is what is sent, as for AirPlay mirroring.
 The sound (googlecast.audio) is a second stream on the same socket, from a second FFmpeg:
 the PC's audio, or a beep with the test pattern. A PC without system audio capture, or a
 receiver that takes no audio, gets the picture alone, and so does a session whose sound
-FFmpeg ends: the picture goes on.
+FFmpeg ends: the picture goes on. While the TV gets the PC's sound, the PC's own speakers
+are muted (settings.mute_pc_audio, speakers.MutedSpeakers), and put back at the end.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from typing import Optional
 
 from .. import audio as system_audio
 from .. import extended, ffmpeg, vdisplay
+from ..speakers import MutedSpeakers
 from ..config import Settings
 from ..mirror.clock import NS, now_ns
 from ..mirror.flv import CONFIG, FRAME
@@ -153,6 +155,7 @@ class GoogleCastMirror:
         self._feeder: Optional[system_audio.LoopbackFeeder] = None
         self._audio_task: Optional[asyncio.Task] = None
         self._timer: Optional[AudioTimer] = None
+        self._speakers = MutedSpeakers()
         self._ffmpeg: Optional[FFmpegSource] = None
         self._frames: Optional[FrameQueue] = None
         self._capture: tuple = ()
@@ -443,12 +446,15 @@ class GoogleCastMirror:
                 source = self._audio_ffmpeg
                 _LOGGER.warning("The sound stopped; the picture goes on. %s", source.errors() if source else "")
                 self.sound = False
+                self._speakers.restore()
                 return
             if self._first_sent_ns is None:
                 continue
             rtp_time = timer.stamp(unit.arrived_ns, opus_samples(unit.data))
             if rtp_time is not None:
                 sender.send_frame(unit.data, True, unit.arrived_ns, rtp_time=rtp_time)
+                if not self.sound and self.source == DESKTOP and self.settings.mute_pc_audio:
+                    self._speakers.mute()  # the TV has the sound: no echo from the PC
                 self.sound = True
 
     # -- sending ---------------------------------------------------------------
@@ -605,6 +611,7 @@ class GoogleCastMirror:
             self._socket.close()
         self._socket = self._sender = self._audio_sender = None
         self.sound = False
+        self._speakers.restore()
         channel, self._channel = self._channel, None
         if channel is not None:
             if self._app is not None and not channel.closed.is_set() and not self._app_gone:

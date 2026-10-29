@@ -383,3 +383,32 @@ async def test_receiver_without_sound():
         await tv.stop()
     assert tv.audio is None and tv.payload_types == {96} and len(tv.frames) >= 30
     assert session.frames_shown == len(tv.frames)
+
+
+def test_speakers_are_muted_and_put_back(monkeypatch):
+    from mirrorbridge import speakers
+
+    class FakeVolume:
+        state = {"muted": False, "released": 0}
+
+        def muted(self):
+            return self.state["muted"]
+
+        def set_muted(self, muted):
+            self.state["muted"] = muted
+
+        def release(self):
+            self.state["released"] += 1
+
+    monkeypatch.setattr(speakers.sys, "platform", "win32")
+    monkeypatch.setattr(speakers, "_Volume", FakeVolume)
+    muted = speakers.MutedSpeakers()
+    assert muted.mute() and FakeVolume.state["muted"]
+    assert not muted.mute()  # once
+    muted.restore()
+    assert not FakeVolume.state["muted"] and FakeVolume.state["released"] == 1
+    FakeVolume.state["muted"] = True  # muted by the person already: left alone
+    again = speakers.MutedSpeakers()
+    assert not again.mute()
+    again.restore()
+    assert FakeVolume.state["muted"]
