@@ -5,18 +5,22 @@ lost packets sent again, and the ways a receiver says no or goes away."""
 import asyncio
 import struct
 import subprocess
+import sys
 
 import pytest
 
-from fake_cast_tv import RECEIVER_SSRC, TRANSPORT, FakeCastTV
+from fake_cast_tv import AUDIO_RECEIVER_SSRC, RECEIVER_SSRC, TRANSPORT, FakeCastTV
 from mirrorbridge import ffmpeg
 from mirrorbridge.config import Settings
 from mirrorbridge.googlecast import CastDevice, CastMirrorError, GoogleCastMirror
 from mirrorbridge.googlecast import session as gc_session
+from mirrorbridge.googlecast.audio import AudioTimer, OggReader, has_opus, opus_samples
 from mirrorbridge.googlecast.channel import NS_RECEIVER, NS_WEBRTC, decode_message, encode_message
 from mirrorbridge.googlecast.offer import AnswerError, VideoOffer, parse_answer
 from mirrorbridge.googlecast.rtp import (CAST, LAST_PACKET, PT_PSFB, PT_RR, FrameCipher, Packetizer, expand,
                                          parse_rtcp, sender_report)
+from mirrorbridge.googlecast.sender import Clock
+from mirrorbridge.mirror.clock import NS
 from mirrorbridge.mirror import TEST_PATTERN
 from mirrorbridge.session import State
 
@@ -48,6 +52,8 @@ def _decoded_frames(ff: str, annexb: bytes, tmp_path) -> int:
 
 async def _mirror(tv: FakeCastTV, seconds: float = 3, **kw) -> tuple[GoogleCastMirror, list]:
     states = []
+    kw.setdefault("codec", "h264")  # the frames these tests check are H.264
+    kw.setdefault("audio", False)
     session = GoogleCastMirror(CastDevice("Sala familiar", tv.host, tv.port), SETTINGS,
                                lambda state, message: states.append((state, message)), source=TEST_PATTERN,
                                seconds=seconds, **kw)
@@ -155,11 +161,14 @@ async def test_mirrors_a_test_pattern(tv, tmp_path):
     assert len(tv.frames) >= 60
     assert _decoded_frames(ff, tv.annexb(), tmp_path) == len(tv.frames)
     assert session.canvas == (640, 360)
+    assert session.frames_shown == len(tv.frames)  # from the receiver's event log
+    assert session.frames_reported
 
 
 async def test_lost_packets_are_sent_again(tmp_path):
     ff = _ffmpeg()
     tv = await FakeCastTV(drop_every=4).start()
+    tv.show_log = False  # a receiver without an event log: nothing to say what it showed
     try:
         session, _states = await _mirror(tv, seconds=3)
     finally:
@@ -167,6 +176,7 @@ async def test_lost_packets_are_sent_again(tmp_path):
     assert tv.dropped > 10 and tv.resent_got >= tv.dropped - 3
     assert session._sender is None  # closed at the end
     assert len(tv.frames) >= 60
+    assert session.frames_shown == 0 and not session.frames_reported
     assert _decoded_frames(ff, tv.annexb(), tmp_path) == len(tv.frames)
 
 
@@ -237,3 +247,184 @@ async def test_stop_while_mirroring(tv):
     await asyncio.wait_for(task, 20)
     assert session.state is State.STOPPED and tv.stopped
     assert any(dest == TRANSPORT for _ns, dest, _p in tv.messages)
+
+
+async def test_mirrors_vp8(tv, tmp_path):
+    ff = _ffmpeg()
+    session, _states = await _mirror(tv, seconds=2.5, codec="vp8")
+    stream = tv.offer["offer"]["supportedStreams"][0]
+    assert stream["codecName"] == "vp8" and session.encoder == "libvpx"
+    assert tv.frames and tv.frames[0][1] and not tv.frames[0][2][0] & 1  # a VP8 keyframe first
+    ivf = bytearray(b"DKIF" + struct.pack("<HHIHHIIII", 0, 32, 0x30385056, 640, 360, 30, 1, len(tv.frames), 0))
+    for index, (_id, _key, data) in enumerate(tv.frames):
+        ivf += struct.pack("<IQ", len(data), index) + data
+    path = tmp_path / "video.ivf"
+    path.write_bytes(bytes(ivf))
+    out = subprocess.run([ff, "-hide_banner", "-v", "error", "-i", str(path), "-f", "null", "-"],
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0 and not out.stderr, out.stderr
+    assert len(tv.frames) >= 45 and session.frames_shown == len(tv.frames)
+
+
+def test_receiver_event_log():
+    items = struct.pack(">IIhHhHhH", 3000, 2 << 24, 0, 13 << 12, -20, 12 << 12, 7, 14 << 12)
+    body = struct.pack(">I4s", RECEIVER_SSRC, CAST) + items
+    rtcp = parse_rtcp(struct.pack(">BBH", 0x82, 204, len(body) // 4) + body)
+    assert rtcp.log and rtcp.decoded == 1 and rtcp.played == [-20]
+
+
+def test_codec_from_environment(monkeypatch):
+    monkeypatch.setenv(gc_session.CODEC_ENV, "VP8")
+    assert gc_session.choose_codec(None) == "vp8"
+    assert gc_session.choose_codec("h264") == "h264"
+    monkeypatch.setenv(gc_session.CODEC_ENV, "av1")
+    assert gc_session.choose_codec(None) == "vp8"
+    monkeypatch.delenv(gc_session.CODEC_ENV)
+    assert gc_session.choose_codec(None) == "vp8"
+
+
+# -- sound ----------------------------------------------------------------------------------------
+
+
+def test_offer_and_answer_with_sound():
+    offer = VideoOffer(width=1280, height=720, fps=30, kbps=4000, delay_ms=400, audio=True).message()
+    video, sound = offer["offer"]["supportedStreams"]
+    assert sound["type"] == "audio_source" and sound["codecName"] == "opus" and sound["rtpPayloadType"] == 127
+    assert sound["timeBase"] == "1/48000" and sound["channels"] == 2 and sound["bitRate"] == 102000
+    assert sound["aesKey"] == video["aesKey"] and 1 <= sound["ssrc"] <= 500000 and sound["index"] != video["index"]
+    answer = parse_answer({"type": "ANSWER", "result": "ok", "answer": {
+        "udpPort": 5000, "sendIndexes": [0, 1], "ssrcs": [11, 12], "constraints": {"audio": {"maxBitRate": 64000}}}})
+    assert answer.receiver_ssrc == 11 and answer.audio_receiver_ssrc == 12 and answer.audio_max_bps == 64000
+    alone = parse_answer({"type": "ANSWER", "answer": {"udpPort": 5000, "sendIndexes": [0], "ssrcs": [11]}})
+    assert alone.audio_receiver_ssrc is None
+
+
+def _page(packets: list, granule: int = 0) -> bytes:
+    lacing, data = b"", b""
+    for packet in packets:
+        lacing += bytes([255] * (len(packet) // 255) + [len(packet) % 255])
+        data += packet
+    return b"OggS" + struct.pack("<BBQIIIB", 0, 0, granule, 1, 0, 0, len(lacing)) + lacing + data
+
+
+def test_ogg_and_opus_frames():
+    head = _page([b"OpusHead" + bytes(11)]) + _page([b"OpusTags" + bytes(8)])
+    long = bytes([0xF8]) + bytes(300)  # CELT fullband 20 ms, one frame, longer than a lacing value
+    stream = head + _page([bytes([0xF0, 1, 2]), long])
+    reader = OggReader()
+    packets = reader.feed(stream[:40]) + reader.feed(stream[40:])
+    assert packets == [bytes([0xF0, 1, 2]), long]
+    assert [opus_samples(p) for p in packets] == [480, 960]
+    assert opus_samples(bytes([0xF3, 3])) == 3 * 480  # code 3: the count in the next byte
+
+
+def test_audio_timer_follows_the_clock():
+    clock = Clock()
+    timer = AudioTimer(clock)
+    start = clock.start_ns + NS
+    first = timer.stamp(start, 480)
+    assert first == clock.rtp(start - 25 * NS // 1000, 48000)
+    assert timer.stamp(start + 10 * NS // 1000, 480) == first + 480  # on time: counted on
+    later = timer.stamp(start + NS, 480)  # a second of silence: started again
+    assert timer.restarts == 1 and later == clock.rtp(start + NS - 25 * NS // 1000, 48000)
+    # Half a second of sound held up and let go at once: left out until the count is on time.
+    t, stamps = start + NS, []
+    for _ in range(50):
+        stamps.append(timer.stamp(t, 480))
+    assert stamps[:4].count(None) == 0 and stamps.count(None) == 46
+    t += 10 * NS // 1000
+    assert timer.stamp(t, 480) is not None
+
+
+def test_audio_lead_from_environment(monkeypatch):
+    monkeypatch.setenv("MIRRORBRIDGE_CAST_AUDIO_LEAD_MS", "300")
+    clock = Clock()
+    timer = AudioTimer(clock)
+    assert timer.lead_ms == 300
+    first = timer.stamp(clock.start_ns + NS, 480)
+    assert first == clock.rtp(clock.start_ns + NS - 300 * NS // 1000, 48000)
+    assert timer.stamp(clock.start_ns + NS + 10 * NS // 1000, 480) == first + 480 and timer.restarts == 0
+    monkeypatch.setenv("MIRRORBRIDGE_CAST_AUDIO_LEAD_MS", "x")
+    assert AudioTimer(clock).lead_ms == 25
+
+
+def _need_opus() -> str:
+    ff = _ffmpeg()
+    if not has_opus(ff):
+        pytest.skip("this FFmpeg has no libopus")
+    return ff
+
+
+async def test_mirrors_sound(tv):
+    _need_opus()
+    session, _states = await _mirror(tv, seconds=3, audio=True)
+    sound = tv.audio
+    assert sound is not None and sound.receiver_ssrc == AUDIO_RECEIVER_SSRC
+    assert tv.payload_types == {96, 127}
+    delays = {st["type"]: st["targetDelay"] for st in tv.offer["offer"]["supportedStreams"]}
+    assert delays == {"video_source": 400, "audio_source": 100}  # the TCL plays sound ~0.4 s late
+    assert len(sound.frames) >= 200  # 100 a second
+    assert all(opus_samples(data) == 480 for _id, _key, data in sound.frames)  # decrypted Opus, 10 ms each
+    steps = [b - a for a, b in zip(sound.rtp_times, sound.rtp_times[1:])]
+    assert steps.count(480) >= len(steps) - 2
+    assert tv.audio_reports, "no sender report for the sound"
+    # The sound starts with the picture: the first frames of each are timed alike.
+    video = tv.video
+    assert abs(sound.rtp_times[0] / 48000 - video.rtp_times[0] / 90000) < 0.3
+    assert not session.sound  # over
+
+
+async def test_receiver_without_sound():
+    _need_opus()
+    tv = await FakeCastTV().start()
+    tv.take_audio = False
+    try:
+        session, _states = await _mirror(tv, seconds=2, audio=True)
+    finally:
+        await tv.stop()
+    assert tv.audio is None and tv.payload_types == {96} and len(tv.frames) >= 30
+    assert session.frames_shown == len(tv.frames)
+
+
+def test_speakers_are_muted_and_put_back(monkeypatch):
+    from mirrorbridge import speakers
+
+    class FakeVolume:
+        state = {"muted": False, "released": 0}
+
+        def muted(self):
+            return self.state["muted"]
+
+        def set_muted(self, muted):
+            self.state["muted"] = muted
+
+        def release(self):
+            self.state["released"] += 1
+
+    monkeypatch.setattr(speakers.sys, "platform", "win32")
+    monkeypatch.setattr(speakers, "_Volume", FakeVolume)
+    muted = speakers.MutedSpeakers()
+    assert muted.mute() and FakeVolume.state["muted"]
+    assert not muted.mute()  # once
+    muted.restore()
+    assert not FakeVolume.state["muted"] and FakeVolume.state["released"] == 1
+    FakeVolume.state["muted"] = True  # muted by the person already: left alone
+    again = speakers.MutedSpeakers()
+    assert not again.mute()
+    again.restore()
+    assert FakeVolume.state["muted"]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows' audio endpoints")
+def test_speakers_through_com_do_not_crash():
+    # A CI machine may have no speakers (then nothing is muted); either way the COM calls must
+    # neither crash nor leave anything muted.
+    from mirrorbridge import speakers
+
+    muted = speakers.MutedSpeakers()
+    did = muted.mute()
+    muted.restore()
+    if did:
+        volume = speakers._Volume()  # pylint: disable=protected-access
+        assert not volume.muted()
+        volume.release()

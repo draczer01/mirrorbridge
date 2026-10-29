@@ -39,6 +39,10 @@ CAST_MIRROR = "googlecast_mirror"
 AIRPLAY_CAST = "airplay_cast"
 ORDER = [AIRPLAY_MIRROR, CAST_MIRROR, AIRPLAY_CAST]  # lowest delay first, with no history
 MIRRORING = {AIRPLAY_MIRROR, CAST_MIRROR}
+# Ways whose session can say it is sending while the TV shows nothing: Google Cast mirroring
+# reached CASTING on Humberto's TCL with the screen black (2026-10-29). Their CASTING is counted,
+# but never makes them the way to try first.
+UNCONFIRMED = {CAST_MIRROR}
 FILE_NAME = "routes.json"
 CAST_PREFIX = "cast:"
 
@@ -60,7 +64,12 @@ class Screen:
 
     @property
     def name(self) -> str:
-        return self.airplay.name if self.airplay is not None else self.cast.name
+        if self.airplay is not None:
+            return self.airplay.name
+        name = self.cast.name
+        if _serial(name) or name == self.cast.host:  # a receiver with no name of its own (izzi's TV box)
+            return f"{self.cast.model or 'Google Cast'} ({self.cast.host})"
+        return name
 
     @property
     def host(self) -> str:
@@ -82,6 +91,11 @@ class Screen:
         if identifier == self.identifier:
             return True
         return self.cast is not None and identifier == CAST_PREFIX + (self.cast.identifier or self.cast.host)
+
+
+def _serial(name: str) -> bool:
+    """A name that is only a serial number, such as "1001B026D756D451"."""
+    return len(name) >= 12 and all(ch in "0123456789abcdefABCDEF-" for ch in name)
 
 
 def merge(devices: list["Device"], casts: list["CastDevice"]) -> list[Screen]:
@@ -136,11 +150,14 @@ class RouteHistory:
         tv = self.data.setdefault(identifier, {})
         return tv.setdefault(route, {"ok": 0, "failed": 0, "last": ""})
 
-    def worked(self, identifier: str, route: str) -> None:
+    def worked(self, identifier: str, route: str, confirmed: bool = False) -> None:
+        """A way that reached the TV; an UNCONFIRMED way becomes the one to try first only when
+        `confirmed` (the TV said it showed frames)."""
         entry = self._route(identifier, route)
         entry.update(ok=entry["ok"] + 1, last="ok", at=int(time.time()))
         entry.pop("error", None)
-        self.data[identifier]["worked"] = route
+        if route not in UNCONFIRMED or confirmed:
+            self.data[identifier]["worked"] = route
         self._save()
 
     def failed(self, identifier: str, route: str, error: str = "", lasting: bool = True) -> None:

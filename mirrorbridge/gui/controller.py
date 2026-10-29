@@ -16,7 +16,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Coroutine, Optional
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import QApplication, QInputDialog, QLineEdit, QMessageBox, QWidget
 
 from .. import airplay_patch, ffmpeg, googlecast, mirror, probe, routes, vdisplay
@@ -31,6 +31,7 @@ from .i18n import say, state_text, tr
 _LOGGER = logging.getLogger(__name__)
 
 LOG_FILE_NAME = "mirrorbridge.log"
+SHOWN_CHECK_SECONDS = 6  # into Google Cast mirroring, when the TV must have shown a frame
 
 
 class UiBridge(QObject):
@@ -133,6 +134,7 @@ class Controller(QObject):
         self.routes = routes.RouteHistory()  # which way worked with each TV
         # The big button's try: {"screen", "plan", "index", "reached"}, while it may still fall back
         self._attempt: Optional[dict] = None
+        self._then_next: Optional[dict] = None  # "Not on the TV? Try another way": the try to go on with
         self.scanning = False
         self.last_scan = 0.0
         self.encoders: list[str] = []
@@ -531,10 +533,11 @@ class Controller(QObject):
         def ended(_=None):
             self._attempt = None
             finished()
+            self._go_on()
 
         def failed(exc):
             finished()
-            if self._fall_back(exc):
+            if self._go_on() or self._fall_back(exc):
                 return
             if isinstance(exc, concurrent.futures.CancelledError):
                 return
@@ -660,7 +663,61 @@ class Controller(QObject):
         attempt = self._attempt
         if attempt is not None and not attempt["reached"]:
             attempt["reached"] = True
-            self.routes.worked(attempt["screen"], attempt["plan"][attempt["index"]])
+            route = attempt["plan"][attempt["index"]]
+            if route in routes.UNCONFIRMED:  # sending is no proof: ask the TV in a few seconds
+                session = self.session
+                QTimer.singleShot(int(SHOWN_CHECK_SECONDS * 1000), lambda: self._check_shown(session, attempt))
+            else:
+                self.routes.worked(attempt["screen"], route)
+
+    def _check_shown(self, session, attempt: dict) -> None:
+        """A few seconds into Google Cast mirroring: the TV's own count of frames it showed
+        confirms the way, and none means a black TV, so the next way starts."""
+        if session is None or session is not self.session or attempt is not self._attempt:
+            return  # it has ended, or another way runs
+        if not getattr(session, "frames_reported", False):
+            return  # the TV keeps no event log: unknown, the way stays where it is
+        shown = getattr(session, "frames_shown", 0)
+        route = attempt["plan"][attempt["index"]]
+        if shown and getattr(session, "codec", "vp8") == "vp8":  # with H.264 the TCL counts frames it never shows
+            self.routes.worked(attempt["screen"], route, confirmed=True)
+        elif not shown:
+            _LOGGER.info("%s: the TV showed no frame in %s s", route, SHOWN_CHECK_SECONDS)
+            if self.can_try_another_way():
+                self.try_another_way()
+            else:
+                self.routes.failed(attempt["screen"], route, "the TV showed no frame", lasting=True)
+
+    def can_try_another_way(self) -> bool:
+        """While the big button's way runs, whether there is another way to try on this TV."""
+        attempt = self._attempt
+        return self.is_active and attempt is not None and attempt["index"] + 1 < len(attempt["plan"])
+
+    def try_another_way(self, *_args) -> None:
+        """The person says the TV shows nothing (a session can send while the TV stays black): this
+        way goes last for this TV, the session stops, and the next way starts."""
+        if not self.can_try_another_way():
+            return
+        attempt, self._attempt = self._attempt, None
+        route = attempt["plan"][attempt["index"]]
+        self.routes.failed(attempt["screen"], route, "no picture on the TV, said the person", lasting=True)
+        _LOGGER.info("%s: no picture on the TV; trying the next way", route)
+        attempt["index"] += 1
+        attempt["reached"] = False
+        self._then_next = attempt
+        if self.session:
+            self.runner.submit(self.session.stop())
+
+    def _go_on(self) -> bool:
+        """After a session that try_another_way stopped: start the next way."""
+        attempt, self._then_next = self._then_next, None
+        screen = self.selected_screen
+        if attempt is None or screen is None or not screen.answers_to(attempt["screen"]):
+            return False
+        self._attempt = attempt
+        route = attempt["plan"][attempt["index"]]
+        self.bridge.call(lambda: self._start_route(screen, route))
+        return True
 
     def _will_fall_back(self, exc: Any) -> bool:
         """Whether _fall_back will start another way after `exc` (what a session failed with)."""
@@ -747,10 +804,11 @@ class Controller(QObject):
         def ended(_=None):
             self._attempt = None
             finished()
+            self._go_on()
 
         def failed(exc):
             finished()
-            if self._fall_back(exc):
+            if self._go_on() or self._fall_back(exc):
                 return
             if isinstance(exc, concurrent.futures.CancelledError):
                 return
@@ -770,7 +828,7 @@ class Controller(QObject):
             self.notify.emit(tr("mirror_stopped"), say(message) if isinstance(message, Text) else "", False)
 
     def stop_cast(self, *_args) -> None:
-        self._attempt = None  # stopped by the person: no other way is tried
+        self._attempt = self._then_next = None  # stopped by the person: no other way is tried
         if self.session:
             self.runner.submit(self.session.stop())
         if self.file_future:
