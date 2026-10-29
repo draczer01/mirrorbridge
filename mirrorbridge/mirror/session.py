@@ -114,7 +114,7 @@ def _env_slew_ns() -> Optional[int]:
 from .clock import NS, TIMING_PORTS, NtpResponder, PtsMapper, bind_udp, now_ns, to_ntp
 from .control import FEATURE_1080P, ControlChannel, ReceiverInfo, Target, open_event_channel
 from .datachannel import HEARTBEAT_IDLE_ONLY, DataChannel
-from .errors import MirrorError, answer_of, data_closed, data_refused, needs_fairplay, no_timing, refused
+from .errors import MirrorError, answer_of, data_closed, data_refused, no_timing, refused
 from .flv import CONFIG, FRAME
 from .h264 import TRAILERS, avcc_record, frame_nals, is_idr, join_avcc, parse_avcc, parse_sps, split_avcc
 from .negotiation import NTP, PTP, Established, Feedback, Negotiator
@@ -486,8 +486,6 @@ class MirrorSession:
     async def _start(self) -> None:
         loop = asyncio.get_running_loop()
         s = self.settings
-        if self.target.needs_fairplay:
-            raise needs_fairplay(self.target.name)
         self._stopping = self._timing_probed = self._timing_quiet = self._dropped_at_once = False
         self._first_sent_ns = None
         self._reset_restarts()

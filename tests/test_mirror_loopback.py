@@ -4,6 +4,7 @@ decrypted and decoded by FFmpeg, the probe, and the ways a TV says no, is slow, 
 
 import asyncio
 import dataclasses
+import hashlib
 import logging
 import statistics
 import subprocess
@@ -13,10 +14,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from fake_mirror_tv import CREDENTIALS, PIN, FakeMirrorTV
+from fake_mirror_tv import APPLE_TV, CREDENTIALS, PIN, FakeMirrorTV
 from mirrorbridge import ffmpeg
 from mirrorbridge.config import Settings
 from mirrorbridge.mirror import TEST_PATTERN, MirrorError, MirrorSession, capture, probe_mirroring, profiles
+from mirrorbridge.mirror import negotiation
 from mirrorbridge.mirror import session as mirror_session
 from mirrorbridge.mirror.clock import NS, from_ntp
 from mirrorbridge.mirror.control import USER_AGENT, ControlChannel, Target, open_event_channel
@@ -52,6 +54,13 @@ def app_data(tmp_path, monkeypatch):
 @pytest.fixture
 async def tv():
     tv = await FakeMirrorTV().start()
+    yield tv
+    await tv.stop()
+
+
+@pytest.fixture
+async def apple_tv():
+    tv = await FakeMirrorTV(APPLE_TV).start()
     yield tv
     await tv.stop()
 
@@ -143,6 +152,65 @@ async def test_not_paired(tv):
     assert caught.value.args[0].key == "mirror_not_paired" and caught.value.step == "pair-verify"
     await asyncio.sleep(0.05)
     assert all(conn.closed for conn in tv.connections)
+
+
+async def test_a_tv_of_another_brand_gets_no_fairplay(tv):
+    negotiator = await _negotiator(tv)
+    try:
+        assert negotiator.channel.fairplay is None and "fp-setup" not in negotiator.steps
+    finally:
+        negotiator.close()
+    assert tv.fp_requests == []
+
+
+async def test_an_apple_tv_gets_fairplay_right_after_pair_verify(apple_tv):
+    negotiator = await _negotiator(apple_tv)
+    try:
+        keys = negotiator.channel.fairplay
+        assert keys is not None and negotiator.steps["fp-setup"] == "ok"
+        assert len(keys.raw_key) == len(keys.iv) == len(keys.shk) == 16 and len(keys.ekey) == 72
+        secret = negotiator.channel.shared_secret
+        assert secret == apple_tv.connections[0].handler.shared_key
+        assert keys.shk == hashlib.sha512(keys.raw_key + secret).digest()[:16]
+    finally:
+        negotiator.close()
+    assert [(et, len(body)) for et, body in apple_tv.fp_requests] == [("32", 16), ("32", 164)]
+    assert apple_tv.fp_errors == []
+    assert [method for method, _, _ in apple_tv.requests][:2] == ["POST", "POST"]
+
+
+async def test_an_apple_tv_that_does_not_take_fairplay_says_so(apple_tv):
+    apple_tv.reconfigure(fp_status=404)
+    negotiator = Negotiator(apple_tv.target(), timing_port=7880, audio_port=7881)
+    with pytest.raises(MirrorError) as caught:
+        await negotiator.connect()
+    negotiator.close()
+    assert caught.value.args[0].key == "mirror_fairplay_failed" and caught.value.code == 404
+    # Tried with the saved pairing, then once more with transient pairing.
+    assert caught.value.steps["fp-setup m1"] == "HTTP 404" and caught.value.steps["pair-verify"] == "transient"
+    assert apple_tv.codes("SETUP") == [] and apple_tv.transient_pairings == 1
+
+
+async def test_an_apple_tv_that_turns_down_the_saved_pairing_gets_transient_pairing(apple_tv, tmp_path):
+    ff = _ffmpeg()
+    apple_tv.reconfigure(fp_refuse_saved=True)
+    session = MirrorSession(apple_tv.target(), SETTINGS, lambda s, m: None, source=TEST_PATTERN, seconds=1)
+    await asyncio.wait_for(session.run(), 60)
+    report = session.report
+    assert report.steps["pair-verify"] == "transient" and report.steps["fp-setup"] == "ok"
+    assert apple_tv.transient_pairings == 1 and apple_tv.fp_errors == []
+    assert report.established.fallbacks[0].startswith("fp-setup m1 failed with the saved pairing")
+    (video,) = apple_tv.videos
+    assert video.errors == [] and len(video.frames) == report.frames_sent >= 20
+    frames, _ = _decode(ff, bytes(video.annexb), tmp_path)
+    assert frames == len(video.frames)
+
+
+async def test_a_tv_of_another_brand_gets_no_transient_pairing(tv):
+    tv.reconfigure(m4_error=True)
+    with pytest.raises(MirrorError) as caught:
+        await Negotiator(tv.target(), timing_port=7880, audio_port=7881).connect()
+    assert caught.value.args[0].key == "mirror_verify_refused" and tv.transient_pairings == 0
 
 
 async def test_a_tv_that_is_not_there():
@@ -402,6 +470,42 @@ async def test_two_seconds_of_test_pattern_reach_the_tv_and_decode(tv, tmp_path,
     saved = profiles.load("fake-tv")
     assert saved is not None and saved.ordering == MEDIA_FIRST and saved.trailer == TRAILER_FIXED
     assert (app_data / "mirroring.json").is_file()
+
+
+async def test_an_apple_tv_gets_the_picture_with_fairplay(apple_tv, tmp_path):
+    ff = _ffmpeg()
+    states = []
+    session = MirrorSession(apple_tv.target(), SETTINGS, lambda s, m: states.append((s, str(m))),
+                            source=TEST_PATTERN, seconds=2)
+    await asyncio.wait_for(session.run(), 60)
+    report = session.report
+    assert states[-1] == (State.STOPPED, "Mirrored for 2 s, as asked")
+    assert report.steps["fp-setup"] == "ok" and report.steps["setup control-first"] == 200
+    assert apple_tv.fp_errors == [] and apple_tv.orderings == [CONTROL_FIRST]
+    session_setup = apple_tv.setups[0]
+    assert "ekey" not in session_setup and "eiv" not in session_setup  # not on an encrypted connection
+    (stream,) = apple_tv.video_streams
+    assert len(stream["shk"]) == len(stream["shiv"]) == 16
+    (video,) = apple_tv.videos
+    assert video.errors == [] and len(video.frames) == report.frames_sent >= 40
+    frames, size = _decode(ff, bytes(video.annexb), tmp_path)
+    assert frames == len(video.frames) and size == "640x360"
+
+
+async def test_the_fairplay_root_switch_sends_an_ekey_the_apple_tv_opens(apple_tv, monkeypatch):
+    monkeypatch.setattr(negotiation, "FAIRPLAY_ROOT", True)
+    negotiator = await _negotiator(apple_tv)
+    try:
+        est = await negotiator.establish(Plan(ordering=CONTROL_FIRST))
+        await negotiator.teardown(est.uri)
+    finally:
+        negotiator.close()
+    session_setup = apple_tv.setups[0]
+    assert session_setup["et"] == 32 and len(session_setup["eiv"]) == 16
+    (raw,) = apple_tv.fp_raw_keys
+    (stream,) = apple_tv.video_streams
+    assert stream["shk"] == hashlib.sha512(raw + apple_tv.fp_shared).digest()[:16]
+    assert stream["shiv"] == session_setup["eiv"]
 
 
 async def test_desktop_capture_is_scaled_to_the_tv(tv):
@@ -1079,12 +1183,11 @@ async def test_probe_stops_at_a_dropped_pairing(tv):
     assert result.conclusion().key == "mirror_verify_refused" and tv.codes("SETUP") == []
 
 
-async def test_probe_of_an_apple_tv_sends_nothing(tv):
-    target = tv.target()
-    target.features = 0x4A7FDFD5 | (0xBC157FDE << 32)
-    result = await probe_mirroring(target, SETTINGS)
-    assert result.fairplay and result.conclusion().key == "mirror_fairplay"
-    assert tv.connections == [] and tv.requests == []
+async def test_probe_of_an_apple_tv_does_fairplay_and_works(apple_tv):
+    _ffmpeg()
+    result = await asyncio.wait_for(probe_mirroring(apple_tv.target(), SETTINGS), 120)
+    assert result.fairplay and result.worked and result.conclusion().key == "mirror_probe_works"
+    assert apple_tv.fp_errors == [] and len(apple_tv.fp_requests) >= 2
 
 
 # -- the command line ---------------------------------------------------------------------------------------

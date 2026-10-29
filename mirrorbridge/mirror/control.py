@@ -21,6 +21,7 @@ session is set up on a new connection rather than on that one (negotiation.py).
 from __future__ import annotations
 
 import asyncio
+import binascii
 import hashlib
 import logging
 import os
@@ -31,7 +32,7 @@ from typing import Any, Mapping, Optional
 
 from cryptography.exceptions import InvalidTag
 from pyatv import exceptions
-from pyatv.auth.hap_pairing import AuthenticationType, HapCredentials, parse_credentials
+from pyatv.auth.hap_pairing import TRANSIENT_CREDENTIALS, AuthenticationType, HapCredentials, parse_credentials
 from pyatv.auth.hap_session import HAPSession
 from pyatv.auth.hap_srp import SRPAuthHandler
 from pyatv.auth.hap_tlv8 import ErrorCode, TlvValue, read_tlv, write_tlv
@@ -40,8 +41,9 @@ from pyatv.protocols.airplay.channels import EventChannel
 from pyatv.support.http import HttpConnection, HttpResponse, http_connect, parse_request
 from pyatv.support.rtsp import BPLIST_CONTENT_TYPE
 
+from .. import fairplay
 from ..text import Text
-from .errors import ChannelClosed, MirrorError, NoAnswer, answer_of
+from .errors import ChannelClosed, MirrorError, NoAnswer, answer_of, fairplay_failed
 from .packets import KeyDeriver
 
 _LOGGER = logging.getLogger(__name__)
@@ -50,6 +52,7 @@ CONNECT_SECONDS = 10
 VERIFY_SECONDS = 15
 REQUEST_SECONDS = 10
 INFO_SECONDS = 10
+FP_SETUP_SECONDS = 10
 
 # Who is sending: the version of AirPlay MirrorBridge's requests say they come from, in the
 # User-Agent of every request on the control connection and as the SETUP's sourceVersion, the
@@ -119,8 +122,18 @@ class Target:
 
     @property
     def needs_fairplay(self) -> bool:
-        """Apple TVs and Macs (bit 14): their mirroring needs FairPlay, which MirrorBridge lacks."""
+        """Apple TVs and Macs (bit 14): their mirroring needs the FairPlay handshake first."""
         return self.has_feature(FEATURE_FAIRPLAY)
+
+
+@dataclass
+class FairPlayKeys:
+    """What the FairPlay handshake on a connection gave (ControlChannel.fair_play_setup)."""
+
+    raw_key: bytes  # the 16-byte key the ekey wraps
+    iv: bytes  # 16 random bytes: the SETUP's eiv and the video stream's shiv
+    ekey: bytes  # the 72-byte wrapped key
+    shk: bytes  # the video stream's shk: the raw key mixed with the pair-verify secret
 
 
 @dataclass
@@ -241,7 +254,7 @@ def _pair_verify_refused(target: Target, reason: str) -> MirrorError:
     ), step="pair-verify", steps={"pair-verify": reason})
 
 
-async def _verify_hap(conn: HttpConnection, credentials: HapCredentials, target: Target) -> KeyDeriver:
+async def _verify_hap(conn: HttpConnection, credentials: HapCredentials, target: Target) -> tuple[KeyDeriver, bytes]:
     """Pair-verify (M1-M4) with a saved HomeKit pairing; the TV's M4 status is checked."""
     srp = SRPAuthHandler()
     _, public = srp.initialize()
@@ -273,13 +286,15 @@ async def _verify_hap(conn: HttpConnection, credentials: HapCredentials, target:
         except ValueError:
             name = "unknown"
         raise _pair_verify_refused(target, f"M4 error {code} ({name})")
-    return srp.verify2
+    return srp.verify2, srp._shared  # pylint: disable=protected-access
 
 
-async def pair_verify(conn: HttpConnection, target: Target) -> KeyDeriver:
-    """Pair-verify on `conn` with the target's saved pairing; returns the key derivation."""
+async def pair_verify(conn: HttpConnection, target: Target, transient: bool = False) -> tuple[KeyDeriver, bytes]:
+    """Pair-verify on `conn` with the target's saved pairing (or transient pairing, which needs
+    none); returns the key derivation and the secret it derives from (FairPlay mixes it into the
+    video's key)."""
     try:
-        credentials = parse_credentials(target.credentials)
+        credentials = TRANSIENT_CREDENTIALS if transient else parse_credentials(target.credentials)
     except (ValueError, exceptions.InvalidCredentialsError) as ex:
         raise _pair_verify_refused(target, "unreadable saved pairing") from ex
     if credentials.type == AuthenticationType.HAP:
@@ -292,7 +307,7 @@ async def pair_verify(conn: HttpConnection, target: Target) -> KeyDeriver:
             await procedure.verify_credentials()
         except (KeyError, InvalidTag, exceptions.InvalidResponseError) as ex:
             raise _pair_verify_refused(target, f"transient pairing: {type(ex).__name__}") from ex
-        return procedure.encryption_keys
+        return procedure.encryption_keys, binascii.unhexlify(procedure.srp.shared_key)
     raise MirrorError(Text(
         "mirror_not_paired", "MirrorBridge is not paired with {device}. Use Device > Pair with PIN, then try again.",
         device=target.name,
@@ -303,10 +318,13 @@ class ControlChannel:
     """The RTSP connection, encrypted after pair-verify. One request at a time: a TV is asked
     the next thing only once it has answered the last (/feedback included)."""
 
-    def __init__(self, target: Target, conn: HttpConnection, derive: KeyDeriver) -> None:
+    def __init__(self, target: Target, conn: HttpConnection, derive: KeyDeriver,
+                 shared_secret: Optional[bytes] = None) -> None:
         self.target = target
         self.conn = conn
         self.derive = derive
+        self.shared_secret = shared_secret  # pair-verify's secret, which `derive` derives from
+        self.fairplay: Optional[FairPlayKeys] = None  # after fair_play_setup()
         self.cseq = 0
         self.out_of_step = False  # a late answer may still come (see the module's docstring)
         self.dacp_id = f"{int.from_bytes(hashlib.sha256(target.address.encode()).digest()[:8], 'big'):X}"
@@ -317,14 +335,15 @@ class ControlChannel:
 
     @classmethod
     async def open(cls, target: Target, connect_seconds: float = CONNECT_SECONDS,
-                   verify_seconds: float = VERIFY_SECONDS) -> "ControlChannel":
-        """Connect to the TV and pair-verify; raises MirrorError with the reason."""
+                   verify_seconds: float = VERIFY_SECONDS, transient: bool = False) -> "ControlChannel":
+        """Connect to the TV and pair-verify (with transient pairing instead of the saved one if
+        `transient`); raises MirrorError with the reason."""
         try:
             conn = await asyncio.wait_for(http_connect(target.address, target.port), connect_seconds)
         except (OSError, asyncio.TimeoutError) as ex:
             raise connect_failed(target, answer_of(ex)) from ex
         try:
-            derive = await asyncio.wait_for(pair_verify(conn, target), verify_seconds)
+            derive, shared_secret = await asyncio.wait_for(pair_verify(conn, target, transient), verify_seconds)
         except MirrorError:
             conn.close()
             raise
@@ -349,7 +368,7 @@ class ControlChannel:
         conn.send_processor = session.encrypt
         _LOGGER.info("Pair-verify with %s (%s:%s) done; the control connection is encrypted",
                      target.name, target.address, target.port)
-        return cls(target, conn, derive)
+        return cls(target, conn, derive, shared_secret)
 
     @property
     def closed(self) -> bool:
@@ -407,6 +426,38 @@ class ControlChannel:
                               answered, method, uri, cseq)
                 self.out_of_step = True
             return resp
+
+    async def fair_play_setup(self, timeout: float = FP_SETUP_SECONDS) -> FairPlayKeys:
+        """FairPlay SAP on this connection (POST /fp-setup twice), which an Apple TV or a Mac
+        wants before a mirroring SETUP; raises MirrorError if the receiver does not go along."""
+        session = fairplay.FairPlaySession()
+        step = "fp-setup m1"
+        try:
+            m2 = await self._fp_post(step, session.message1(), timeout)
+            step = "fp-setup m3"
+            m4 = await self._fp_post(step, session.exchange_m3(m2), timeout)
+            session.confirm_m4(m4)
+        except fairplay.FairPlayError as ex:
+            _LOGGER.info("FairPlay with %s failed at %s: %s", self.target.name, step, ex)
+            raise fairplay_failed(self.target.name, step, str(ex)) from ex
+        raw_key, iv = os.urandom(16), os.urandom(16)
+        keys = FairPlayKeys(raw_key, iv, session.wrap_key(raw_key), fairplay.stream_key(raw_key, self.shared_secret))
+        self.fairplay = keys
+        _LOGGER.info("FairPlay with %s done (mode %d)", self.target.name, session.m3[12])
+        return keys
+
+    async def _fp_post(self, step: str, message: bytes, timeout: float) -> bytes:
+        try:
+            resp = await self.request("POST", "/fp-setup", body=message, headers={"X-Apple-ET": 32},
+                                      content_type="application/octet-stream", timeout=timeout)
+        except (NoAnswer, ChannelClosed) as ex:
+            raise fairplay_failed(self.target.name, step, answer_of(ex)) from ex
+        if resp.code != 200:
+            raise fairplay_failed(self.target.name, step, f"HTTP {resp.code}", code=resp.code)
+        body = resp.body
+        if isinstance(body, str):  # pyatv reads a body without a binary Content-Type as text
+            body = body.encode("utf-8")
+        return bytes(body or b"")
 
     async def info(self, timeout: Optional[float] = None) -> ReceiverInfo:
         """GET /info over the encrypted connection (within INFO_SECONDS unless `timeout` says

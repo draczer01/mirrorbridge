@@ -348,22 +348,27 @@ def test_a_video_the_tv_ended_early_says_so():
 # -- the fourth test: screen mirroring ---------------------------------------------------------------
 
 
-async def test_a_tv_that_needs_fairplay_skips_the_mirroring_test(mirror_tv):
+async def test_an_unpaired_apple_tv_skips_the_mirroring_test(mirror_tv):
     watched = []
-    result = await probe._mirroring(_device(mirror_tv, features=APPLE_TV_FEATURES, is_apple=True), Settings(), 2,
-                                    watched.append)
-    assert result.verdict() == ("skipped: the TV needs FairPlay for screen mirroring, as Apple TVs and Macs do, which "
-                                "MirrorBridge does not have yet")
+    device = _device(mirror_tv, features=APPLE_TV_FEATURES, is_apple=True)
+    device.airplay.credentials = None
+    result = await probe._mirroring(device, Settings(), 2, watched.append)
+    assert result.verdict() == ("skipped: MirrorBridge is not paired with this TV, and screen mirroring needs it: use "
+                                "Device > Pair with PIN first")
     assert not result.worked and result.mirror is None and mirror_tv.connections == []  # nothing was sent
     assert watched == []  # nothing to look for on the TV
     report = _report(REFUSED, PLAYED, FETCHED, result)
-    assert report.lines()[3].startswith("4. Screen mirroring with a moving test pattern, from this PC: skipped: the TV "
-                                        "needs FairPlay")
+    assert report.lines()[3].startswith("4. Screen mirroring with a moving test pattern, from this PC: skipped: "
+                                        "MirrorBridge is not paired")
     assert report.conclusion() == "Sala familiar should play your casts: it fetched MirrorBridge's video."
     i18n.set_language("es")
-    assert i18n.say(report.lines()[3]) == (
-        "4. La duplicación de pantalla con una imagen de prueba en movimiento, desde este equipo: omitida: la TV "
-        "necesita FairPlay para duplicar la pantalla, como los Apple TV y los Mac, y MirrorBridge todavía no lo tiene")
+    assert i18n.say(report.lines()[3]).startswith(
+        "4. La duplicación de pantalla con una imagen de prueba en movimiento, desde este equipo: omitida: "
+        "MirrorBridge no está emparejado con esta TV")
+
+
+def test_an_apple_tv_is_given_the_mirroring_test():
+    assert probe.mirroring_skipped(_device(features=APPLE_TV_FEATURES, is_apple=True, airplay=PAIRED)) is None
 
 
 async def test_a_receiver_that_does_not_offer_screen_mirroring_skips_the_test(mirror_tv):
@@ -629,8 +634,8 @@ def test_the_command_line_says_when_the_mirroring_test_is_skipped(monkeypatch, c
         skipped = probe.TestResult(probe.MIRROR, skipped=probe.mirroring_skipped(device))
         return _report(REFUSED, PLAYED, FETCHED, skipped)
 
-    apple_tv = _device(features=APPLE_TV_FEATURES, is_apple=True, airplay=PAIRED)
-    monkeypatch.setattr(cli, "DeviceManager", lambda _loop: FakeManager(devices=[apple_tv]))
+    unpaired = _device(airplay=SimpleNamespace(port=7000, credentials=None, properties={}))
+    monkeypatch.setattr(cli, "DeviceManager", lambda _loop: FakeManager(devices=[unpaired]))
     monkeypatch.setattr(probe, "run", run)
     monkeypatch.setattr(Settings, "load", classmethod(lambda cls: Settings()))
     pyatv_level = logging.getLogger("pyatv").level
@@ -640,9 +645,8 @@ def test_the_command_line_says_when_the_mirroring_test_is_skipped(monkeypatch, c
         logging.getLogger("pyatv").setLevel(pyatv_level)
     out = capsys.readouterr().out
     intro = next(line for line in out.splitlines() if line.startswith("Testing Sala familiar."))
-    assert intro.endswith("This takes about two minutes. The fourth test, screen mirroring, is skipped: the TV needs "
-                          "FairPlay for screen mirroring, as Apple TVs and Macs do, which MirrorBridge does not have "
-                          "yet.")
+    assert intro.endswith("This takes about two minutes. The fourth test, screen mirroring, is skipped: MirrorBridge "
+                          "is not paired with this TV, and screen mirroring needs it: use pair -d \"Sala familiar\" first.")
     assert "moving test pattern" not in intro and "Watch the TV now" not in out
 
 
@@ -773,7 +777,7 @@ def test_test_this_tv_does_not_promise_a_moving_pattern_it_will_not_send(control
     from PySide6.QtWidgets import QApplication, QMessageBox
 
     controller.set_language("es")
-    device = _device(features=APPLE_TV_FEATURES, is_apple=True, airplay=PAIRED)
+    device = _device(features=TCL_FEATURES & ~(1 << 7), airplay=PAIRED)  # no bit 7: no screen mirroring
     controller.devices = [device]
     controller.settings.last_device_id = device.identifier
     intro = []
@@ -787,8 +791,8 @@ def test_test_this_tv_does_not_promise_a_moving_pattern_it_will_not_send(control
     controller.test_tv()
     assert intro and intro[0].startswith("MirrorBridge probará tres formas de enviar un video a Sala familiar, una "
                                          "tras otra, durante unos dos minutos en total.")
-    assert ("La cuarta prueba, la duplicación de pantalla, se omite: la TV necesita FairPlay para duplicar la "
-            "pantalla, como los Apple TV y los Mac, y MirrorBridge todavía no lo tiene.") in intro[0]
+    assert ("La cuarta prueba, la duplicación de pantalla, se omite: la TV no indica que admita la duplicación de "
+            "pantalla.") in intro[0]
     assert "en movimiento" not in intro[0] and controller.probe_future is None
 
 

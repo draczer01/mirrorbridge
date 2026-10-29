@@ -31,17 +31,11 @@ _STRINGS: dict[str, dict[str, str]] = {
     "status_mirroring": {"en": "Mirroring to {device}", "es": "Duplicando la pantalla en {device}"},
     "mirror_hint": {
         "en": "Your screen on the TV a fraction of a second behind, instead of a cast's few seconds: the display, "
-              "window or extended screen chosen under What to cast. For paired AirPlay 2 TVs of other brands (TCL, "
-              "Roku, Samsung, LG…); no sound yet.",
+              "window or extended screen chosen under What to cast. For paired AirPlay 2 TVs (TCL, Roku, Samsung, "
+              "LG…) and Apple TVs; no sound yet.",
         "es": "Tu pantalla en la TV con una fracción de segundo de retraso, en lugar de los segundos de una "
               "transmisión: la pantalla, la ventana o la pantalla extendida que elegiste en Qué transmitir. Para TV "
-              "AirPlay 2 de otras marcas ya emparejadas (TCL, Roku, Samsung, LG…); todavía sin sonido.",
-    },
-    "mirror_apple_tv": {
-        "en": "Screen mirroring to Apple TVs and Macs is coming in a later version. For now, cast to them with "
-              "Start casting.",
-        "es": "La duplicación de pantalla en Apple TV y Mac llegará en una versión futura. Por ahora, transmite a "
-              "ellos con Transmitir.",
+              "AirPlay 2 ya emparejadas (TCL, Roku, Samsung, LG…) y Apple TV; todavía sin sonido.",
     },
     "mirror_pair_first": {
         "en": "Pair with this TV first: {menu_pair}.",
@@ -469,6 +463,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "{device} necesita FairPlay para duplicar la pantalla (es un Apple TV o un Mac), y MirrorBridge "
               "todavía no lo tiene. Transmite como siempre en su lugar.",
     },
+    "mirror_fairplay_failed": {
+        "en": "{device} did not complete the FairPlay handshake that screen mirroring to an Apple TV needs "
+              "({step}: {answer}). Please report this TV, with mirrorbridge.log; casting still works.",
+        "es": "{device} no completó el saludo FairPlay que necesita la duplicación de pantalla en un Apple TV "
+              "({step}: {answer}). Reporta esta TV con mirrorbridge.log; transmitir sigue funcionando.",
+    },
     "mirror_no_timing": {
         "en": "The TV never asked MirrorBridge for the time (UDP port {port}), so it cannot show the picture. "
               "Allow MirrorBridge, or inbound UDP ports {ports}, in Windows Firewall on private networks, then "
@@ -790,12 +790,6 @@ _STRINGS: dict[str, dict[str, str]] = {
               "duplicada desde este equipo.",
     },
     "probe_skipped": {"en": "skipped: {why}", "es": "omitida: {why}"},
-    "probe_mirror_fairplay": {
-        "en": "the TV needs FairPlay for screen mirroring, as Apple TVs and Macs do, which MirrorBridge does not "
-              "have yet",
-        "es": "la TV necesita FairPlay para duplicar la pantalla, como los Apple TV y los Mac, y MirrorBridge "
-              "todavía no lo tiene",
-    },
     "probe_mirror_unsupported": {
         "en": "the TV does not say that it takes screen mirroring",
         "es": "la TV no indica que admita la duplicación de pantalla",
@@ -1001,10 +995,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "La primera vez, la TV muestra un código de 4 números: escríbelo cuando MirrorBridge lo pida.",
     },
     "ui_hint_apple": {
-        "en": "On an Apple TV your screen appears a few seconds behind, with sound. Instant mirroring for Apple TV "
-              "is coming in a later version.",
-        "es": "En una Apple TV tu pantalla aparece con unos segundos de retraso, con sonido. La duplicación al "
-              "instante para Apple TV llegará en una versión futura.",
+        "en": "On this Apple TV your screen appears a few seconds behind, with sound, because instant mirroring "
+              "did not work on it last time.",
+        "es": "En esta Apple TV tu pantalla aparece con unos segundos de retraso, con sonido, porque la "
+              "duplicación al instante no funcionó en ella la última vez.",
     },
     "ui_hint_cast": {
         "en": "Your screen appears on this TV a few seconds behind, with sound.",

@@ -286,6 +286,10 @@ def test_the_notices_name_every_kind_of_thing_inside_the_exe(fake_build, tmp_pat
     assert "https://www.gyan.dev/ffmpeg/builds/" in ffmpeg and "libx264" in ffmpeg
     assert "licenses/FFmpeg-7.1/GPL-3.0.txt" in ffmpeg
 
+    fairplay = _section(text, "FairPlay SAP, ported from doubletake (LGPL-3.0)")
+    assert "https://github.com/omarroth/doubletake" in fairplay and "licenses/doubletake-fairplay/" in fairplay
+    assert "mirrorbridge/fairplay" in fairplay
+
     python = _section(text, "Python (CPython)")
     assert "CPython 3.12.10 Licence: PSF-2.0" in python
     assert "libmpdec in _decimal" in python and "https://docs.python.org/3.12/license.html" in python
@@ -321,8 +325,11 @@ def test_the_licence_texts_are_copied_next_to_the_notices(fake_build, tmp_path):
     assert (licenses / "Qtish-6.9.3" / "LGPL-3.0.txt").read_bytes() == (gnu / "LGPL-3.0.txt").read_bytes()
     assert (licenses / "Qtish-6.9.3" / "GPL-3.0.txt").read_bytes() == (gnu / "GPL-3.0.txt").read_bytes()
     assert (licenses / "FFmpeg-7.1" / "GPL-3.0.txt").read_bytes() == (gnu / "GPL-3.0.txt").read_bytes()
+    # The FairPlay port is LGPL-3.0 (doubletake's licence and the GPL it builds on).
+    assert "GNU LESSER GENERAL PUBLIC LICENSE" in (licenses / "doubletake-fairplay" / "LICENSE").read_text()
+    assert "GNU GENERAL PUBLIC LICENSE" in (licenses / "doubletake-fairplay" / "COPYING.GPL").read_text()
     assert sorted(p.name for p in licenses.iterdir()) == [
-        "CPython-3.12.10", "FFmpeg-7.1", "Qtish-6.9.3", "goodlib-1.2.0", "pyinstaller-6.22.3"]
+        "CPython-3.12.10", "FFmpeg-7.1", "Qtish-6.9.3", "doubletake-fairplay", "goodlib-1.2.0", "pyinstaller-6.22.3"]
 
 
 def test_the_vendored_gnu_texts_are_the_fsf_ones():

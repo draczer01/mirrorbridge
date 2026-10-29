@@ -7,6 +7,11 @@ NTP requests to the sender's timing port, RECORD, /feedback, TEARDOWN, and a vid
 whose frames it decrypts and turns back into an H.264 stream FFmpeg can decode. Its TvProfile
 also makes it slow, forgetful or stubborn in the ways real TVs can be.
 
+An Apple TV (TvProfile.fairplay) answers POST /fp-setup as pyatv's receiver does (one of the
+four replies UxPlay's playfair gives, then m3's last 20 bytes back), checks m3 with
+mirrorbridge.fairplay the way a receiver can, and takes no session SETUP on a connection without
+the handshake. An ekey in the SETUP is unwrapped, so that a test can check the video's shk.
+
 Under PTP timing it answers SETUP as Apple's SDK for receivers does (a timingPeerInfo without a
 ClockID, and no NTP), takes SETPEERS with the SDK's answers, and then starts a PTP clock of the
 kind TvProfile.ptp names (fake_ptp.py) on the ports ptp_ports() gives.
@@ -38,6 +43,7 @@ from pyatv.support.chacha20 import Chacha20Cipher8byteNonce
 from pyatv.support.http import BasicHttpServer, HttpRequest, HttpResponse, http_server, parse_response
 
 from fake_ptp import FakePtp
+from mirrorbridge.fairplay import core as fairplay
 from mirrorbridge.mirror.control import Target
 
 _LOGGER = logging.getLogger(__name__)
@@ -87,9 +93,15 @@ class TvProfile:
     setpeers_status: int = 200  # what a SETPEERS the SDK would take is answered with (400: SetPeers failed)
     ptp_video_status: Optional[int] = None  # the video stream's SETUP in a PTP session is answered with this
     ptp_info: Optional[dict] = None  # GET /info's PTPInfo
+    fairplay: bool = False  # an Apple TV: no session SETUP on a connection without POST /fp-setup
+    fp_status: int = 200  # what POST /fp-setup is answered with
+    fp_refuse_saved: bool = False  # POST /fp-setup after pair-verify with a saved pairing: 403 (transient: 200)
 
 
 TCL = TvProfile()
+# An Apple TV 4K (tvOS 17): FairPlay (bit 14), and it takes the control-first SETUP.
+APPLE_TV = TvProfile(name="Apple TV", model="AppleTV11,1", features=0x4A7FDFD5 | (0xBC157FDE << 32),
+                     srcvers="775.3.1", refuse=(), audio_first=False, fairplay=True)
 
 
 @dataclass
@@ -197,6 +209,10 @@ class _Handler(AirPlayServerAuth):
         self.tasks: list[asyncio.Task] = []
         self.servers: list[asyncio.AbstractServer] = []
         self.ntp: Optional[_NtpClient] = None
+        self.fp_m3: Optional[bytes] = None  # this connection's FairPlay m3, once checked
+        self.fp_sap = b""  # the receiver SAP its m2 carried
+        self.fp_mode = -1  # and the mode it chose
+        self.transient = False  # paired the transient way (X-Apple-HKP 4), not pair-verified
         self.add_route("SETUP", ".*", self.handle_setup)
         self.add_route("RECORD", ".*", self.handle_record)
         self.add_route("POST", "^/feedback$", self.handle_feedback)
@@ -211,6 +227,36 @@ class _Handler(AirPlayServerAuth):
         if self.tv.profile.verify_delay and read_tlv(body).get(TlvValue.SeqNo) == b"\x01":
             return asyncio.ensure_future(self._late(self.tv.profile.verify_delay, super().handle_pair_verify, request))
         return super().handle_pair_verify(request)
+
+    def handle_fp_setup(self, request: HttpRequest):  # pylint: disable=arguments-differ
+        body = request.body if isinstance(request.body, bytes) else str(request.body).encode()
+        p = self.tv.profile
+        self.tv.fp_requests.append((request.headers.get("X-Apple-ET", ""), body))
+        if p.fp_status != 200:
+            return self._answer(request, p.fp_status)
+        if p.fp_refuse_saved and not self.transient:
+            return self._answer(request, 403)
+        answer = super().handle_fp_setup(request)
+        reply = answer.body
+        if len(body) == 16:
+            self.fp_mode = reply[13]
+            self.fp_sap = fairplay._decrypt_body(reply[13], reply[14:142])  # pylint: disable=protected-access
+        elif len(body) == 164:
+            # What a receiver can check: m3 carries a SAP in m2's mode, and ends with the exchange of
+            # the two SAPs.
+            if body[12] != self.fp_mode or body[144:] != fairplay.exchange(fairplay.decrypt_message(body), self.fp_sap):
+                self.tv.fp_errors.append(f"m3 {body.hex()}")
+                return self._answer(request, 400)
+            self.fp_m3 = body
+        self.tv.requests.append((request.method, request.path, 200))
+        return HttpResponse("RTSP", "1.0", 200, "OK", {"CSeq": request.headers.get("CSeq", "0"),
+                                                       "Content-Type": "application/octet-stream"}, reply)
+
+    def handle_pair_setup(self, request: HttpRequest):
+        if request.headers.get("X-Apple-HKP") == "4" and not self.transient:
+            self.transient = True
+            self.tv.transient_pairings += 1
+        return super().handle_pair_setup(request)
 
     def handle_info(self, request: HttpRequest):
         if self.tv.profile.info_delay:
@@ -283,6 +329,11 @@ class _Handler(AirPlayServerAuth):
         types = [stream.get("type") for stream in streams]
         if "sessionUUID" not in body and not self.mirror:
             return self._answer(request, 455)
+        if p.fairplay and self.fp_m3 is None:
+            return self._answer(request, 400)
+        if "ekey" in body:
+            self.tv.fp_raw_keys.append(fairplay.unwrap_key(self.fp_sap, self.fp_m3, body["ekey"]))
+            self.tv.fp_shared = self.shared_key
         if p.audio_first and 110 in types and not self.audio and 96 not in types[:types.index(110)]:
             return self._answer(request, 400)
         if p.ptp_video_status and 110 in types and (body if "sessionUUID" in body else self.mirror).get(
@@ -554,6 +605,11 @@ class FakeMirrorTV:
         self.peers: list = []  # what the last SETPEERS it took named
         self.ptp: Optional[FakePtp] = None  # its PTP clock, once ptp_ports() opened it
         self.event_ports: list[int] = []  # the port of each event channel the sender opened
+        self.fp_requests: list[tuple[str, bytes]] = []  # (X-Apple-ET, body) of each POST /fp-setup
+        self.fp_errors: list[str] = []
+        self.transient_pairings = 0
+        self.fp_raw_keys: list[bytes] = []  # the key in each SETUP's ekey
+        self.fp_shared: Optional[bytes] = None  # the pair-verify secret of the connection that sent it
 
     def ptp_ports(self) -> tuple[int, int]:
         """The UDP ports of its PTP clock (event, general), opened at the first call."""

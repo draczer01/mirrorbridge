@@ -13,8 +13,8 @@ one TV and presses one button; this module decides the way.
                   fails before the picture reaches the TV, the next one, without asking
 
 The order with no history is the lowest delay first: AirPlay mirroring (proven on TCL, Roku,
-Samsung and LG TVs), then Google Cast mirroring, then the AirPlay cast, which works with the most
-receivers (Apple TVs included, until MirrorBridge has FairPlay).
+Samsung and LG TVs; Apple TVs and Macs with FairPlay), then Google Cast mirroring, then the AirPlay
+cast, which works with the most receivers.
 """
 
 from __future__ import annotations
@@ -112,13 +112,13 @@ def merge(devices: list["Device"], casts: list["CastDevice"]) -> list[Screen]:
 
 
 def airplay_mirrors(device: "Device") -> bool:
-    """AirPlay screen mirroring: the receiver says it mirrors and does not need FairPlay."""
+    """AirPlay screen mirroring: the receiver says it mirrors (Apple TVs and Macs with FairPlay)."""
     from . import mirror  # pylint: disable=import-outside-toplevel
 
     if not device.can_cast_video:
         return False
     target = mirror.Target.from_device(device)
-    return target.offers_mirroring and not target.needs_fairplay
+    return target.offers_mirroring
 
 
 def routes(screen: Screen) -> list[str]:
@@ -206,7 +206,7 @@ def plan(screen: Screen, history: RouteHistory) -> list[str]:
 
 # Why a way failed, by the key of the Text its error carries
 LASTING = {  # the TV does not take this way: try it last from now on
-    "mirror_fairplay", "mirror_password", "mirror_refused", "mirror_no_data_port", "mirror_no_ptp",
+    "mirror_fairplay", "mirror_fairplay_failed", "mirror_password", "mirror_refused", "mirror_no_data_port", "mirror_no_ptp",
     "mirror_data_refused", "mirror_data_closed", "mirror_no_timing", "gc_no_launch", "gc_no_answer",
     "tv_restricted", "tv_media_format", "tv_pairing_refused",
 }
