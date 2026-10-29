@@ -35,6 +35,7 @@ _LOGGER = logging.getLogger(__name__)
 ENCODER = "libopus"
 FRAME_MS = 10
 LEAD_MS = 25  # recorded (10 ms blocks), encoded (10 ms frames, 2.5 ms look-ahead), piped
+LEAD_ENV = "MIRRORBRIDGE_CAST_AUDIO_LEAD_MS"  # a test value for LEAD_MS, from a .bat
 JUMP_MS = 200  # a frame this late: the sound stopped for a while, start the count again
 DRIFT_MS = 40  # the count may be this far off before it is put right
 WINDOW_SECONDS = 2  # ...judged by the earliest frame in this long
@@ -106,11 +107,23 @@ def opus_samples(packet: bytes) -> int:
     return per_frame * frames
 
 
+def choose_lead(wanted: Optional[int]) -> int:
+    """How long before it comes a frame is taken to have been recorded: `wanted`, the test value
+    in LEAD_ENV, or LEAD_MS. More moves the sound earlier against the picture."""
+    if wanted is None:
+        try:
+            wanted = int(os.environ.get(LEAD_ENV, "") or LEAD_MS)
+        except ValueError:
+            wanted = LEAD_MS
+    return max(0, min(1000, wanted))
+
+
 class AudioTimer:
     """RTP times for the frames as they come (see the module's notes); None: leave it out."""
 
-    def __init__(self, clock: Clock) -> None:
+    def __init__(self, clock: Clock, lead_ms: Optional[int] = None) -> None:
         self.clock = clock
+        self.lead_ms = choose_lead(lead_ms)
         self.restarts = 0
         self.skipped = 0
         self._anchor: Optional[int] = None  # when the first sample of the count was recorded
@@ -119,7 +132,7 @@ class AudioTimer:
         self._window_min: Optional[int] = None
 
     def stamp(self, arrived_ns: int, samples: int) -> Optional[int]:
-        lead = LEAD_MS * NS // 1000
+        lead = self.lead_ms * NS // 1000
         if self._anchor is not None and arrived_ns - self._expected() > JUMP_MS * NS // 1000:
             self._anchor = None
             self.restarts += 1

@@ -335,6 +335,16 @@ def test_audio_timer_follows_the_clock():
     assert timer.stamp(t, 480) is not None
 
 
+def test_audio_lead_from_environment(monkeypatch):
+    monkeypatch.setenv("MIRRORBRIDGE_CAST_AUDIO_LEAD_MS", "300")
+    clock = Clock()
+    timer = AudioTimer(clock)
+    assert timer.lead_ms == 300
+    assert timer.stamp(clock.start_ns + NS, 480) == clock.rtp(clock.start_ns + NS - 300 * NS // 1000, 48000)
+    monkeypatch.setenv("MIRRORBRIDGE_CAST_AUDIO_LEAD_MS", "x")
+    assert AudioTimer(clock).lead_ms == 25
+
+
 def _need_opus() -> str:
     ff = _ffmpeg()
     if not has_opus(ff):
