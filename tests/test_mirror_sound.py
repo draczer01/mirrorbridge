@@ -15,7 +15,8 @@ from pyatv.support.chacha20 import Chacha20Cipher8byteNonce
 from fake_mirror_tv import parse_alac
 from mirrorbridge import ffmpeg
 from mirrorbridge.mirror import audiopackets as ap
-from mirrorbridge.mirror.clock import NS, to_ntp
+from mirrorbridge.mirror import sound
+from mirrorbridge.mirror.clock import NS, from_ntp, to_ntp
 
 R = 44100
 
@@ -264,3 +265,262 @@ def test_the_format_follows_the_tvs_screen_stream_formats():
     assert fmt is ap.PCM_44100_LE and "MIRRORBRIDGE_MIRROR_SOUND_CODEC=pcmle" in why
     assert ap.choose_format(0x800, "alac-sized")[0] is ap.ALAC_44100_SIZED
     assert ap.choose_format(0x800, "")[0] is ap.PCM_44100
+
+
+def test_sync_points_lie_on_one_line():
+    line = sound.SampleLine()
+    line.observe(352, 5_123_456_789 + 352 * NS // R, fresh=True)
+    line.start(0)
+    assert line.A == 5_123_456_789
+    assert ap.sync_packet(True, *line.sync_point(0, 4410)).hex() == "90d40004ffffeec683aa7e851f9add3700000000"
+    assert ap.sync_packet(False, *line.sync_point(877, 4410)).hex() == "80d400040004a4a683aa7e8c1fa0cef10004b5e0"
+    rnd = random.Random(11)
+    for _ in range(200):
+        n_sent = rnd.randrange(12_000_000)  # before the RTP time wraps (27 h)
+        field1, ntp, field3 = line.sync_point(n_sent, 4410)
+        exact = (from_ntp(ntp, epoch=True) - line.A) * R / NS
+        assert abs(exact - field3) <= 1 and (field3 - field1) & 0xFFFFFFFF == 4410 and field3 % 352 == 0
+
+
+# -- the sample line ---------------------------------------------------------------------------------
+
+
+def _wasapi_blocks(seconds: float, ppm: float = 0.0, jitter_ms: float = 0.0, seed: int = 1, stall_at: float = -1,
+                   stall_ms: float = 0.0, gap_at: float = -1, gap_s: float = 0.0):
+    """(n, arrived_ns, fresh) as soundcard's record(352) gives them: the engine has 441 samples
+    (10 ms) ready every 10 ms of its own clock (44100 * (1 + ppm/1e6) samples a second of the
+    PC's), the thread wakes up to jitter_ms late, a stall holds it up and loses what overflowed
+    the 100 ms buffer, and a gap (a new output device) gives nothing for gap_s, then a fresh
+    recorder."""
+    rnd = random.Random(seed)
+    rate = R * (1 + ppm / 1e6)
+    t0 = 7 * NS
+    pending = k = skipped = 0
+    stalled_until = -1
+    fresh = True
+    gap_done = False
+    while True:
+        t_packet = t0 + int(k * 441 / rate * NS)
+        if t_packet - t0 > seconds * NS:
+            return
+        k += 1
+        if 0 <= gap_at and not gap_done and t_packet - t0 >= gap_at * NS:
+            if t_packet - t0 < (gap_at + gap_s) * NS:
+                pending = 0
+                continue
+            gap_done = fresh = True
+        wake = t_packet + int(rnd.random() * jitter_ms * 1e6)
+        if 0 <= stall_at and stalled_until < 0 and t_packet - t0 >= stall_at * NS:
+            stalled_until = t_packet + int(stall_ms * 1e6)
+        if stalled_until > 0 and wake < stalled_until:
+            skipped += 1
+            continue
+        ready = 441
+        if stalled_until > 0:
+            held = (skipped + 1) * 441
+            ready = held - max(0, held - 4410)
+            stalled_until = 0
+        pending += ready
+        while pending >= 352:
+            pending -= 352
+            yield 352, wake, fresh
+            fresh = False
+
+
+def _drive(blocks, hold_ns: int = NS):
+    """Feed the blocks to a SampleLine as the session does: watched while the sound is held (the
+    first video frame has not gone yet; 1 s here), then anchored, corrected and put into the
+    stream, with the keeper's tick every 10 ms of the blocks' clock. Returns the line, the
+    totals, (time, line error) of each block and (time, lag) at each tick."""
+    line = sound.SampleLine()
+    totals = dict(filled=0, cut=0, inserted=0, deleted=0, kept=0, reanchors=0)
+    errors, lags = [], []
+    start = tick = None
+    tick_ns = int(sound.KEEP_TICK_S * NS)
+    for n, arrived, fresh in blocks:
+        while tick is not None and tick <= arrived:
+            lags.append((tick, tick - line.line_ns(line.s)))
+            z = line.keep(tick)
+            line.advance(z)
+            totals["kept"] += z
+            tick += tick_ns
+        c0 = line.observe(n, arrived, fresh)
+        start = arrived if start is None else start
+        if arrived - start < hold_ns:
+            continue
+        if line.A is None:
+            line.start(c0)
+            tick = arrived + tick_ns
+        corr = line.correction(c0, n)
+        errors.append((arrived - start, line.error_ns))
+        out = len(sound.apply(bytes(4 * n), corr)) // 4
+        totals["filled"] += corr.fill
+        totals["cut"] += corr.cut
+        totals["inserted" if corr.micro > 0 else "deleted"] += abs(corr.micro)
+        totals["reanchors"] += corr.reanchored
+        line.advance(out)
+        if out:
+            line.fed_real()
+    return line, totals, errors, lags
+
+
+def _worst(errors, after_s: float = 0.0) -> float:
+    return max(abs(e) for t, e in errors if t >= after_s * NS) / 1e6
+
+
+def test_an_exact_source_needs_no_correction():
+    """The test tone: each block stamped with its ideal time."""
+    blocks = ((352, 3 * NS + (k + 1) * 352 * NS // R, k == 0) for k in range(R * 60 // 352))
+    line, totals, errors, lags = _drive(blocks)
+    assert totals == dict(filled=0, cut=0, inserted=0, deleted=0, kept=0, reanchors=0)
+    assert _worst(errors) < 0.001 and line.steps == 0  # the integer ns of the stamps
+
+
+@pytest.mark.parametrize("ppm,seed", [(300, 2), (-300, 3)])
+def test_a_card_whose_clock_drifts_is_followed_by_single_samples(ppm, seed):
+    line, totals, errors, _ = _drive(_wasapi_blocks(120, ppm=ppm, jitter_ms=12, seed=seed))
+    assert _worst(errors, after_s=12) <= 6
+    drift = abs(ppm) / 1e6 * 119 * R  # 119 s of stream after the 1 s held
+    made, other = (totals["deleted"], totals["inserted"]) if ppm > 0 else (totals["inserted"], totals["deleted"])
+    assert abs(made - other - drift) <= 0.2 * drift, totals
+    assert totals["filled"] == totals["cut"] == totals["kept"] == totals["reanchors"] == 0
+
+
+def test_idle_zeros_cut_short_are_followed_too():
+    """When nothing plays, soundcard gives int(samplerate * elapsed) zeros a chunk: up to about
+    570 ppm short."""
+    _, totals, errors, _ = _drive(_wasapi_blocks(120, ppm=-570, jitter_ms=12, seed=6))
+    assert _worst(errors, after_s=12) <= 6 and totals["filled"] == totals["cut"] == 0
+
+
+def test_a_short_stall_that_loses_nothing_is_ridden_out():
+    _, totals, errors, lags = _drive(_wasapi_blocks(40, jitter_ms=5, seed=5, stall_at=20, stall_ms=80))
+    assert totals["filled"] == totals["cut"] == totals["kept"] == 0
+    assert max(lag for _, lag in lags) < sound.KEEP_TRIGGER_NS
+
+
+def test_a_stall_that_loses_samples_is_kept_on_time_and_the_base_moves_once():
+    line, totals, errors, lags = _drive(_wasapi_blocks(40, jitter_ms=5, seed=4, stall_at=20, stall_ms=400))
+    assert line.steps == 1 and totals["reanchors"] == totals["filled"] == 0
+    assert max(lag for _, lag in lags) <= 110 * 1_000_000  # the keeper: zeros on time through the stall
+    assert totals["kept"] > 0.3 * R and totals["cut"] > 0  # the late blocks are cut until the base moves
+    assert _worst(errors, after_s=21.4) < 3
+
+
+def test_a_new_recorder_after_half_a_second_without_blocks():
+    line, totals, errors, lags = _drive(_wasapi_blocks(30, jitter_ms=5, seed=5, gap_at=20, gap_s=0.5))
+    assert 0.35 * R <= totals["kept"] <= 0.55 * R and totals["filled"] == 0 and totals["cut"] <= 352
+    assert max(lag for _, lag in lags) <= 110 * 1_000_000 and line.steps == 0
+
+
+def _started(blocks: int = 50) -> tuple[sound.SampleLine, int]:
+    """A line fed `blocks` exact blocks; returns it and the next block's arrival."""
+    line = sound.SampleLine()
+    for k in range(blocks):
+        c0 = line.observe(352, NS + (k + 1) * 352 * NS // R, k == 0)
+        if line.A is None:
+            line.start(c0)
+        assert line.correction(c0, 352) == sound.Correction()
+        line.advance(352)
+    return line, NS + (blocks + 1) * 352 * NS // R
+
+
+def test_samples_dropped_on_the_way_are_filled():
+    line, arrived = _started()
+    line.skip(1760)
+    corr = line.correction(line.observe(352, arrived + 1760 * NS // R, False), 352)
+    assert abs(corr.fill - 1760) <= 1 and corr.cut == corr.micro == 0 and not corr.reanchored
+
+
+def test_a_line_far_behind_is_anchored_again():
+    line, arrived = _started()
+    line.skip(15_000)  # 340 ms
+    c0 = line.observe(352, arrived + 15_000 * NS // R, False)
+    corr = line.correction(c0, 352)
+    assert corr == sound.Correction(reanchored=True) and line.reanchors == 1
+    assert line.correction(c0, 352) == sound.Correction()  # on the new line
+    line.advance(352)
+    n_sent = line.s // 352
+    field1, ntp, field3 = line.sync_point(n_sent, 4410)
+    assert field3 == line.s and (field3 - field1) & 0xFFFFFFFF == 4410
+    assert abs(from_ntp(ntp, epoch=True) - (line.t_cap(c0) + 352 * NS // R)) <= 1
+
+
+def test_apply_cuts_then_corrects_then_fills():
+    frames = [_ramp()[4 * i:4 * i + 4] for i in range(352)]
+    more = sound.apply(_ramp(), sound.Correction(micro=2))
+    assert len(more) == 354 * 4
+    assert more == b"".join(frames[:118] + frames[117:235] + frames[234:])  # 117 and 234 twice
+    fewer = sound.apply(_ramp(), sound.Correction(micro=-2))
+    assert fewer == b"".join(frames[:117] + frames[118:234] + frames[235:])
+    both = sound.apply(_ramp(), sound.Correction(cut=2, micro=1, fill=3))
+    assert both == bytes(12) + b"".join(frames[2:178] + frames[177:])  # the 175th of the 350 left, twice
+    assert sound.apply(_ramp(), sound.Correction(cut=352, micro=-1)) == b""
+    assert sound.apply(_ramp(), sound.Correction()) == _ramp()
+
+
+def test_floats_become_s16_big_endian_clipped():
+    assert sound.floats_to_s16be([1.0, -1.0, 0.5, 1.5, -1.5]).hex() == "7fff80014000" "7fff8000"
+    import numpy as np
+
+    assert sound.floats_to_s16be(np.zeros((352, 2), dtype=np.float32)) == bytes(1408)
+
+
+# -- the test switches ---------------------------------------------------------------------------------
+
+
+def test_sound_knobs_default_to_unset():
+    assert sound.SoundKnobs.from_env({}) == sound.SoundKnobs()
+    knobs = sound.SoundKnobs()
+    assert knobs.enable is None and knobs.shape == "screen" and knobs.hold and knobs.sync_flags == 4
+    assert knobs.replace(tone=True).tone and not knobs.tone
+
+
+def test_every_sound_knob_from_the_environment():
+    env = {"MIRRORBRIDGE_MIRROR_SOUND": "1", "MIRRORBRIDGE_MIRROR_SOUND_TONE": "1",
+           "MIRRORBRIDGE_MIRROR_SOUND_DELAY_MS": "-40.5", "MIRRORBRIDGE_MIRROR_SOUND_GAP_MS": "50",
+           "MIRRORBRIDGE_MIRROR_SOUND_CODEC": "PCMLE", "MIRRORBRIDGE_MIRROR_SOUND_SHAPE": "media",
+           "MIRRORBRIDGE_MIRROR_SOUND_LAT_MIN_MS": "0.03", "MIRRORBRIDGE_MIRROR_SOUND_LAT_MAX_MS": "300",
+           "MIRRORBRIDGE_MIRROR_SOUND_IS_MEDIA": "1", "MIRRORBRIDGE_MIRROR_SOUND_REDUNDANT": "2",
+           "MIRRORBRIDGE_MIRROR_SOUND_SYNC_FLAGS": "7", "MIRRORBRIDGE_MIRROR_SOUND_SSRC": "id",
+           "MIRRORBRIDGE_MIRROR_SOUND_VOLUME": "-20", "MIRRORBRIDGE_MIRROR_SOUND_HOLD": "0",
+           "MIRRORBRIDGE_MIRROR_SOUND_PORTS": "7001, 7002", "MIRRORBRIDGE_MIRROR_SOUND_MUTE": "1"}
+    assert sound.SoundKnobs.from_env(env) == sound.SoundKnobs(
+        enable=True, tone=True, delay_ms=-40.5, gap_ms=50.0, codec="pcmle", shape="media", lat_min_ms=0.03,
+        lat_max_ms=300.0, is_media=True, redundant=2, sync_flags=7, ssrc="id", volume_db=-20.0, hold=False,
+        ports=(7001, 7002), mute=True)
+    assert sound.SoundKnobs.from_env({"MIRRORBRIDGE_MIRROR_SOUND": "0"}).enable is False
+    assert sound.SoundKnobs.from_env({"MIRRORBRIDGE_MIRROR_SOUND_VOLUME": "-144"}).volume_db == -144
+
+
+def test_sound_knobs_out_of_range_and_invalid(caplog):
+    clamped = {"MIRRORBRIDGE_MIRROR_SOUND_DELAY_MS": "900", "MIRRORBRIDGE_MIRROR_SOUND_GAP_MS": "5",
+               "MIRRORBRIDGE_MIRROR_SOUND_LAT_MAX_MS": "-1", "MIRRORBRIDGE_MIRROR_SOUND_REDUNDANT": "5",
+               "MIRRORBRIDGE_MIRROR_SOUND_VOLUME": "-60"}
+    with caplog.at_level("INFO", logger="mirrorbridge.mirror.sound"):
+        knobs = sound.SoundKnobs.from_env(clamped)
+    assert (knobs.delay_ms, knobs.gap_ms, knobs.lat_max_ms, knobs.redundant, knobs.volume_db) == (500, 20, 0, 2, -30)
+    assert "MIRRORBRIDGE_MIRROR_SOUND_DELAY_MS=900 is out of -500..500: using 500" in caplog.messages
+    assert sound.SoundKnobs.from_env({"MIRRORBRIDGE_MIRROR_SOUND_VOLUME": "-500"}).volume_db == -144
+    invalid = {"MIRRORBRIDGE_MIRROR_SOUND": "yes", "MIRRORBRIDGE_MIRROR_SOUND_TONE": "2",
+               "MIRRORBRIDGE_MIRROR_SOUND_DELAY_MS": "soon", "MIRRORBRIDGE_MIRROR_SOUND_GAP_MS": "nan",
+               "MIRRORBRIDGE_MIRROR_SOUND_CODEC": "aac", "MIRRORBRIDGE_MIRROR_SOUND_SHAPE": "square",
+               "MIRRORBRIDGE_MIRROR_SOUND_REDUNDANT": "1.5", "MIRRORBRIDGE_MIRROR_SOUND_SYNC_FLAGS": "5",
+               "MIRRORBRIDGE_MIRROR_SOUND_SSRC": "1", "MIRRORBRIDGE_MIRROR_SOUND_VOLUME": "inf",
+               "MIRRORBRIDGE_MIRROR_SOUND_PORTS": "7001", "MIRRORBRIDGE_MIRROR_SOUND_HOLD": "",
+               "MIRRORBRIDGE_MIRROR_SOUND_MUTE": "on"}
+    caplog.clear()
+    with caplog.at_level("INFO", logger="mirrorbridge.mirror.sound"):
+        assert sound.SoundKnobs.from_env(invalid) == sound.SoundKnobs()
+    assert len(caplog.records) == 12 and all(r.levelname == "INFO" for r in caplog.records)
+    assert "MIRRORBRIDGE_MIRROR_SOUND_CODEC=aac is not alac, alac-sized, pcm, pcmle: left at unset" in caplog.messages
+    assert sound.SoundKnobs.from_env({"MIRRORBRIDGE_MIRROR_SOUND_PORTS": "0,7002"}).ports is None
+
+
+def test_sound_knobs_describe_names_every_variable():
+    text = sound.SoundKnobs(enable=True, delay_ms=40.0, ports=(1, 2)).describe()
+    for name in ("", "_TONE", "_DELAY_MS", "_GAP_MS", "_CODEC", "_SHAPE", "_LAT_MIN_MS", "_LAT_MAX_MS", "_IS_MEDIA",
+                 "_REDUNDANT", "_SYNC_FLAGS", "_SSRC", "_VOLUME", "_HOLD", "_PORTS", "_MUTE"):
+        assert f"MIRRORBRIDGE_MIRROR_SOUND{name}=" in text
+    assert text.startswith("MIRRORBRIDGE_MIRROR_SOUND=1, MIRRORBRIDGE_MIRROR_SOUND_TONE=0, ")
+    assert "_DELAY_MS=40," in text and "_GAP_MS=unset," in text and "_PORTS=1,2," in text and "_HOLD=1," in text
