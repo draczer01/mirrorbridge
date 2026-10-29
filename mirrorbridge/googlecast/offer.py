@@ -43,6 +43,7 @@ class VideoOffer:
     audio: bool = False
     audio_ssrc: int = field(default_factory=lambda: random.choice(AUDIO_SSRC))
     audio_bps: int = AUDIO_BPS
+    audio_delay_ms: Optional[int] = None  # the sound's targetDelay, if not the picture's
 
     def message(self) -> dict:
         """The OFFER (seqNum is added when it is sent)."""
@@ -72,7 +73,7 @@ class VideoOffer:
                 "rtpProfile": "cast",
                 "rtpPayloadType": AUDIO_PAYLOAD_TYPE,
                 "ssrc": self.audio_ssrc,
-                "targetDelay": self.delay_ms,
+                "targetDelay": self.audio_delay_ms or self.delay_ms,
                 "aesKey": self.key.hex(),
                 "aesIvMask": self.iv_mask.hex(),
                 "timeBase": f"1/{AUDIO_CLOCK}",

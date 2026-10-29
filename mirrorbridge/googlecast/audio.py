@@ -133,7 +133,7 @@ class AudioTimer:
 
     def stamp(self, arrived_ns: int, samples: int) -> Optional[int]:
         lead = self.lead_ms * NS // 1000
-        if self._anchor is not None and arrived_ns - self._expected() > JUMP_MS * NS // 1000:
+        if self._anchor is not None and arrived_ns - self._expected() - lead > JUMP_MS * NS // 1000:
             self._anchor = None
             self.restarts += 1
         if self._anchor is None:

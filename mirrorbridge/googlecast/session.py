@@ -44,7 +44,7 @@ from ..session import State, StatusCallback
 from ..text import Text
 from .channel import NS_RECEIVER, NS_WEBRTC, CastChannel, ChannelError
 from .discovery import CastDevice
-from .audio import AudioTimer, OpusSource, has_opus, opus_command, opus_samples
+from .audio import AudioTimer, OpusSource, choose_lead, has_opus, opus_command, opus_samples
 from .offer import AUDIO_BPS, AUDIO_PAYLOAD_TYPE, VIDEO_PAYLOAD_TYPE, AnswerError, VideoOffer, parse_answer
 from .rtp import AUDIO_CLOCK, VIDEO_CLOCK, FrameCipher, Packetizer
 from .sender import CastSocket, Clock, StreamSender
@@ -70,6 +70,7 @@ STOP_SECONDS = 3
 AUDIO_QUEUE = 100  # Opus frames (a second) waiting to be sent, at most
 DELAY_ENV = "MIRRORBRIDGE_CAST_DELAY_MS"  # a test value for the delay, from a .bat
 CODEC_ENV = "MIRRORBRIDGE_CAST_CODEC"  # h264 or vp8, from a .bat
+AUDIO_DELAY_ENV = "MIRRORBRIDGE_CAST_AUDIO_DELAY_MS"  # a test value for the sound's own delay
 H264, VP8 = "h264", "vp8"
 CODECS = (H264, VP8)
 
@@ -259,6 +260,14 @@ class GoogleCastMirror:
         if self._audio_sender is not None:
             self._start_audio()
 
+    @staticmethod
+    def _audio_delay() -> Optional[int]:
+        try:
+            wanted = int(os.environ.get(AUDIO_DELAY_ENV, "") or 0)
+        except ValueError:
+            wanted = 0
+        return max(MIN_DELAY_MS, min(MAX_DELAY_MS, wanted)) if wanted else None
+
     def _audio_possible(self, ff: str) -> bool:
         if not has_opus(ff):
             _LOGGER.warning("This FFmpeg has no Opus encoder; mirroring without sound")
@@ -313,7 +322,8 @@ class GoogleCastMirror:
 
         width, height = canvas_limit(s, self.max_canvas)
         offer = VideoOffer(width=width, height=height, fps=max(1, min(60, s.framerate or 30)),
-                           kbps=s.video_bitrate_kbps, delay_ms=self.delay_ms, codec=self.codec, audio=self.audio)
+                           kbps=s.video_bitrate_kbps, delay_ms=self.delay_ms, codec=self.codec, audio=self.audio,
+                           audio_delay_ms=self._audio_delay())
         try:
             reply = await channel.request(NS_WEBRTC, offer.message(), app["transportId"], timeout=ANSWER_SECONDS,
                                           key="seqNum")
@@ -347,7 +357,8 @@ class GoogleCastMirror:
             self._audio_sender = StreamSender(cipher, Packetizer(offer.audio_ssrc, AUDIO_PAYLOAD_TYPE),
                                               answer.audio_receiver_ssrc, clock, AUDIO_CLOCK)
             streams.append(self._audio_sender)
-            _LOGGER.info("Sending Opus at %d kbps", self._audio_bps // 1000)
+            _LOGGER.info("Sending Opus at %d kbps, shown %d ms after capture, taken as recorded %d ms before it "
+                         "comes", self._audio_bps // 1000, offer.audio_delay_ms or self.delay_ms, choose_lead(None))
         sock = CastSocket(streams)
         loop = asyncio.get_running_loop()
         await loop.create_datagram_endpoint(lambda: sock, remote_addr=(self.device.host, answer.udp_port))

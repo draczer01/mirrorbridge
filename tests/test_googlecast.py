@@ -340,7 +340,9 @@ def test_audio_lead_from_environment(monkeypatch):
     clock = Clock()
     timer = AudioTimer(clock)
     assert timer.lead_ms == 300
-    assert timer.stamp(clock.start_ns + NS, 480) == clock.rtp(clock.start_ns + NS - 300 * NS // 1000, 48000)
+    first = timer.stamp(clock.start_ns + NS, 480)
+    assert first == clock.rtp(clock.start_ns + NS - 300 * NS // 1000, 48000)
+    assert timer.stamp(clock.start_ns + NS + 10 * NS // 1000, 480) == first + 480 and timer.restarts == 0
     monkeypatch.setenv("MIRRORBRIDGE_CAST_AUDIO_LEAD_MS", "x")
     assert AudioTimer(clock).lead_ms == 25
 
