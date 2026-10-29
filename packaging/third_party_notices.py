@@ -3,7 +3,7 @@
 Run it with the Python that built the exe, from the repo root, after PyInstaller:
 
     python packaging/third_party_notices.py --out build/notices
-    python packaging/third_party_notices.py --ffmpeg-version    # e.g. 7.1: whose source to publish
+    python packaging/third_party_notices.py --ffmpeg-version    # e.g. 8.1.1: whose source to publish
 
 What is inside the exe comes from PyInstaller's own lists of what it packed (PKG-00.toc and
 PYZ-00.toc in build/pyinstaller/MirrorBridge), checked against the exe itself. Each file is put
@@ -34,6 +34,7 @@ from importlib import metadata
 from pathlib import Path
 
 from check_version import code_version
+from fetch_ffmpeg import load_pin
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "build" / "pyinstaller" / "MirrorBridge"
@@ -133,7 +134,7 @@ class FFmpegBuild:
     @property
     def libraries(self) -> list[str]:
         """The external libraries its configuration line enables."""
-        external = {"gnutls", "gmp", "iconv", "fontconfig", "bzlib", "lzma", "zlib", "sdl2", "avisynth"}
+        external = {"gnutls", "gmp", "iconv", "fontconfig", "bzlib", "lzma", "zlib", "sdl2", "avisynth", "cairo", "openal"}
         names = [option.removeprefix("--enable-") for option in self.configuration.split()]
         return [name for name in names if name.startswith("lib") or name in external]
 
@@ -636,8 +637,18 @@ def ffmpeg_in_build(entries: list[Entry]) -> str:
     return source
 
 
-def ffmpeg_origin(ffmpeg: str, build: FFmpegBuild) -> str:
-    """Where the bundled FFmpeg came from, when it is the one in the imageio-ffmpeg wheel."""
+def ffmpeg_origin(ffmpeg: str, build: FFmpegBuild, pin: dict | None = None) -> str:
+    """Where the bundled FFmpeg came from, when it is the pinned download (packaging/ffmpeg_pin.json)
+    or the one in the imageio-ffmpeg wheel."""
+    pin = pin or load_pin()
+    with open(ffmpeg, "rb") as f:
+        pinned = hashlib.file_digest(f, "sha256").hexdigest() == pin["exe_sha256"]
+    if pinned:
+        made_by = build.provider[0] if build.provider else pin["provider"]
+        return (f"This is the ffmpeg.exe from {pin['archive_url']} (SHA-256 {pin['archive_sha256']}), the "
+                f"{pin['build']} build of FFmpeg {pin['version']} made by {made_by} from FFmpeg's git commit "
+                f"{pin['source_commit']} (tag n{pin['version']}). MirrorBridge only starts it as a "
+                "separate program.")
     try:
         import imageio_ffmpeg  # pylint: disable=import-outside-toplevel
 

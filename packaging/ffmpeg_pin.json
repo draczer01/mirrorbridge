@@ -1,0 +1,16 @@
+{
+  "about": "The FFmpeg inside MirrorBridge.exe. packaging/fetch_ffmpeg.py checks the zip and its ffmpeg.exe against these sizes and SHA-256s and puts ffmpeg.exe in build/ffmpeg_811; MirrorBridge.spec bundles that file. source_* is FFmpeg's source for this build, which a release ships next to the exe: its signature must be by the key with source_key_fingerprint (packaging/ffmpeg-devel.asc); source_sha256 stays empty until a release run has checked the signature and printed the tarball's SHA-256.",
+  "version": "8.1.1",
+  "provider": "gyan.dev",
+  "build": "essentials",
+  "archive_url": "https://github.com/GyanD/codexffmpeg/releases/download/8.1.1/ffmpeg-8.1.1-essentials_build.zip",
+  "archive_size": 109282242,
+  "archive_sha256": "6f58ce889f59c311410f7d2b18895b33c03456463486f3b1ebc93d97a0f54541",
+  "exe_member": "ffmpeg-8.1.1-essentials_build/bin/ffmpeg.exe",
+  "exe_size": 101457920,
+  "exe_sha256": "228d7a8556258de907fdb55f36850078ebc7680b84ec30d84ea02e99bec1d1eb",
+  "source_commit": "239f2c733de417201d7ad3b3b8b0d9b63285b2b1",
+  "source_url": "https://ffmpeg.org/releases/ffmpeg-8.1.1.tar.xz",
+  "source_key_fingerprint": "FCF986EA15E6E293A5644F10B4322F04D67658D8",
+  "source_sha256": ""
+}
