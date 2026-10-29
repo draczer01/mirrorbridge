@@ -256,8 +256,10 @@ class TrayMenu(QObject):
         debug.addSeparator()
         self._radio(debug, tr("debug_lead"), [(f"{ms} ms" if ms else tr("debug_lead_auto"), ms) for ms in DEBUG_LEADS],
                     lead_override(s), "mirror_lead_ms")
-        self._radio(debug, tr("debug_keyframes"), [(f"{n} s", n) for n in ffmpeg.MIRROR_KEYFRAME_CHOICES],
-                    ffmpeg.mirror_keyframe_seconds(s.mirror_keyframe_seconds), "mirror_keyframe_seconds")
+        keyframes = [(tr("debug_kf_every", n=n) if n else tr("debug_kf_needed"), n)
+                     for n in ffmpeg.MIRROR_KEYFRAME_CHOICES]
+        self._radio(debug, tr("debug_keyframes"), keyframes, ffmpeg.mirror_keyframe_seconds(s.mirror_keyframes),
+                    "mirror_keyframes")
         self._action(debug, tr("debug_on_arrival"), lambda on: self.c.update_settings(mirror_on_arrival=on),
                      checkable=True, checked=on_arrival(s))
 

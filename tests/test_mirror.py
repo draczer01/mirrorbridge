@@ -2,6 +2,8 @@
 cryptography, and FFmpeg's own output (tests/test_mirror_loopback.py has whole sessions)."""
 
 import asyncio
+import json
+import logging
 import random
 import socket
 import struct
@@ -15,14 +17,14 @@ from pyatv.auth.hap_srp import hkdf_expand
 
 from mirrorbridge import ffmpeg
 from mirrorbridge.config import Settings
-from mirrorbridge.mirror import clock, flv, h264, packets, profiles, source, stats
+from mirrorbridge.mirror import capture, clock, flv, h264, packets, profiles, source, stats
 from mirrorbridge.mirror.control import ReceiverInfo, Target, parse_features, sender_id
 from mirrorbridge.mirror.datachannel import DataChannel
 from mirrorbridge.mirror.errors import no_timing, refused
 from mirrorbridge.mirror.negotiation import CONTROL_FIRST, MEDIA_FIRST, PTP, Plan
 from mirrorbridge.mirror import session as mirror_session
 from mirrorbridge.mirror.session import (MirrorSession, catch_up_bytes, canvas_limit, choose_canvas, choose_fps,
-                                         lead_override, on_arrival, send_buffer)
+                                         keyframe_seconds, lead_override, on_arrival, send_buffer)
 from mirrorbridge.mirror.source import DESKTOP, TEST_PATTERN, FrameQueue, Unit, build_command
 
 # What x264 wrote for a 640x360 test pattern (High, level 3.0), and the record the TV got for it.
@@ -331,6 +333,25 @@ def test_pts_mapper_never_goes_backwards():
     assert mapper.map(90, 990_000_000) > first
 
 
+def test_pts_mapper_starts_again_with_a_new_ffmpeg():
+    """FFmpeg started again 5 s in: its pts are back at 0, its frames come 50 ms after they were
+    taken. The times follow the new frames at once and keep going up."""
+    mapper, ms, base = clock.PtsMapper(), 1_000_000, 10 * clock.NS
+    old = [mapper.map(i * 33, base + i * 33 * ms + 40 * ms) for i in range(150)]
+    assert mapper.behind(150 * 33, base + 150 * 33 * ms + 40 * ms) == 0
+    mapper.restart()
+    assert mapper.offset_ns is None and mapper.lowest is None
+    start = base + 5 * clock.NS
+    new = [mapper.map(i * 16, start + i * 16 * ms + 50 * ms) for i in range(60)]
+    assert new == [start + i * 16 * ms + 50 * ms for i in range(60)]  # within a frame: exactly
+    assert all(b > a for a, b in zip(old + new, (old + new)[1:]))
+    # Measured against the new FFmpeg's best: against the old one's, from its own origin, 5 s.
+    assert mapper.behind(60 * 16, start + 60 * 16 * ms + 50 * ms) == 0
+    # A restart while the old frames still had later times: the new ones never go back before them.
+    mapper.restart()
+    assert mapper.map(0, start) > new[-1]
+
+
 # -- frames on their way -------------------------------------------------------------------------------
 
 
@@ -350,6 +371,19 @@ async def test_frame_queue_keeps_the_newest_frames_and_the_avcc():
     got = [await queue.get() for _ in range(5)]
     assert [u.kind if u else None for u in got] == [flv.CONFIG, flv.FRAME, flv.FRAME, flv.FRAME, None]
     assert [u.pts_ms for u in got[1:4]] == [99, 132, 165] and queue.frames == 0 and not queue.keyframe_waiting()
+
+
+async def test_frame_queue_forgets_an_old_ffmpegs_frames():
+    queue = FrameQueue(limit=3)
+    queue.put(_unit(flv.CONFIG))
+    for n in range(1, 6):
+        queue.put(_unit(keyframe=n == 4, n=n))
+    queue.put(None)  # that FFmpeg ended
+    queue.clear()
+    assert queue.frames == 0 and queue.take_trimmed() == 0 and not queue.keyframe_waiting()
+    assert queue.last_frame_ns == 5  # a gap in the frames still counts from the last one that came
+    queue.put(_unit(keyframe=True, n=7))
+    assert (await queue.get()).data == bytes([7]) and queue.frames == 0
 
 
 def test_video_send_buffers_hold_about_two_frames():
@@ -424,7 +458,7 @@ def test_a_drop_ends_on_a_keyframe_that_brings_the_tv_back_to_real_time():
 def test_the_tv_dropping_the_video_at_once_is_a_matter_of_time_not_of_keyframes():
     """Within AT_ONCE_SECONDS of the first frame, whatever the Debug menu's keyframe interval."""
     # pylint: disable=protected-access
-    session = MirrorSession(Target("TV", "1.2.3.4"), Settings(mirror_keyframe_seconds=5),
+    session = MirrorSession(Target("TV", "1.2.3.4"), Settings(mirror_keyframes=10),
                             profile=profiles.MirrorProfile())
     assert session._at_once(10 * clock.NS)  # no frame went yet
     session._first_sent_ns = 10 * clock.NS
@@ -438,6 +472,34 @@ def test_the_debug_menus_tv_wait_stays_within_what_a_profile_takes():
     assert lead_override(Settings(mirror_lead_ms=5)) == 20 and lead_override(Settings(mirror_lead_ms=5000)) == 1000
     assert lead_override(Settings(mirror_lead_ms="fast")) == 0 and lead_override(Settings(mirror_lead_ms=-1)) == 0
     assert lead_override(Settings(mirror_lead_ms=True)) == 0
+
+
+def test_an_older_settings_json_loads_with_mirror_screens_new_settings(tmp_path, caplog):
+    """The old keyframe switch (every 2 s was its default) is dropped, not carried over: the new
+    one starts at its own default, only when needed. Hand edits of the new ones give their defaults."""
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"mirror_keyframe_seconds": 2, "mirror_encoder_extra": None, "mirror_lead_ms": 150,
+                                "framerate": 60}), encoding="utf-8")
+    settings = Settings.load(path)
+    assert (settings.mirror_keyframes, settings.mirror_encoder_extra) == (0, "")
+    assert (settings.mirror_lead_ms, settings.framerate) == (150, 60)  # the others as they were
+    assert (settings.mirror_latency, settings.mirror_framerate, settings.mirror_scaler) == ("normal", 0, "auto")
+    settings.save(path)
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert "mirror_keyframe_seconds" not in saved and saved["mirror_keyframes"] == 0
+    with caplog.at_level(logging.INFO, logger="mirrorbridge.config"):
+        for junk in ({"mirror_keyframes": 5}, {"mirror_keyframes": "10"}, {"mirror_keyframes": True},
+                     {"mirror_keyframes": 10.0}, {"mirror_latency": "fast"}, {"mirror_latency": None},
+                     {"mirror_framerate": 24}, {"mirror_framerate": "60"}, {"mirror_scaler": "gpu"},
+                     {"mirror_encoder_extra": 8}, {"mirror_encoder_extra": ["-ldkfs", "8"]}):
+            path.write_text(json.dumps(junk), encoding="utf-8")
+            assert Settings.load(path) == Settings(), junk
+    assert "Ignoring mirror_keyframes=5" in caplog.text
+    chosen = {"mirror_keyframes": 10, "mirror_latency": "smooth", "mirror_framerate": 60, "mirror_scaler": "cpu",
+              "mirror_encoder_extra": "-ldkfs 8"}
+    path.write_text(json.dumps(chosen), encoding="utf-8")
+    settings = Settings.load(path)
+    assert {key: getattr(settings, key) for key in chosen} == chosen
 
 
 def test_frames_are_shown_on_arrival_only_when_settings_json_says_true():
@@ -531,28 +593,89 @@ def test_mirror_encoder_args_hold_nothing_back(encoder, expected):
     assert args[args.index("-maxrate") + 1] == "6000k"
 
 
-@pytest.mark.parametrize("encoder", ["h264_nvenc", "libx264"])
-def test_the_keyframe_interval_reaches_the_encoder(encoder):
-    args = ffmpeg.mirror_encoder_args(encoder, 6000, 30, keyframe_seconds=5)
-    assert args[args.index("-g") + 1] == "150"
-    assert args[args.index("-force_key_frames") + 1] == "expr:gte(t,n_forced*5)"
+def _option(args: list[str], name: str):
+    return args[args.index(name) + 1] if name in args else None
+
+
+@pytest.mark.parametrize("encoder", ffmpeg.ENCODER_PREFERENCE)
+def test_a_keyframe_every_2_s_every_10_s_or_only_when_needed(encoder):
+    def args(seconds):
+        return ffmpeg.mirror_encoder_args(encoder, 6000, 30, keyframe_seconds=seconds)
+
+    every_2, every_10, needed = args(2), args(10), args(0)
+    assert every_2 == ffmpeg.mirror_encoder_args(encoder, 6000, 30)  # a caller that does not say: as before
+    assert (_option(every_2, "-g"), _option(every_2, "-force_key_frames")) == ("60", "expr:gte(t,n_forced*2)")
+    assert (_option(every_10, "-g"), _option(every_10, "-force_key_frames")) == ("300", "expr:gte(t,n_forced*10)")
+    if encoder in ("h264_nvenc", "libx264"):
+        # The first keyframe only (the session starts FFmpeg again for another).
+        assert _option(needed, "-g") == "2147483647" and "-force_key_frames" not in needed
+    else:
+        assert needed == every_10  # not tried that way on real hardware: one every 10 s
+    for each in (every_2, every_10, needed):
+        assert _option(each, "-bf") == "0" and _option(each, "-bufsize") == "200k"  # one frame's share, still
+        if encoder == "h264_nvenc":
+            assert _option(each, "-forced-idr") == "1"  # the forced keyframes are IDRs
     if encoder == "libx264":
-        assert args[args.index("-x264-params") + 1] == "keyint=150:min-keyint=150:scenecut=0"
-    one = ffmpeg.mirror_encoder_args(encoder, 6000, 30, keyframe_seconds=1)
-    assert one[one.index("-g") + 1] == "30" and one[one.index("-force_key_frames") + 1] == "expr:gte(t,n_forced*1)"
-    # 1, 2 or 5 s; anything else (a settings.json edited by hand) is the 2 s default
-    assert ffmpeg.mirror_encoder_args(encoder, 6000, 30, keyframe_seconds=3) == ffmpeg.mirror_encoder_args(
-        encoder, 6000, 30)
-    assert [ffmpeg.mirror_keyframe_seconds(v) for v in (1, 2, 5, 0, 3, "5", None, 2.0)] == [1, 2, 5, 2, 2, 2, 2, 2]
+        assert [_option(a, "-x264-params") for a in (every_2, every_10, needed)] == [
+            "keyint=60:min-keyint=60:scenecut=0", "keyint=300:min-keyint=300:scenecut=0", "keyint=infinite:scenecut=0"]
+    # Anything but a whole number of seconds is the default of 2 s.
+    assert args(-1) == args(None) == args(True) == args(2.5) == every_2
+    assert ffmpeg.mirror_keyframe_interval(encoder, 0) == (0 if encoder in ffmpeg.NO_PERIODIC_ENCODERS else 10)
 
 
-def test_ffmpeg_for_mirroring_takes_the_keyframe_setting(monkeypatch):
+def test_the_debug_menus_keyframes_setting():
+    """0 (only when needed, the default), 10 or 2; anything else from a settings.json edited by hand is 0."""
+    values = (0, 2, 10, 1, 5, "2", None, 10.0, True, False, -10)
+    assert [ffmpeg.mirror_keyframe_seconds(v) for v in values] == [0, 2, 10, 0, 0, 0, 0, 10, 0, 0, 0]
+    assert ffmpeg.MIRROR_KEYFRAME_CHOICES == (0, 10, 2) and Settings().mirror_keyframes == 0
+    # A session does not start FFmpeg again for a keyframe yet: only when needed is every 2 s meanwhile.
+    assert [keyframe_seconds(Settings(mirror_keyframes=v)) for v in (0, 10, 2, 7)] == [2, 10, 2, 2]
+
+
+def test_ffmpeg_for_mirroring_takes_the_keyframes_it_is_given(monkeypatch):
     monkeypatch.setattr(source, "_version", lambda ff: (7, 1))
-    settings = Settings(mirror_keyframe_seconds=1)
-    cmd = build_command("ffmpeg", settings, source=TEST_PATTERN, encoder="h264_nvenc", width=640, height=360, fps=30)
-    assert cmd[cmd.index("-g") + 1] == "30" and "expr:gte(t,n_forced*1)" in cmd
     cmd = build_command("ffmpeg", Settings(), source=TEST_PATTERN, encoder="libx264", width=640, height=360, fps=30)
-    assert cmd[cmd.index("-g") + 1] == "60" and "keyint=60:min-keyint=60:scenecut=0" in cmd
+    assert _option(cmd, "-g") == "60" and "keyint=60:min-keyint=60:scenecut=0" in cmd  # the default, 2 s
+    # Not the Debug menu's setting: the session says (Google Cast mirroring never does).
+    cmd = build_command("ffmpeg", Settings(mirror_keyframes=10), source=TEST_PATTERN, encoder="h264_nvenc",
+                        width=640, height=360, fps=30)
+    assert _option(cmd, "-g") == "60" and "expr:gte(t,n_forced*2)" in cmd
+    cmd = build_command("ffmpeg", Settings(), source=TEST_PATTERN, encoder="h264_nvenc", width=640, height=360,
+                        fps=30, keyframe_seconds=10)
+    assert _option(cmd, "-g") == "300" and "expr:gte(t,n_forced*10)" in cmd
+    cmd = build_command("ffmpeg", Settings(), source=TEST_PATTERN, encoder="h264_nvenc", width=640, height=360,
+                        fps=60, keyframe_seconds=0)
+    assert _option(cmd, "-g") == "2147483647" and "-force_key_frames" not in cmd
+
+
+async def test_google_cast_mirroring_keeps_a_keyframe_every_2_s(monkeypatch):
+    """Google Cast mirroring starts FFmpeg as Mirror screen does (build_command) but never again for
+    a keyframe: it keeps one every 2 s whatever the Debug menu says, and the CPU chain."""
+    from mirrorbridge.googlecast import session as cast_session
+    from mirrorbridge.googlecast.discovery import CastDevice
+
+    monkeypatch.setattr(source, "_version", lambda ff: (7, 1))
+    started = []
+
+    class Started:
+        def __init__(self, cmd, on_unit):
+            started.append(cmd)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(cast_session, "FFmpegSource", Started)
+    monitor = ffmpeg.Monitor(0, 0, 0, 2560, 1440, True, 0, device=r"\\.\DISPLAY1")
+    for what, backend, capture_monitor in ((TEST_PATTERN, "test", None), (DESKTOP, "ddagrab", monitor)):
+        cast = cast_session.GoogleCastMirror(CastDevice("TV", "192.0.2.1"), Settings(mirror_keyframes=0), source=what)
+        # pylint: disable=protected-access
+        cast._capture, cast._sources = ("ffmpeg", capture_monitor, None), [(backend, "h264_nvenc")]
+        cast._frames, cast.canvas, cast.fps = FrameQueue(60), (1920, 1080), 30
+        cast._start_source()
+        cmd = started[-1]
+        assert _option(cmd, "-force_key_frames") == "expr:gte(t,n_forced*2)" and _option(cmd, "-g") == str(30 * 2)
+        assert "-bsf:v" not in cmd
+    assert _option(started[-1], "-vf").startswith("hwdownload,format=bgra,scale=")
 
 
 def test_mirror_command_test_pattern_and_desktop(monkeypatch):
@@ -571,9 +694,51 @@ def test_mirror_command_test_pattern_and_desktop(monkeypatch):
     cmd = build_command("ffmpeg", settings, source=DESKTOP, encoder="h264_nvenc", width=1920, height=1080, fps=60,
                         backend="ddagrab", monitor=mon)
     assert "ddagrab=output_idx=0:framerate=60:draw_mouse=1" in cmd
-    vf = cmd[cmd.index("-vf") + 1]
-    assert "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease" in vf
-    assert "flags=bilinear" in vf and vf.endswith("format=nv12")
+    # The CPU chain: to memory, scaled into BT.709 limited range (bilinear), tagged as that.
+    assert cmd[cmd.index("-vf") + 1] == (
+        "hwdownload,format=bgra,scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease"
+        ":force_divisible_by=2:flags=bilinear:out_color_matrix=bt709:out_range=tv,format=nv12,"
+        "setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709")
+    gdi = build_command("ffmpeg", settings, source=DESKTOP, encoder="libx264", width=1280, height=720, fps=30,
+                        backend="gdigrab", monitor=mon)
+    assert _option(gdi, "-vf") == (
+        "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
+        ":flags=bilinear:out_color_matrix=bt709:out_range=tv,format=yuv420p,"
+        "setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709")
+    assert "-bsf:v" not in cmd + gdi
+
+
+def test_mirror_command_on_the_graphics_card(monkeypatch):
+    """NVENC with ddagrab: no filter at the screen's own size, scale_d3d11 when it must be smaller;
+    neither brings the frames to memory."""
+    monkeypatch.setattr(source, "_version", lambda ff: (8, 1))
+    big = ffmpeg.Monitor(0, 0, 0, 2560, 1440, True, 0, device=r"\\.\DISPLAY1")
+    small = ffmpeg.Monitor(2, 2560, 0, 1024, 600, False, 2, device=r"\\.\DISPLAY3")
+
+    def command(monitor, **kw):
+        chain = capture.chain_for(capture.GPU, (monitor.width, monitor.height), (1920, 1080))
+        return build_command("ffmpeg", Settings(), source=DESKTOP, encoder="h264_nvenc", width=1920, height=1080,
+                             fps=60, backend="ddagrab", monitor=monitor, chain=chain, **kw)
+
+    native = command(small)
+    assert "ddagrab=output_idx=2:framerate=60:draw_mouse=1" in native
+    assert "-vf" not in native and not any("hwdownload" in a for a in native)
+    # The stream says BT.709 primaries and transfer as the other chains do (NVENC's own BT.601 matrix stays).
+    assert native[native.index("-bsf:v"):native.index("-bsf:v") + 2] == list(capture.NATIVE_OUTPUT)
+    assert native.index("-bsf:v") > native.index("-c:v") and native[-3:] == ["-f", "flv", "pipe:1"]
+    scaled = command(big)
+    assert _option(scaled, "-vf") == ("scale_d3d11=width=1920:height=1080:format=nv12,"
+                                      "setparams=range=pc:colorspace=bt709:color_primaries=bt709:color_trc=bt709")
+    assert "-bsf:v" not in scaled and not any("hwdownload" in a for a in scaled)
+    # Options typed into settings.json come after the encoder's; ones that do not parse are left out.
+    extra = command(small, extra="-ldkfs 8 -spatial-aq 0")
+    assert extra[extra.index("-ldkfs"):extra.index("-ldkfs") + 4] == ["-ldkfs", "8", "-spatial-aq", "0"]
+    assert extra.index("-ldkfs") > extra.index("-bsf:v") and extra[-3:] == ["-f", "flv", "pipe:1"]
+    assert command(small, extra='-x264opts "open') == native == command(small, extra=None) == command(small, extra=" ")
+    # A GPU chain is only ddagrab's: gdigrab gets the CPU one.
+    gdi = build_command("ffmpeg", Settings(), source=DESKTOP, encoder="h264_nvenc", width=1920, height=1080, fps=60,
+                        backend="gdigrab", monitor=big, chain=capture.chain_for(capture.GPU, (2560, 1440), (1920, 1080)))
+    assert _option(gdi, "-vf").startswith("scale=w='min(1920,iw)'")
 
 
 def test_ffmpeg_versions_are_read_from_its_banner(monkeypatch):
@@ -592,15 +757,16 @@ def test_ffmpeg_versions_are_read_from_its_banner(monkeypatch):
     assert source._version("nowhere/ffmpeg") == (0, 0)  # pylint: disable=protected-access
 
 
-def test_mirror_encoder_args_run_with_libx264():
+@pytest.mark.parametrize("seconds, keyframes", [(2, [0, 60, 120]), (0, [0])])
+def test_mirror_encoder_args_run_with_libx264(seconds, keyframes):
     ff = _ffmpeg()
     cmd = [ff, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=30",
-           "-frames:v", "70", "-pix_fmt", "yuv420p", *ffmpeg.mirror_encoder_args("libx264", 1000, 30),
-           "-f", "flv", "pipe:1"]
+           "-frames:v", "130", "-pix_fmt", "yuv420p",
+           *ffmpeg.mirror_encoder_args("libx264", 1000, 30, keyframe_seconds=seconds), "-f", "flv", "pipe:1"]
     tags = flv.FlvReader().feed(subprocess.run(cmd, check=True, capture_output=True, timeout=60).stdout)
     frames = [t for t in tags if t.kind == flv.FRAME]
-    assert len(frames) == 70
-    assert [i for i, t in enumerate(frames) if t.keyframe] == [0, 60]  # every 2 s, no scene cuts
+    assert len(frames) == 130
+    assert [i for i, t in enumerate(frames) if t.keyframe] == keyframes  # every 2 s or the first only, no scene cuts
     assert all(b.dts_ms == b.pts_ms for b in frames)  # no B-frames: nothing reordered
 
 

@@ -428,14 +428,14 @@ async def test_saved_profile_is_asked_for_first(tv):
 
 async def test_the_debug_switches_reach_the_tv_and_a_test_lead_is_not_saved(tv, caplog):
     """More options > Debug: a TV wait of 300 ms (in SETUP, the frames' times and the stats), a
-    keyframe every second and frames shown as they come; mirroring.json keeps the TV's own lead."""
+    keyframe every 10 s and frames shown as they come; mirroring.json keeps the TV's own lead."""
     _ffmpeg()
     profiles.save("fake-tv", profiles.MirrorProfile(MEDIA_FIRST, lead_ms=150))
-    settings = dataclasses.replace(SETTINGS, mirror_lead_ms=300, mirror_keyframe_seconds=1, mirror_on_arrival=True)
+    settings = dataclasses.replace(SETTINGS, mirror_lead_ms=300, mirror_keyframes=10, mirror_on_arrival=True)
     session = MirrorSession(tv.target(), settings, source=TEST_PATTERN, seconds=2.5)
     with caplog.at_level(logging.INFO, logger=mirror_session.__name__):
         await asyncio.wait_for(session.run(), 60)
-    assert "Mirroring with lead 300 ms (test value), keyframe every 1 s, frames shown on arrival" in caplog.text
+    assert "Mirroring with lead 300 ms (test value), keyframe every 10 s, frames shown on arrival" in caplog.text
     assert tv.video_streams[0]["latencyMs"] == 300 and tv.setups[0]["streams"][0]["latencyMax"] == 300 * 44100 // 1000
     assert session.report.established.plan.lead_ms == 300
     assert session._stats.lead_ms == 300  # pylint: disable=protected-access
@@ -443,7 +443,7 @@ async def test_the_debug_switches_reach_the_tv_and_a_test_lead_is_not_saved(tv, 
     ahead = [from_ntp(stamp) - arrived for (stamp, _, _), arrived in zip(video.frames, video.arrived)]
     assert max(ahead) <= 300 * NS // 1000 and statistics.median(ahead) > 240 * NS // 1000
     assert video.errors == [] and video.codec_subtypes == [b"\x14\x01"]
-    assert [n for n, (_, idr, _) in enumerate(video.frames) if idr][:3] == [0, 30, 60]
+    assert [n for n, (_, idr, _) in enumerate(video.frames) if idr] == [0]  # not at 60, as every 2 s
     assert profiles.load("fake-tv").lead_ms == 150  # the TV's own, not the test value
 
 
@@ -519,9 +519,9 @@ async def test_a_tv_that_drops_the_video_fails_the_session(tv):
     assert len(tv.videos) == 2 and tv.teardowns == 2 and profiles.load("fake-tv") is None
 
 
-@pytest.mark.parametrize("keyframe_seconds", [2, 5])
+@pytest.mark.parametrize("keyframe_seconds", [2, 10])
 async def test_ending_mirroring_on_the_tv_stops_the_session(tv, keyframe_seconds):
-    """2.5 s in, past AT_ONCE_SECONDS: with a keyframe every 5 s (More options > Debug) too,
+    """2.5 s in, past AT_ONCE_SECONDS: with a keyframe every 10 s (More options > Debug) too,
     though only one has gone, it is the TV ending mirroring, not one that did not take the video
     and is set up again with the other avcC ending."""
     _ffmpeg()
@@ -533,7 +533,7 @@ async def test_ending_mirroring_on_the_tv_stops_the_session(tv, keyframe_seconds
         if state == State.CASTING:
             casting.set()
 
-    settings = dataclasses.replace(SETTINGS, mirror_keyframe_seconds=keyframe_seconds)
+    settings = dataclasses.replace(SETTINGS, mirror_keyframes=keyframe_seconds)
     session = MirrorSession(tv.target(), settings, status, source=TEST_PATTERN, remember=False)
     task = asyncio.ensure_future(session.run())
     await asyncio.wait_for(casting.wait(), 30)
@@ -763,7 +763,7 @@ async def test_probe_finds_how_tcl_mirrors_and_saves_it(tv):
 
 async def test_probe_leaves_the_debug_switches_out(tv):
     _ffmpeg()
-    settings = dataclasses.replace(SETTINGS, mirror_lead_ms=300, mirror_keyframe_seconds=5, mirror_on_arrival=True)
+    settings = dataclasses.replace(SETTINGS, mirror_lead_ms=300, mirror_keyframes=10, mirror_on_arrival=True)
     result = await asyncio.wait_for(probe_mirroring(tv.target(), settings, seconds=2.5, variants=()), 60)
     assert result.worked and {stream["latencyMs"] for stream in tv.video_streams} == {100}
     video = tv.videos[-1]

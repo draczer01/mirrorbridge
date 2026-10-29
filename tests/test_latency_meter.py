@@ -164,11 +164,12 @@ def test_the_menu_is_in_spanish_too(controller):
     tray._rebuild()  # pylint: disable=protected-access
     assert _latency_action(tray).text() == "Medidor de latencia"
     items = _debug(tray)
-    assert list(items) == ["Medidor de latencia", "Espera de la TV (prueba)", "Cuadro clave cada",
+    assert list(items) == ["Medidor de latencia", "Espera de la TV (prueba)", "Cuadros clave",
                            "Mostrar cuadros al llegar (prueba)"]
     assert list(_choices(items["Espera de la TV (prueba)"])) == [
         "Automática (la guardada para la TV)", "60 ms", "100 ms", "150 ms", "200 ms", "300 ms"]
-    assert _checked(items["Cuadro clave cada"]) == ["2 s"]
+    assert list(_choices(items["Cuadros clave"])) == ["Solo cuando hace falta", "Cada 10 s", "Cada 2 s"]
+    assert _checked(items["Cuadros clave"]) == ["Solo cuando hace falta"]
 
 
 def test_mirror_screens_test_switches_are_next_to_the_latency_meter(controller):
@@ -178,34 +179,35 @@ def test_mirror_screens_test_switches_are_next_to_the_latency_meter(controller):
     tray = TrayMenu(controller, lambda: None, lambda: None)
     tray._rebuild()  # pylint: disable=protected-access
     items = _debug(tray)
-    assert list(items) == ["Latency meter", "TV wait (test)", "Keyframe every", "Show frames on arrival (test)"]
-    waits, keyframes, arrival = items["TV wait (test)"], items["Keyframe every"], items["Show frames on arrival (test)"]
+    assert list(items) == ["Latency meter", "TV wait (test)", "Keyframes", "Show frames on arrival (test)"]
+    waits, keyframes, arrival = items["TV wait (test)"], items["Keyframes"], items["Show frames on arrival (test)"]
     assert list(_choices(waits)) == ["Automatic (saved for the TV)", "60 ms", "100 ms", "150 ms", "200 ms", "300 ms"]
     assert _checked(waits) == ["Automatic (saved for the TV)"]
-    assert list(_choices(keyframes)) == ["1 s", "2 s", "5 s"] and _checked(keyframes) == ["2 s"]
+    assert list(_choices(keyframes)) == ["Only when needed", "Every 10 s", "Every 2 s"]
+    assert _checked(keyframes) == ["Only when needed"]
     assert arrival.isCheckable() and not arrival.isChecked()
 
     _choices(waits)["200 ms"].trigger()
-    _choices(keyframes)["5 s"].trigger()
+    _choices(keyframes)["Every 10 s"].trigger()
     arrival.trigger()
     s = controller.settings
-    assert (s.mirror_lead_ms, s.mirror_keyframe_seconds, s.mirror_on_arrival) == (200, 5, True)
+    assert (s.mirror_lead_ms, s.mirror_keyframes, s.mirror_on_arrival) == (200, 10, True)
     saved = Settings.load()
-    assert (saved.mirror_lead_ms, saved.mirror_keyframe_seconds, saved.mirror_on_arrival) == (200, 5, True)
+    assert (saved.mirror_lead_ms, saved.mirror_keyframes, saved.mirror_on_arrival) == (200, 10, True)
 
     tray._rebuild()  # pylint: disable=protected-access
     items = _debug(tray)
-    assert _checked(items["TV wait (test)"]) == ["200 ms"] and _checked(items["Keyframe every"]) == ["5 s"]
+    assert _checked(items["TV wait (test)"]) == ["200 ms"] and _checked(items["Keyframes"]) == ["Every 10 s"]
     assert items["Show frames on arrival (test)"].isChecked()
     _choices(items["TV wait (test)"])["Automatic (saved for the TV)"].trigger()
     items["Show frames on arrival (test)"].trigger()
     assert (s.mirror_lead_ms, s.mirror_on_arrival) == (0, False)
 
-    # A settings.json edited by hand: each shows what a session uses (2 s, the TV's own lead, at
-    # their time), and the menu is still made.
-    s.mirror_keyframe_seconds, s.mirror_lead_ms, s.mirror_on_arrival = 3, -5, "false"
+    # A settings.json edited by hand: each shows what a session uses (only when needed, the TV's
+    # own lead, at their time), and the menu is still made.
+    s.mirror_keyframes, s.mirror_lead_ms, s.mirror_on_arrival = 3, -5, "false"
     tray._rebuild()  # pylint: disable=protected-access
     items = _debug(tray)
-    assert _checked(items["Keyframe every"]) == ["2 s"]
+    assert _checked(items["Keyframes"]) == ["Only when needed"]
     assert _checked(items["TV wait (test)"]) == ["Automatic (saved for the TV)"]
     assert not items["Show frames on arrival (test)"].isChecked()

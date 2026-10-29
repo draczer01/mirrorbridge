@@ -3,11 +3,12 @@
 Two sources: the desktop, captured as a cast captures it (ffmpeg.py: ddagrab or gdigrab, the
 same display, window and mouse pointer choices), and a test pattern (FFmpeg's testsrc: a moving
 gradient and a frame counter) that needs no screen at all. Either is scaled to fit the TV's
-screen as GET /info gives it (never up), and encoded with ffmpeg.mirror_encoder_args: the
-encoder MirrorBridge picks for casts, with every option that makes it hold frames back turned
-off. FFmpeg's own queue of captured frames is kept short too (INPUT_QUEUE): when the encoder
-cannot keep up, capture waits (and the next picture is a newer one) instead of the frames
-piling up seconds late.
+screen as GET /info gives it (never up): the desktop on the graphics card or with the processor
+(capture.py, the capture chain), and encoded with ffmpeg.mirror_encoder_args: the encoder
+MirrorBridge picks for casts, with every option that makes it hold frames back turned off, and
+a keyframe every keyframe_seconds (0: only the first). FFmpeg's own queue of captured frames is
+kept short too (INPUT_QUEUE): when the encoder cannot keep up, capture waits (and the next
+picture is a newer one) instead of the frames piling up seconds late.
 
 A thread of its own reads the pipe in large reads and hands each complete frame, with the time
 its last byte arrived, to the asyncio loop, where they wait in a FrameQueue.
@@ -20,6 +21,7 @@ import dataclasses
 import logging
 import os
 import re
+import shlex
 import subprocess
 import threading
 from collections import deque
@@ -29,6 +31,7 @@ from typing import Callable, Optional
 from .. import ffmpeg
 from ..config import Settings
 from ..text import Text
+from . import capture
 from .clock import now_ns
 from .flv import FRAME, FlvError, FlvReader
 
@@ -39,6 +42,7 @@ TEST_PATTERN = "test"
 SOURCES = (DESKTOP, TEST_PATTERN)
 READ_SIZE = 1 << 20
 STOP_SECONDS = 5
+STDERR_LINES = 30  # of FFmpeg's stderr, kept for errors() and the log
 INPUT_QUEUE = 2  # captured frames FFmpeg may hold before encoding them (its own default is 8)
 
 
@@ -88,27 +92,50 @@ def build_command(
     backend: str = "",
     monitor: "ffmpeg.Monitor | None" = None,
     region: "ffmpeg.Region | None" = None,
+    chain: "capture.Chain | None" = None,
+    extra: str = "",
+    keyframe_seconds: int = ffmpeg.MIRROR_KEYFRAME_SECONDS,
 ) -> list[str]:
-    """FFmpeg: the source, fitted into width x height, encoded for mirroring, FLV to stdout."""
+    """FFmpeg: the source, fitted into width x height, encoded for mirroring, FLV to stdout.
+
+    The desktop goes through `chain` (capture.Chain; None is the CPU chain), the GPU one only
+    for ddagrab. `extra` is more FFmpeg options after the encoder's (Settings.mirror_encoder_extra),
+    keyframe_seconds the time between keyframes (0: only the first; the default is a keyframe
+    every 2 s, for callers that do not start FFmpeg again for one, as Google Cast mirroring).
+    """
+    output: list[str] = []
     if source == TEST_PATTERN:
         video_in = ["-re", "-f", "lavfi", "-i", f"testsrc=size={width}x{height}:rate={fps}"]
-        filters: list[str] = []
+        filters = ["format=yuv420p" if encoder == "libx264" else "format=nv12"]
     else:
-        capture = dataclasses.replace(settings, framerate=fps)
-        video_in, filters = ffmpeg._video_input(backend, capture, monitor, region)  # pylint: disable=protected-access
-        # Bilinear: a quarter less CPU than bicubic for a 1440p desktop on a 1080p TV, every frame.
-        filters = list(filters) + [
-            f"scale=w='min({width},iw)':h='min({height},ih)':force_original_aspect_ratio=decrease"
-            ":force_divisible_by=2:flags=bilinear",
-        ]
-    filters.append("format=yuv420p" if encoder == "libx264" else "format=nv12")
+        settings_in = dataclasses.replace(settings, framerate=fps)
+        video_in, prefilters = ffmpeg._video_input(backend, settings_in, monitor, region)  # pylint: disable=protected-access
+        if chain is not None and chain.kind == capture.GPU and backend == "ddagrab":
+            # ddagrab's frames stay on the graphics card: not brought to memory (prefilters)
+            filters = capture.gpu_filters(chain)
+            output = capture.output_args(chain)
+        else:
+            filters = capture.cpu_filters(prefilters, width, height, encoder)
     video_in = _paced(video_in, ff)
     cmd = [ff, "-hide_banner", "-nostats", "-loglevel", "warning", "-thread_queue_size", str(INPUT_QUEUE), *video_in]
-    cmd += ["-vf", ",".join(filters), "-an"]
-    cmd += ffmpeg.mirror_encoder_args(encoder, settings.video_bitrate_kbps, fps,
-                                      keyframe_seconds=settings.mirror_keyframe_seconds)
+    if filters:
+        cmd += ["-vf", ",".join(filters)]
+    cmd += ["-an"]
+    cmd += ffmpeg.mirror_encoder_args(encoder, settings.video_bitrate_kbps, fps, keyframe_seconds=keyframe_seconds)
+    cmd += output + _extra_args(extra)
     cmd += ["-flush_packets", "1", "-flvflags", "no_duration_filesize+no_metadata", "-f", "flv", "pipe:1"]
     return cmd
+
+
+def _extra_args(extra: object) -> list[str]:
+    """Options typed into settings.json by hand (mirror_encoder_extra); none if they do not parse."""
+    if not isinstance(extra, str) or not extra.strip():
+        return []
+    try:
+        return shlex.split(extra)
+    except ValueError as ex:
+        _LOGGER.warning("Leaving out mirror_encoder_extra %r: %s", extra, ex)
+        return []
 
 
 class FFmpegSource:
@@ -122,16 +149,19 @@ class FFmpegSource:
         self.started_ns = 0
         self.first_unit_ns: Optional[int] = None
         self.error: Optional[Exception] = None
-        self._stderr: deque[str] = deque(maxlen=30)
+        self._stderr: deque[str] = deque(maxlen=STDERR_LINES)
+        self._log_thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
         self.started_ns = now_ns()
         self.proc = ffmpeg.popen(self.cmd, stdout=subprocess.PIPE)
         threading.Thread(target=self._read, name="mirrorbridge-mirror-pipe", daemon=True).start()
-        threading.Thread(target=self._drain_stderr, name="mirrorbridge-mirror-log", daemon=True).start()
+        self._log_thread = threading.Thread(target=self._drain_stderr, name="mirrorbridge-mirror-log", daemon=True)
+        self._log_thread.start()
 
-    def errors(self) -> str:
-        return "\n".join(list(self._stderr)[-8:])
+    def errors(self, lines: int = 8) -> str:
+        """The last `lines` lines FFmpeg wrote to stderr (STDERR_LINES are kept)."""
+        return "\n".join(list(self._stderr)[-lines:])
 
     def _read(self) -> None:
         assert self.proc and self.proc.stdout
@@ -163,23 +193,35 @@ class FFmpegSource:
                 self._stderr.append(line)
                 _LOGGER.debug("ffmpeg: %s", line)
 
-    def stop(self) -> None:
-        """Ask FFmpeg to quit ('q'), then kill it if it does not. Blocks up to STOP_SECONDS."""
+    def stop(self, kill: bool = False) -> None:
+        """Ask FFmpeg to quit ('q'), then kill it if it does not; with kill, end it at once (a
+        new FFmpeg is to start). Then wait for the last of its stderr, so that errors() has it
+        all. Blocks up to STOP_SECONDS, and a second for stderr. An FFmpeg that has ended is only
+        waited for."""
         proc = self.proc
         if proc is None:
             return
         if proc.poll() is None:
-            try:
-                proc.stdin.write(b"q")
-                proc.stdin.flush()
-            except (OSError, ValueError):
-                pass
+            if kill:
+                try:
+                    proc.kill()
+                except OSError:  # it ended in the meantime
+                    pass
+            else:
+                try:
+                    proc.stdin.write(b"q")
+                    proc.stdin.flush()
+                except (OSError, ValueError):
+                    pass
             try:
                 proc.wait(STOP_SECONDS)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
         self.returncode = proc.returncode
+        thread = self._log_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(1.0)
 
 
 class FrameQueue:
@@ -238,6 +280,14 @@ class FrameQueue:
         """Frames that made way for newer ones since the last call."""
         trimmed, self._trimmed = self._trimmed, 0
         return trimmed
+
+    def clear(self) -> None:
+        """Forget everything waiting, the end (None) too: a new FFmpeg takes over from the one
+        it came from. last_frame_ns stays, so that a gap in the frames still counts from the
+        last one that came."""
+        self._units.clear()
+        self._frames = 0
+        self._trimmed = 0
 
 
 def ended_text(source: FFmpegSource) -> Text:

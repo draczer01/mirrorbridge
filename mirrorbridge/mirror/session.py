@@ -25,9 +25,9 @@ FRAME_GAP_SECONDS); setting up has START_SECONDS in all. FFmpeg ending before it
 with GDI capture, then with the CPU encoder, as a cast does.
 
 More options > Debug has test switches for the sessions after they are set (lead_override,
-on_arrival): the TV's wait (the lead) in place of the one saved for the TV, which is what is
-saved again; a keyframe every 1, 2 or 5 seconds; and codec packets that ask the TV to show
-each frame as it comes, not at its time (packets.codec_packet). Test this TV and
+keyframe_seconds, on_arrival): the TV's wait (the lead) in place of the one saved for the TV,
+which is what is saved again; a keyframe every 10 or 2 seconds; and codec packets that ask the
+TV to show each frame as it comes, not at its time (packets.codec_packet). Test this TV and
 `mirror --probe` leave them out.
 
 A TV that drops the video connection within AT_ONCE_SECONDS of the first frame of a first
@@ -146,6 +146,13 @@ def lead_override(settings: Settings) -> int:
     if not isinstance(lead, int) or isinstance(lead, bool) or lead <= 0:
         return 0
     return max(profiles.MIN_LEAD_MS, min(profiles.MAX_LEAD_MS, lead))
+
+
+def keyframe_seconds(settings: Settings) -> int:
+    """More options > Debug > Keyframes: the seconds between keyframes. A keyframe only when
+    needed (0) takes FFmpeg started again for each one, which a session does not do yet: it
+    gets one every ffmpeg.MIRROR_KEYFRAME_SECONDS meanwhile."""
+    return ffmpeg.mirror_keyframe_seconds(settings.mirror_keyframes) or ffmpeg.MIRROR_KEYFRAME_SECONDS
 
 
 def on_arrival(settings: Settings) -> bool:
@@ -408,7 +415,8 @@ class MirrorSession:
         backend, encoder = self._using = self._sources.pop(0)
         width, height = self.report.canvas or FALLBACK_CANVAS
         cmd = build_command(ff, self.settings, source=self.source, encoder=encoder, width=width, height=height,
-                            fps=self.report.fps, backend=backend, monitor=monitor, region=region)
+                            fps=self.report.fps, backend=backend, monitor=monitor, region=region,
+                            keyframe_seconds=keyframe_seconds(self.settings))
         self.report.encoder = encoder
         label = ffmpeg.ENCODER_LABELS.get(encoder, encoder)
         self._set(State.STARTING, Text("encoder_via", "{encoder} via {backend}", encoder=label,
@@ -469,7 +477,7 @@ class MirrorSession:
         if lead:
             plan.lead_ms = lead
         _LOGGER.info("Mirroring with lead %d ms (%s), keyframe every %d s, frames shown %s", plan.lead_ms,
-                     "test value" if lead else "automatic", ffmpeg.mirror_keyframe_seconds(s.mirror_keyframe_seconds),
+                     "test value" if lead else "automatic", keyframe_seconds(s),
                      "on arrival" if on_arrival(s) else "at their time")
         _LOGGER.info("Setting up mirroring to %s (%s): %s", self.target.name,
                      "saved settings" if self.saved else "first time", plan.describe())

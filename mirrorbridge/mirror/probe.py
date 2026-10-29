@@ -218,7 +218,7 @@ class _Probe:
         # Without the Debug menu's test switches: what the probe finds and saves is the TV's own.
         defaults = Settings()
         self.settings = dataclasses.replace(settings, mirror_lead_ms=defaults.mirror_lead_ms,
-                                            mirror_keyframe_seconds=defaults.mirror_keyframe_seconds,
+                                            mirror_keyframes=defaults.mirror_keyframes,
                                             mirror_on_arrival=defaults.mirror_on_arrival)
         self.seconds = seconds
         self.send_test_pattern = send_test_pattern

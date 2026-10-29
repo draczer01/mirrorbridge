@@ -10,6 +10,7 @@ such as TCL, Roku, Samsung and LG TVs; Apple TVs and Macs need FairPlay and are 
     negotiation.py  SETUP in the shapes TVs take, RECORD, /feedback, TEARDOWN
     clock.py        the NTP responder the TV asks for the time, and the frame clock
     source.py       FFmpeg: the desktop or a test pattern, H.264 as FLV into a pipe
+    capture.py      the desktop on the graphics card or by the processor; a lost capture
     flv.py, h264.py reading FFmpeg's output; the avcC record the TV gets
     packets.py      the 128-byte packet header and the video's encryption
     datachannel.py  the TCP connection the video goes over

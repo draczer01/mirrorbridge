@@ -171,7 +171,8 @@ class PtsMapper:
 
     A delay that grows for good (FFmpeg holding frames back) becomes the window's new smallest
     offset within `window_ns`; `behind()` measures a frame against the smallest of the whole
-    session instead, so that it still shows.
+    session instead, so that it still shows. A new FFmpeg in the same session starts its pts
+    from another origin: `restart()`.
     """
 
     def __init__(self, window_ns: int = 2 * NS) -> None:
@@ -179,6 +180,12 @@ class PtsMapper:
         self._offsets: deque[tuple[int, int]] = deque()  # (arrival, offset), offsets increasing
         self._last: Optional[int] = None
         self.lowest: Optional[int] = None  # the smallest offset of the session
+
+    def restart(self) -> None:
+        """A new FFmpeg, whose pts start from 0 again: forget the offsets, and the session's
+        smallest, but not the last time given, so that the times that follow never go back."""
+        self._offsets.clear()
+        self.lowest = None
 
     def behind(self, pts_ms: int, arrival_ns: int) -> int:
         """How much later than at best (the session's smallest offset) this frame came, in ns."""

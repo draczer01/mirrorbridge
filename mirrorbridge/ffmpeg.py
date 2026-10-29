@@ -6,13 +6,14 @@ import functools
 import logging
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import Settings
+from .config import CHOICES, Settings
 from .text import Text
 
 _LOGGER = logging.getLogger(__name__)
@@ -170,20 +171,29 @@ def has_input_format(ffmpeg: str, name: str) -> bool:
     return any(name in line.split()[1:2] for line in out.splitlines())
 
 
-_WORKING_ENCODERS: set[tuple[str, str, bool]] = set()
+_WORKING_ENCODERS: set[tuple[str, str, bool, int | None]] = set()
+_WARNED: set[tuple[str, str, str]] = set()  # (ffmpeg, encoder, why): each one is a warning once a run
+# What FFmpeg says when the NVIDIA driver is older than its NVENC needs (570 for FFmpeg 8.1.1).
+_DRIVER_LINE = re.compile(r"minimum required Nvidia driver|required nvenc API version", re.IGNORECASE)
 
 
-def encoder_works(ffmpeg: str, encoder: str, mirror: bool = False) -> bool:
+def encoder_works(ffmpeg: str, encoder: str, mirror: bool = False, keyframes: int = 2) -> bool:
     """Encode a few real frames; listing in `-encoders` does not mean the GPU exists.
 
     Only successes are cached: a GPU encoder that is busy (OBS, ShadowPlay) or slow to
     start right after logon gets probed again on the next cast. mirror=True tries the
-    options of screen mirroring (mirror_encoder_args) instead of those of a cast.
+    options of screen mirroring (mirror_encoder_args, with a keyframe every `keyframes`
+    seconds, MIRROR_KEYFRAME_SECONDS unless told, 0 for the first only) instead of those of a
+    cast. A failure is a warning in the log (once a run for each reason), with FFmpeg's line
+    about the NVIDIA driver if it wrote one: with a driver too old for this FFmpeg, NVENC is
+    lost without another word.
     """
-    if (ffmpeg, encoder, mirror) in _WORKING_ENCODERS:
+    key = (ffmpeg, encoder, mirror, keyframes if mirror else None)
+    if key in _WORKING_ENCODERS:
         return True
     # Same options as a real cast, so an option the driver rejects shows up here.
-    options = mirror_encoder_args(encoder, 8000, 30) if mirror else _encoder_args(encoder, Settings(), gop=30)
+    options = (mirror_encoder_args(encoder, 8000, 30, keyframe_seconds=keyframes) if mirror
+               else _encoder_args(encoder, Settings(), gop=30))
     args = [
         ffmpeg, "-hide_banner", "-loglevel", "error",
         "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30",
@@ -192,26 +202,39 @@ def encoder_works(ffmpeg: str, encoder: str, mirror: bool = False) -> bool:
     ]
     try:
         result = _run(args, timeout=20)
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired) as ex:
+        _unusable(ffmpeg, encoder, f"FFmpeg did not answer: {ex}")
         return False
     if result.returncode != 0:
-        _LOGGER.debug("Encoder %s unusable: %s", encoder, result.stderr.strip()[-300:])
+        stderr = result.stderr.strip()
+        tail = stderr[-300:]
+        driver = [line.strip() for line in stderr.splitlines() if _DRIVER_LINE.search(line) and line not in tail]
+        _unusable(ffmpeg, encoder, "\n".join(driver + [tail]).strip() or f"exit code {result.returncode}")
         return False
-    _WORKING_ENCODERS.add((ffmpeg, encoder, mirror))
+    _WORKING_ENCODERS.add(key)
     return True
+
+
+def _unusable(ffmpeg: str, encoder: str, why: str) -> None:
+    key = (ffmpeg, encoder, why)
+    log = _LOGGER.debug if key in _WARNED else _LOGGER.warning
+    _WARNED.add(key)
+    log("Encoder %s does not work here: %s", ENCODER_LABELS.get(encoder, encoder), why)
 
 
 def available_encoders(ffmpeg: str) -> list[str]:
     return [enc for enc in ENCODER_PREFERENCE if encoder_works(ffmpeg, enc)]
 
 
-def pick_encoder(ffmpeg: str, wanted: str, mirror: bool = False) -> str:
+def pick_encoder(ffmpeg: str, wanted: str, mirror: bool = False, keyframes: int = 2) -> str:
+    """`wanted` if it works, else the first of ENCODER_PREFERENCE that does (mirror and
+    keyframes as for encoder_works)."""
     if wanted != "auto":
-        if encoder_works(ffmpeg, wanted, mirror):
+        if encoder_works(ffmpeg, wanted, mirror, keyframes):
             return wanted
         _LOGGER.warning("Encoder %s does not work on this machine, auto-selecting", wanted)
     for enc in ENCODER_PREFERENCE:
-        if encoder_works(ffmpeg, enc, mirror):
+        if encoder_works(ffmpeg, enc, mirror, keyframes):
             return enc
     raise RuntimeError(Text("no_encoder", "No working H.264 encoder found in this FFmpeg build"))
 
@@ -388,30 +411,61 @@ def _encoder_args(encoder: str, settings: Settings, gop: int) -> list[str]:
 
 
 # Screen mirroring (mirrorbridge.mirror) shows each frame about 100 ms after it was captured, so
-# the encoder may hold none back: no B-frames, no lookahead, no frames in flight, CBR with a VBV
-# of about one frame (which also keeps a keyframe from arriving as one big burst), and an IDR at
-# the start and then every MIRROR_KEYFRAME_SECONDS (or the Debug menu's test value, one of
-# MIRROR_KEYFRAME_CHOICES): a frame dropped costs the frames up to the next keyframe.
+# the encoder may hold none back: no B-frames, no lookahead, no frames in flight, and CBR with a
+# VBV of about one frame (which also keeps a keyframe from arriving as one big burst).
+#
+# Through a VBV that small a keyframe comes out far worse than the P-frames before it (q 39
+# against q 7 on dense text at 8 Mbit/s and 60 fps, on Humberto's PC), and the picture takes a
+# second or two to sharpen again: a keyframe every 2 s was a pulse on text every 2 s. So by
+# default (MIRROR_KEYFRAMES_DEFAULT, keyframe_seconds 0) FFmpeg makes a keyframe only when it
+# starts, as an iPhone does, and the session starts FFmpeg again when it needs another one
+# (frames it dropped cost every frame up to the next keyframe). NVENC and x264 then make no
+# other; Quick Sync, AMF and Media Foundation, not tried that way on real hardware, still make
+# one every UNTESTED_KEYFRAME_SECONDS. The Debug menu (MIRROR_KEYFRAME_CHOICES) also has a
+# keyframe every 10 s and every 2 s, to compare. A caller that does not say gets one every
+# MIRROR_KEYFRAME_SECONDS, as before (Google Cast mirroring, the encoder probe).
 MIRROR_KEYFRAME_SECONDS = 2
-MIRROR_KEYFRAME_CHOICES = (1, 2, 5)
+MIRROR_KEYFRAMES_DEFAULT = 0
+MIRROR_KEYFRAME_CHOICES = CHOICES["mirror_keyframes"]  # 0 (only when needed), 10, 2
+UNTESTED_KEYFRAME_SECONDS = 10
+NO_PERIODIC_ENCODERS = ("h264_nvenc", "libx264")
+NO_PERIODIC_GOP = 2**31 - 1  # -g: in effect never
 MIRROR_VBV_FRAMES = 1.0
 
 
 def mirror_keyframe_seconds(seconds: object) -> int:
-    """`seconds` if it is one of MIRROR_KEYFRAME_CHOICES, else MIRROR_KEYFRAME_SECONDS (a
-    settings.json edited by hand)."""
-    if isinstance(seconds, (int, float)) and seconds in MIRROR_KEYFRAME_CHOICES:
+    """The Debug menu's keyframe setting as a session takes it: `seconds` if it is one of
+    MIRROR_KEYFRAME_CHOICES, else MIRROR_KEYFRAMES_DEFAULT (a settings.json edited by hand)."""
+    if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) and seconds in MIRROR_KEYFRAME_CHOICES:
         return int(seconds)
-    return MIRROR_KEYFRAME_SECONDS
+    return MIRROR_KEYFRAMES_DEFAULT
+
+
+def mirror_keyframe_interval(encoder: str, keyframe_seconds: int = MIRROR_KEYFRAME_SECONDS) -> int:
+    """Seconds between the keyframes `encoder` makes when asked for one every keyframe_seconds
+    (0: none after the first, but see UNTESTED_KEYFRAME_SECONDS); anything but a whole number of
+    seconds is MIRROR_KEYFRAME_SECONDS."""
+    if not isinstance(keyframe_seconds, int) or isinstance(keyframe_seconds, bool) or keyframe_seconds < 0:
+        return MIRROR_KEYFRAME_SECONDS
+    if keyframe_seconds == 0 and encoder not in NO_PERIODIC_ENCODERS:
+        return UNTESTED_KEYFRAME_SECONDS
+    return keyframe_seconds
 
 
 def mirror_encoder_args(encoder: str, kbps: int, fps: int, vbv_frames: float = MIRROR_VBV_FRAMES,
                         keyframe_seconds: int = MIRROR_KEYFRAME_SECONDS) -> list[str]:
-    keyframe_seconds = mirror_keyframe_seconds(keyframe_seconds)
-    gop = max(1, round(fps * keyframe_seconds))
+    """The encoder's options for mirroring at kbps and fps, with a keyframe every
+    keyframe_seconds (0: at the start only; mirror_keyframe_interval)."""
+    seconds = mirror_keyframe_interval(encoder, keyframe_seconds)
     bufsize = max(1, round(kbps * vbv_frames / max(1, fps)))
     rate = ["-b:v", f"{kbps}k", "-maxrate", f"{kbps}k", "-bufsize", f"{bufsize}k"]
-    common = ["-g", str(gop), "-bf", "0", "-force_key_frames", f"expr:gte(t,n_forced*{keyframe_seconds})"]
+    if seconds:
+        gop = max(1, round(fps * seconds))
+        common = ["-g", str(gop), "-bf", "0", "-force_key_frames", f"expr:gte(t,n_forced*{seconds})"]
+        keyint = f"keyint={gop}:min-keyint={gop}:scenecut=0"
+    else:
+        common = ["-g", str(NO_PERIODIC_GOP), "-bf", "0"]
+        keyint = "keyint=infinite:scenecut=0"
     if encoder == "h264_nvenc":
         # -delay 0: NVENC otherwise keeps about 3 frames in flight (50 ms at 60 fps).
         specific = ["-preset", "p4", "-tune", "ll", "-rc", "cbr", "-profile:v", "high", "-zerolatency", "1",
@@ -426,8 +480,7 @@ def mirror_encoder_args(encoder: str, kbps: int, fps: int, vbv_frames: float = M
     elif encoder == "h264_mf":
         specific = ["-rate_control", "cbr", "-scenario", "display_remoting", "-hw_encoding", "1"]
     else:
-        specific = ["-preset", "veryfast", "-tune", "zerolatency", "-profile:v", "high",
-                    "-x264-params", f"keyint={gop}:min-keyint={gop}:scenecut=0"]
+        specific = ["-preset", "veryfast", "-tune", "zerolatency", "-profile:v", "high", "-x264-params", keyint]
     return ["-c:v", encoder] + specific + rate + common
 
 

@@ -35,6 +35,18 @@ def credentials_file() -> Path:
     return app_data_dir() / "pairings.json"
 
 
+# What Settings.load checks: a value of another type (a settings.json edited by hand, a null) or
+# not among the setting's CHOICES gets the default. These are Mirror screen's newer settings; the
+# older ones are checked where they are used.
+CHOICES: dict[str, tuple] = {
+    "mirror_latency": ("low", "normal", "smooth"),
+    "mirror_framerate": (0, 30, 60),
+    "mirror_keyframes": (0, 10, 2),  # in the Debug menu's order (ffmpeg.MIRROR_KEYFRAME_CHOICES)
+    "mirror_scaler": ("auto", "cpu"),
+}
+CHECKED = set(CHOICES) | {"mirror_encoder_extra"}
+
+
 @dataclass
 class Settings:
     """Everything the user can tune. Defaults are chosen to "just work"."""
@@ -64,11 +76,17 @@ class Settings:
     http_port: int = 7878  # fixed so a single firewall rule covers it
     bind_address: str = ""  # empty -> auto-detect the interface reaching the device
 
+    # Mirror screen settings (framerate above is for casts only)
+    mirror_latency: str = "normal"  # low | normal | smooth: how long the TV waits to show a frame
+    mirror_framerate: int = 0  # 0 = automatic (60 when this PC can), 30 or 60
+
     # Mirror screen's test switches (More options > Debug), for the sessions after they are set;
     # Test this TV and mirror --probe leave them out
     mirror_lead_ms: int = 0  # how long the TV waits to show a frame; 0 = what is saved for the TV
-    mirror_keyframe_seconds: int = 2  # 1, 2 or 5 (ffmpeg.MIRROR_KEYFRAME_CHOICES)
+    mirror_keyframes: int = 0  # seconds between keyframes: 0 = only when needed, 10 or 2
+    mirror_scaler: str = "auto"  # auto (on the graphics card when it can) | cpu (as before)
     mirror_on_arrival: bool = False  # ask the TV to show each frame as it comes, not at its time
+    mirror_encoder_extra: str = ""  # settings.json only: FFmpeg options after the encoder's, for experiments
 
     # App
     language: str = "en"  # a gui.i18n.LANGUAGES code; any other ("" once meant "as Windows") is English
@@ -92,8 +110,14 @@ class Settings:
         except (OSError, ValueError) as ex:
             _LOGGER.warning("Ignoring unreadable settings file %s: %s", path, ex)
             return cls()
-        known = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in raw.items() if k in known})
+        defaults = {f.name: f.default for f in fields(cls)}
+        values = {k: v for k, v in raw.items() if k in defaults}
+        for name in CHECKED.intersection(values):
+            value = values[name]
+            if type(value) is not type(defaults[name]) or value not in CHOICES.get(name, (value,)):
+                _LOGGER.info("Ignoring %s=%r in %s: using %r", name, value, path, defaults[name])
+                del values[name]
+        return cls(**values)
 
     def save(self, path: Path | None = None) -> None:
         path = path or app_data_dir() / "settings.json"

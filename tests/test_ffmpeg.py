@@ -1,3 +1,4 @@
+import logging
 import shutil
 import subprocess
 import time
@@ -185,6 +186,49 @@ def test_display_drawn_by_another_gpu_is_captured_with_gdigrab(monkeypatch, tmp_
 def test_libx264_is_detected():
     assert ffmpeg.encoder_works(FF, "libx264")
     assert ffmpeg.pick_encoder(FF, "auto") in ffmpeg.ENCODER_PREFERENCE
+
+
+# What FFmpeg 8.1.1 says with an NVIDIA driver older than 570, then a page of more.
+OLD_DRIVER = ("[h264_nvenc @ 000001] Driver does not support the required nvenc API version. Required: 13.0 Found: 12.2\n"
+              "[h264_nvenc @ 000001] The minimum required Nvidia driver for nvenc is 570.0 or newer\n"
+              + "[vost#0:0/h264_nvenc @ 000002] some later line\n" * 10 + "Error while opening encoder")
+
+
+def test_the_encoder_probe_says_why_an_encoder_does_not_work(monkeypatch, caplog):
+    """A warning for each reason, once a run, with the driver line even when it is far up; the
+    mirroring probe is made, and kept, for each keyframe mode."""
+    probes = []
+
+    def run(args, timeout=15):
+        probes.append(args)
+        if "h264_nvenc" in args:
+            return subprocess.CompletedProcess(args, 1, "", OLD_DRIVER)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(ffmpeg, "_run", run)
+    monkeypatch.setattr(ffmpeg, "_WORKING_ENCODERS", set())
+    monkeypatch.setattr(ffmpeg, "_WARNED", set())
+    with caplog.at_level(logging.DEBUG, logger="mirrorbridge.ffmpeg"):
+        assert ffmpeg.pick_encoder("ff", "auto", True, keyframes=0) == "h264_qsv"
+        assert not ffmpeg.encoder_works("ff", "h264_nvenc", True, 0)  # again: no second warning
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and warnings[0].startswith("Encoder NVIDIA NVENC does not work here: ")
+    assert "The minimum required Nvidia driver for nvenc is 570.0 or newer" in warnings[0]
+    assert warnings[0].endswith("Error while opening encoder")
+    qsv = next(args for args in probes if "h264_qsv" in args)
+    assert qsv[qsv.index("-g") + 1] == "300"  # only when needed: Quick Sync still every 10 s
+    probed = len(probes)
+    assert ffmpeg.encoder_works("ff", "h264_qsv", True, 0) and len(probes) == probed  # kept
+    assert ffmpeg.pick_encoder("ff", "h264_qsv", True) == "h264_qsv" and len(probes) == probed + 1  # every 2 s
+    assert probes[-1][probes[-1].index("-g") + 1] == "60"
+    assert ffmpeg.encoder_works("ff", "h264_qsv") and len(probes) == probed + 2  # a cast's options
+
+    def missing(args, timeout=15):
+        raise FileNotFoundError(2, "No such file", args[0])
+
+    monkeypatch.setattr(ffmpeg, "_run", missing)
+    assert not ffmpeg.encoder_works("nowhere/ffmpeg", "libx264")
+    assert "Encoder x264 (CPU) does not work here: FFmpeg did not answer" in caplog.text
 
 
 def _wait_segments(path, n, timeout=20):
