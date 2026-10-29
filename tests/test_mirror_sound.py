@@ -2,10 +2,16 @@
 shairport-sync opens a packet (cryptography's ChaCha20-Poly1305) and pyatv's own cipher
 (tests/test_mirror_sound_loopback.py has whole sessions)."""
 
+import asyncio
 import hashlib
+import math
 import random
 import struct
 import subprocess
+import sys
+import time
+import types
+from types import SimpleNamespace
 
 import pytest
 from cryptography.exceptions import InvalidTag
@@ -13,7 +19,7 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from pyatv.support.chacha20 import Chacha20Cipher8byteNonce
 
 from fake_mirror_tv import parse_alac
-from mirrorbridge import ffmpeg
+from mirrorbridge import audio, ffmpeg
 from mirrorbridge.mirror import audiopackets as ap
 from mirrorbridge.mirror import sound
 from mirrorbridge.mirror.clock import NS, from_ntp, to_ntp
@@ -524,3 +530,178 @@ def test_sound_knobs_describe_names_every_variable():
         assert f"MIRRORBRIDGE_MIRROR_SOUND{name}=" in text
     assert text.startswith("MIRRORBRIDGE_MIRROR_SOUND=1, MIRRORBRIDGE_MIRROR_SOUND_TONE=0, ")
     assert "_DELAY_MS=40," in text and "_GAP_MS=unset," in text and "_PORTS=1,2," in text and "_HOLD=1," in text
+
+
+# -- capture: the loopback recorder's sink, the test tone ------------------------------------------------
+
+
+class _FakeSoundcard(types.ModuleType):
+    """soundcard as LoopbackFeeder uses it: the default speaker changes after `switch_after`
+    records, record number `empty_at` comes back empty and number `fail_at` raises (a device
+    unplugged)."""
+
+    def __init__(self, switch_after: int = 20, empty_at: int = 10, fail_at: int = 30) -> None:
+        super().__init__("soundcard")
+        self.records = 0
+        self.switch_after, self.empty_at, self.fail_at = switch_after, empty_at, fail_at
+        self.opened: list[tuple[str, dict]] = []
+        self.closed = 0
+
+    def default_speaker(self):
+        which = "B" if self.records >= self.switch_after else "A"
+        return SimpleNamespace(id=f"{{speaker-{which}}}", name=f"Speakers {which}")
+
+    def get_microphone(self, ident: str, include_loopback: bool = False):
+        assert include_loopback
+        card = self
+
+        class Recorder:
+            def __enter__(self):
+                card.opened.append((ident, kwargs))
+                return self
+
+            def __exit__(self, *exc):
+                card.closed += 1
+
+            def record(self, numframes):
+                import numpy as np
+
+                card.records += 1
+                if card.records == card.fail_at:
+                    raise RuntimeError("the device was unplugged")
+                time.sleep(0.001)
+                if card.records == card.empty_at:
+                    return np.zeros((0, 2), dtype=np.float32)
+                return np.full((numframes, 2), card.records / 1000, dtype=np.float32)
+
+        kwargs: dict = {}
+
+        def recorder(**kw):
+            kwargs.update(kw)
+            return Recorder()
+
+        return SimpleNamespace(recorder=recorder)
+
+
+def test_loopback_feeder_hands_blocks_to_a_sink(monkeypatch):
+    card = _FakeSoundcard()
+    monkeypatch.setitem(sys.modules, "soundcard", card)
+    monkeypatch.setattr(audio, "SPEAKER_CHECK_SECONDS", 0)
+    got = []
+
+    def sink(arr, arrived, fresh):
+        got.append((arr.copy(), arrived, fresh, feeder.speaker_id))
+        if len(got) == 40:
+            raise RuntimeError("the sound stopped")
+
+    feeder = audio.LoopbackFeeder(sink=sink, samplerate=44100, block_frames=352, buffer_frames=4410,
+                                  name="mirrorbridge-audio")
+    feeder.start()
+    feeder.join(10)
+    assert not feeder.is_alive() and feeder.error is None  # a sink that raises ends the thread
+    assert [a.shape for a, _, _, _ in got] == [(352, 2)] * 40 and all(a.dtype == "float32" for a, _, _, _ in got)
+    assert [i for i, (_, _, fresh, _) in enumerate(got) if fresh] == [0, 20, 29]  # each recorder opened
+    assert [opened for opened, _ in card.opened] == ["{speaker-A}", "{speaker-B}", "{speaker-B}"]
+    assert card.opened[0][1] == dict(samplerate=44100, channels=2, blocksize=4410) and card.closed == 3
+    assert [s for _, _, _, s in got[:20]] == ["{speaker-A}"] * 20 and got[20][3] == "{speaker-B}"
+    assert feeder.speaker_name == "Speakers B"
+    assert not got[9][0].any() and got[8][0][0, 0] == pytest.approx(0.009)  # the empty record: zeros
+    stamps = [arrived for _, arrived, _, _ in got]
+    assert stamps == sorted(stamps)
+    assert got[29][1] - got[28][1] >= 0.45 * NS  # half a second before reopening after the failure
+
+
+def test_loopback_feeder_sink_with_a_source_and_without_a_port_or_sink():
+    import numpy as np
+
+    got = []
+
+    def sink(arr, arrived, fresh):
+        got.append((arr, fresh))
+        if len(got) == 5:
+            feeder.stop()
+
+    feeder = audio.LoopbackFeeder(source=lambda frames: np.full(frames * 2, 0.25, dtype="<f4").tobytes(), sink=sink,
+                                  block_frames=352)
+    feeder.run()
+    assert [(a.shape, fresh) for a, fresh in got] == [((352, 2), True)] + [((352, 2), False)] * 4
+    assert feeder.name == "mirrorbridge-audio"
+    with pytest.raises(ValueError):
+        audio.LoopbackFeeder()
+
+
+def test_tone_feeder_beeps_at_whole_seconds():
+    clock = [5_700_000_123]
+    blocks = []
+
+    def sleep(seconds):
+        clock[0] += max(1, round(seconds * NS))
+
+    def on_block(pcm, n, stamp, fresh):
+        blocks.append((pcm, n, stamp, fresh, clock[0]))
+        if len(blocks) == R * 3 // 352:
+            tone.stop()
+
+    tone = sound.ToneFeeder(on_block, clock=lambda: clock[0], sleep=sleep)
+    assert tone.name == "mirror-tone"
+    tone.run()
+    t0 = 5_700_000_123
+    assert all(n == 352 and stamp == t0 + (k + 1) * 352 * NS // R <= now for k, (_, n, stamp, _, now) in enumerate(blocks))
+    assert [fresh for *_, fresh, _ in blocks] == [True] + [False] * (len(blocks) - 1)
+    pcm = b"".join(block[0] for block in blocks)
+    beep = sound.beep()
+    starts = [c for c in range(1, len(pcm) // 4) if pcm[4 * c:4 * c + 4] != bytes(4) and pcm[4 * c - 4:4 * c] == bytes(4)
+              and pcm[max(0, 4 * c - 8820):4 * c] == bytes(min(8820, 4 * c))]
+    onsets = [c - 3 for c in starts]  # the fade-in makes the beep's first three samples 0
+    assert len(onsets) == 3
+    for second, c in zip((6, 7, 8), onsets):
+        assert abs(t0 + c * NS / R - second * NS) <= NS / R  # at the whole second, to a sample
+        assert pcm[4 * c:4 * (c + 4410)] == beep
+    silent = bytearray(pcm)
+    for c in onsets:
+        silent[4 * c:4 * (c + 4410)] = bytes(4 * 4410)
+    assert not any(silent)
+
+
+def test_the_beep_and_where_it_starts():
+    beep = sound.beep()
+    left = [struct.unpack_from(">h", beep, 4 * j)[0] for j in range(4410)]
+    assert len(beep) == 4410 * 4 and all(beep[4 * j:4 * j + 2] == beep[4 * j + 2:4 * j + 4] for j in range(4410))
+    assert left[:3] == [0, 0, 0] and left[3] == 1 and left[-1] == 0
+    assert max(map(abs, left[:220])) < max(map(abs, left[220:4190])) == 8191  # faded in and out over 220
+    assert max(map(abs, left[:110])) < 4100 and max(map(abs, left[-110:])) < 4100
+    assert left[100] == round(8191 * math.sin(2 * math.pi * 880 * 100 / R) * 0.5 * (1 - math.cos(math.pi * 100 / 220)))
+    # sample 0 at 0.99999 s: the beep starts at the first sample at or after 1 s
+    t0 = 999_990_000
+    block = sound.tone_block(0, 1000, t0, 0)
+    first = -((-(NS - t0) * R) // NS)
+    assert first == 1 and t0 + first * NS // R >= NS > t0
+    assert block[:4] == bytes(4) and block[4:] == beep[:999 * 4]
+    assert sound.tone_block(0, 352, NS, 0)[:4 * 352] == beep[:4 * 352]  # sample 0 at a whole second
+    assert sound.tone_block(0, 352, NS + 50_000_000, 0) == bytes(1408)  # began before the tone did
+    assert sound.tone_block(4410 - 100, 352, NS, 0) == beep[4 * 4310:] + bytes(4 * 252)
+
+
+def test_the_tone_origin_moves_the_beeps(monkeypatch):
+    monkeypatch.setattr(sound, "TONE_ORIGIN_NS", 0)
+    sound.set_tone_origin(250_000_000)
+    assert sound.TONE_ORIGIN_NS == 250_000_000
+    got = []
+    clock = [NS]
+    tone = sound.ToneFeeder(lambda pcm, *rest: (got.append(pcm), len(got) == 200 and tone.stop()),
+                            clock=lambda: clock[0], sleep=lambda s: clock.__setitem__(0, clock[0] + round(s * NS) + 1))
+    tone.run()
+    pcm = b"".join(got)
+    first = next(i for i in range(0, len(pcm), 4) if pcm[i:i + 4] != bytes(4)) // 4 - 3
+    assert first == math.ceil(0.25 * R)
+
+
+async def test_tone_feeder_runs_as_its_own_thread():
+    got = []
+    tone = sound.ToneFeeder(lambda pcm, n, stamp, fresh: got.append(stamp))
+    tone.start()
+    await asyncio.sleep(0.2)
+    tone.stop()
+    tone.join(2)
+    assert not tone.is_alive() and len(got) >= 10 and got == sorted(got)
+    assert all(b - a == 352 * NS // R or b - a == 352 * NS // R + 1 for a, b in zip(got, got[1:]))

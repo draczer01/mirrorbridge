@@ -18,7 +18,10 @@ the line instead:
 * the keeper sends zeros, on time, whenever no block came for 100 ms (a device change, a
   stall), so that the TV never runs dry and late blocks are not sent in a burst.
 
-SoundKnobs holds the test switches (MIRRORBRIDGE_MIRROR_SOUND_*), read once per session.
+The samples come from audio.LoopbackFeeder (the PC's sound, WASAPI loopback at 44.1 kHz in
+blocks of 352) or from ToneFeeder (a beep at each whole second, for tests and for the TV's
+first try). SoundKnobs holds the test switches (MIRRORBRIDGE_MIRROR_SOUND_*), read once per
+session.
 """
 
 from __future__ import annotations
@@ -27,12 +30,14 @@ import dataclasses
 import logging
 import math
 import os
+import struct
+import threading
 from collections import deque
 from dataclasses import dataclass
-from typing import Mapping, Optional
+from typing import Callable, Mapping, Optional
 
 from .audiopackets import FORMATS, SPF, SPF_NS, SR
-from .clock import NS, to_ntp
+from .clock import NS, now_ns, to_ntp
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -359,3 +364,83 @@ class SampleLine:
         packet's first sample, its line time, and the sample heard then (gap samples before)."""
         s_n = n_sent * SPF
         return (s_n - gap) & 0xFFFFFFFF, to_ntp(self.line_ns(s_n), epoch=True), s_n & 0xFFFFFFFF
+
+
+# -- the test tone -------------------------------------------------------------------------------------
+
+_beep: Optional[bytes] = None
+
+
+def beep() -> bytes:
+    """The beep, TONE_SAMPLES frames of s16 BE stereo: TONE_HZ at TONE_LEVEL, faded in and out
+    over TONE_RAMP samples (a raised cosine), the same on both channels."""
+    global _beep  # pylint: disable=global-statement
+    if _beep is None:
+        out = bytearray()
+        for j in range(TONE_SAMPLES):
+            edge = min(j, TONE_SAMPLES - 1 - j)
+            ramp = 0.5 * (1 - math.cos(math.pi * edge / TONE_RAMP)) if edge < TONE_RAMP else 1.0
+            value = round(TONE_LEVEL * math.sin(2 * math.pi * TONE_HZ * j / SR) * ramp)
+            out += struct.pack(">hh", value, value)
+        _beep = bytes(out)
+    return _beep
+
+
+def set_tone_origin(ns: int) -> None:
+    """Beep at the whole seconds after `ns` of the session clock (the latency meter's start)
+    instead of the clock's own; for tones started after this."""
+    global TONE_ORIGIN_NS  # pylint: disable=global-statement
+    TONE_ORIGIN_NS = ns
+
+
+def tone_block(c0: int, n: int, t0: int, origin: int) -> bytes:
+    """Samples c0 to c0 + n of a tone whose sample c is taken at t0 + c * NS // SR: a beep starts
+    at the first sample at or after each whole second from `origin`; zeros elsewhere."""
+    out = bytearray(4 * n)
+    first = (t0 + c0 * NS // SR - origin) // NS - 1  # the second whose beep may still be playing
+    last = (t0 + (c0 + n - 1) * NS // SR - origin) // NS
+    sound = beep()
+    for second in range(first, last + 1):
+        start = -((-(origin + second * NS - t0) * SR) // NS)  # its first sample: rounded up
+        if start < 0:
+            continue  # it began before the tone did
+        lo, hi = max(c0, start), min(c0 + n, start + TONE_SAMPLES)
+        if lo < hi:
+            out[4 * (lo - c0):4 * (hi - c0)] = sound[4 * (lo - start):4 * (hi - start)]
+    return bytes(out)
+
+
+class ToneFeeder(threading.Thread):
+    """The test tone in place of the PC's sound: blocks of 352 samples, each handed to
+    on_block(s16 BE bytes, 352, its time, fresh) when its last sample is due, stamped with that
+    ideal time, so that the line needs no correction at all."""
+
+    def __init__(self, on_block: Callable[[bytes, int, int, bool], None], *, clock: Callable[[], int] = now_ns,
+                 sleep: Optional[Callable[[float], object]] = None) -> None:
+        super().__init__(name="mirror-tone", daemon=True)
+        self._on_block = on_block
+        self._clock = clock
+        self._stop_event = threading.Event()
+        self._sleep = sleep if sleep is not None else self._stop_event.wait
+        self.blocks = 0
+        self.speaker_id = ""  # as LoopbackFeeder's: no device
+        self.speaker_name = "the test tone"
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def run(self) -> None:
+        origin = TONE_ORIGIN_NS
+        t0 = self._clock()
+        while not self._stop_event.is_set():
+            due = t0 + (self.blocks + 1) * SPF * NS // SR
+            wait = due - self._clock()
+            if wait > 0:
+                self._sleep(wait / NS)
+                continue
+            try:
+                self._on_block(tone_block(self.blocks * SPF, SPF, t0, origin), SPF, due, self.blocks == 0)
+            except Exception as ex:  # pylint: disable=broad-except
+                _LOGGER.debug("The test tone stopped: the sound took no more (%r)", ex)
+                return
+            self.blocks += 1
