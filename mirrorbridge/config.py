@@ -59,6 +59,7 @@ class Settings:
     # Audio
     capture_audio: bool = True
     audio_bitrate_kbps: int = 160
+    mute_pc_audio: bool = True  # Cast mirroring: mute this PC's speakers while the TV plays the sound (no echo)
 
     # Networking
     http_port: int = 7878  # fixed so a single firewall rule covers it

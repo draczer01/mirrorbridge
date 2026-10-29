@@ -291,6 +291,8 @@ async def cmd_googlecast(args) -> int:
         settings.framerate = args.framerate
     if args.encoder:
         settings.encoder = args.encoder
+    if args.keep_pc_sound:
+        settings.mute_pc_audio = False
     device = await googlecast.find(args.device, args.timeout)
     if device is None:
         print(f"No Google Cast receiver called {args.device!r}. Try googlecast --list, or its IP address.")
@@ -301,7 +303,7 @@ async def cmd_googlecast(args) -> int:
 
     source = mirror.TEST_PATTERN if args.test_pattern else mirror.DESKTOP
     session = googlecast.GoogleCastMirror(device, settings, status, source=source, seconds=args.seconds,
-                                          delay_ms=args.delay, codec=args.codec)
+                                          delay_ms=args.delay, codec=args.codec, audio=not args.no_audio)
     print(f"Mirroring to {device.describe()}. Press Ctrl+C to stop.")
     try:
         await session.run()
@@ -494,6 +496,9 @@ def build_parser() -> argparse.ArgumentParser:
     gcast.add_argument("--delay", type=int, help="ms the TV shows each frame after it was taken "
                                                  f"(default {googlecast.DEFAULT_DELAY_MS})")
     gcast.add_argument("--codec", choices=["h264", "vp8"], help="video codec (default vp8)")
+    gcast.add_argument("--no-audio", action="store_true", help="the picture alone (the test pattern beeps)")
+    gcast.add_argument("--keep-pc-sound", action="store_true", help="do not mute this PC's speakers while the "
+                                                                    "TV plays the sound")
     gcast.add_argument("--fps", dest="framerate", type=int)
     gcast.add_argument("--bitrate", type=int, help="video kbps")
     gcast.add_argument("--encoder", choices=["auto", *ffmpeg.ENCODER_PREFERENCE])
