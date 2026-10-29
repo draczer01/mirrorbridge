@@ -761,16 +761,18 @@ class MirrorSession:
                      "on arrival" if on_arrival(s) or ON_ARRIVAL else "at their time")
         _LOGGER.info("Experiment knobs: /feedback every %g s (MIRRORBRIDGE_FEEDBACK_S), time requests %s "
                      "(MIRRORBRIDGE_NTP_STOP_S), heartbeat %s (MIRRORBRIDGE_HEARTBEAT_IDLE_ONLY), audio stream %s "
-                     "(MIRRORBRIDGE_NO_AUDIO), %d fps asked, pattern noise %s (MIRRORBRIDGE_PATTERN_NOISE), thread "
-                     "switch interval %g ms (MIRRORBRIDGE_SWITCH_INTERVAL_MS), %s timing (mirror --timing, "
-                     "MIRRORBRIDGE_TIMING)%s",
+                     "(MIRRORBRIDGE_NO_AUDIO), %d fps asked, pattern noise %s (MIRRORBRIDGE_PATTERN_NOISE), sender %s "
+                     "with AirPlay %s (MIRRORBRIDGE_SENDER, MIRRORBRIDGE_SOURCE_VERSION), H.264 profile %s "
+                     "(MIRRORBRIDGE_H264_PROFILE), thread switch interval %g ms (MIRRORBRIDGE_SWITCH_INTERVAL_MS), "
+                     "%s timing (mirror --timing, MIRRORBRIDGE_TIMING)%s",
                      negotiation.FEEDBACK_INTERVAL,
                      f"answered for {_env_float('MIRRORBRIDGE_NTP_STOP_S', 0):g} s only"
                      if "MIRRORBRIDGE_NTP_STOP_S" in os.environ else "always answered",
                      "only when idle" if HEARTBEAT_IDLE_ONLY else "every second",
                      "set up" if plan.audio else "left out", self.settings.framerate,
-                     os.environ.get("MIRRORBRIDGE_PATTERN_NOISE") or "off", sys.getswitchinterval() * 1000,
-                     plan.timing.upper(), self._ptp_knobs(plan))
+                     os.environ.get("MIRRORBRIDGE_PATTERN_NOISE") or "off", negotiation.SENDER_MODEL,
+                     negotiation.SOURCE_VERSION, ffmpeg.MIRROR_PROFILE, sys.getswitchinterval() * 1000, plan.timing.upper(),
+                     self._ptp_knobs(plan))
         if self.report.info is not None and "PTPInfo" in self.report.info.raw:
             _LOGGER.info("The TV's GET /info has PTPInfo: %r", self.report.info.raw["PTPInfo"])
         elif plan.timing == PTP:  # a TV without it may have no PTP clock at all

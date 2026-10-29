@@ -430,6 +430,9 @@ MIRROR_KEYFRAME_CHOICES = CHOICES["mirror_keyframes"]  # 0 (only when needed), 1
 UNTESTED_KEYFRAME_SECONDS = 10
 NO_PERIODIC_ENCODERS = ("h264_nvenc", "libx264")
 NO_PERIODIC_GOP = 2**31 - 1  # -g: in effect never
+# Experiment: MIRRORBRIDGE_H264_PROFILE=main or baseline instead of high, for mirroring only.
+MIRROR_PROFILE = os.environ.get("MIRRORBRIDGE_H264_PROFILE", "").strip().lower()
+MIRROR_PROFILE = MIRROR_PROFILE if MIRROR_PROFILE in ("baseline", "main", "high") else "high"
 MIRROR_VBV_FRAMES = 1.0
 
 
@@ -468,19 +471,19 @@ def mirror_encoder_args(encoder: str, kbps: int, fps: int, vbv_frames: float = M
         keyint = "keyint=infinite:scenecut=0"
     if encoder == "h264_nvenc":
         # -delay 0: NVENC otherwise keeps about 3 frames in flight (50 ms at 60 fps).
-        specific = ["-preset", "p4", "-tune", "ll", "-rc", "cbr", "-profile:v", "high", "-zerolatency", "1",
+        specific = ["-preset", "p4", "-tune", "ll", "-rc", "cbr", "-profile:v", MIRROR_PROFILE, "-zerolatency", "1",
                     "-delay", "0", "-forced-idr", "1"]
     elif encoder == "h264_qsv":
         # -async_depth 1: Quick Sync works 4 frames ahead by default.
         specific = ["-preset", "veryfast", "-look_ahead", "0", "-async_depth", "1", "-low_delay_brc", "1",
-                    "-forced_idr", "1", "-profile:v", "high"]
+                    "-forced_idr", "1", "-profile:v", MIRROR_PROFILE]
     elif encoder == "h264_amf":
         specific = ["-usage", "ultralowlatency", "-quality", "speed", "-rc", "cbr", "-latency", "1",
-                    "-enforce_hrd", "1", "-profile:v", "high"]
+                    "-enforce_hrd", "1", "-profile:v", MIRROR_PROFILE]
     elif encoder == "h264_mf":
         specific = ["-rate_control", "cbr", "-scenario", "display_remoting", "-hw_encoding", "1"]
     else:
-        specific = ["-preset", "veryfast", "-tune", "zerolatency", "-profile:v", "high", "-x264-params", keyint]
+        specific = ["-preset", "veryfast", "-tune", "zerolatency", "-profile:v", MIRROR_PROFILE, "-x264-params", keyint]
     return ["-c:v", encoder] + specific + rate + common
 
 
