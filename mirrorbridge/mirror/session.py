@@ -75,6 +75,14 @@ MIRRORBRIDGE_PTP_LOCK_S) and that time is over without it announcing a better cl
 codec packet and the first frame come after it. If a SETUP or SETPEERS is refused or the TV does
 not follow, the session is set up again over NTP (unless MIRRORBRIDGE_PTP_NO_FALLBACK=1). The NTP
 responder stays bound either way.
+
+The PC's sound (sound.py) goes over the type-96 stream the session sets up anyway, for now only
+when asked for (MIRRORBRIDGE_MIRROR_SOUND=1, mirror --sound; never for Test this TV, nor with PTP
+timing): held until the first frame has gone, then sent with the picture's lead, the test tone
+in its place for the test pattern. Nothing the sound does may stop or slow the picture: whatever
+goes wrong stops the sound alone, and the person is told once (on_notice). A TV that closes the
+session within SOUND_DROP_SECONDS of the first sound packet gets it set up once more without
+sound (but for a run that asked for the sound), and mirroring.json keeps that for the next ones.
 """
 
 from __future__ import annotations
@@ -87,14 +95,17 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
+from .. import audio as system_audio
 from .. import extended, ffmpeg, vdisplay
 from ..config import Settings
 from ..session import State, StatusCallback
+from ..speakers import MutedSpeakers
 from ..text import Text
-from . import capture, negotiation, profiles, ptp
+from . import capture, negotiation, profiles, ptp, sound
 
 
 def _env_float(name: str, default: float) -> float:
@@ -125,8 +136,10 @@ from .datachannel import HEARTBEAT_IDLE_ONLY, DataChannel
 from .errors import MirrorError, answer_of, data_closed, data_refused, needs_fairplay, no_timing, refused
 from .flv import CONFIG, FRAME
 from .h264 import TRAILERS, avcc_record, frame_nals, is_idr, join_avcc, parse_avcc, parse_sps, split_avcc
-from .negotiation import NTP, PTP, Established, Feedback, Negotiator
+from .audiopackets import SPF, SR, choose_format, ms_to_samples
+from .negotiation import NTP, PTP, AudioOffer, Established, Feedback, Negotiator
 from .packets import ON_ARRIVAL, VideoCipher, codec_packet, video_key
+from .sound import FAILED, AudioControl, MirrorSound, SoundKnobs
 from .source import (DESKTOP, STDERR_LINES, TEST_PATTERN, FFmpegSource, FrameQueue, Unit, build_command,
                      ended_text)
 from .stats import LOG_SECONDS, StageTimes
@@ -304,7 +317,13 @@ class SessionReport:
     latency: dict = field(default_factory=dict)
     first_frame_ms: Optional[float] = None  # from starting FFmpeg to the first frame sent
     restarts: list = field(default_factory=list)  # why FFmpeg was started again while the TV waited
-    retried: str = ""  # why the session was set up a second time, with the other avcC ending
+    retried: str = ""  # why the session was set up a second time: the other avcC ending, or without sound
+    # The PC's sound: "off: ..." (why not), "sent: ...", "held: ..." or "stopped: ..." at the end
+    # (MirrorSound.final_text), and its figures (sound.SoundStats.as_dict()).
+    sound: str = "not set up"
+    sound_stats: dict = field(default_factory=dict)
+    audio_latency: str = ""  # RECORD's Audio-Latency, if the TV said it
+    feedback_body: Optional[dict] = None  # the last plist /feedback was answered with
     error: Optional[BaseException] = None
 
 
@@ -326,6 +345,9 @@ class MirrorSession:
         max_canvas: tuple[int, int] = MAX_CANVAS,
         timing: Optional[str] = None,
         fps: Optional[int] = None,
+        sound: Optional[bool] = None,
+        sound_knobs: Optional[SoundKnobs] = None,
+        on_notice: Optional[Callable[[Text], None]] = None,
     ) -> None:
         self.target = target
         self.settings = dataclasses.replace(settings)  # a copy: menu changes are for the next session
@@ -378,6 +400,24 @@ class MirrorSession:
         self._retried = False
         self._xscreen: Optional[extended.ExtendedScreen] = None  # Extend screen's virtual monitor
         self.virtual_device = ""  # \\.\DISPLAYn of the virtual screen while there is one
+        # The PC's sound (sound.py): True for this run (mirror --sound), False not at all (the
+        # probe), None as the settings and MIRRORBRIDGE_MIRROR_SOUND say (_sound_wanted).
+        self.sound_asked = sound
+        self._sound_forced = sound is True
+        self._knobs = sound_knobs or SoundKnobs.from_env()
+        self.on_notice = on_notice or (lambda text: None)  # what the person should know of the sound, once
+        self._sound: Optional[MirrorSound] = None
+        self._audio_control: Optional[AudioControl] = None  # our audio control port, bound before SETUP
+        self._speakers = MutedSpeakers()
+        self._muted = False
+        self._loopback: tuple[bool, str] = (False, "not checked")  # Windows has a sound output to record (_start)
+        self._sound_on = False  # this attempt's _sound_wanted, and why not
+        self._sound_why = ""
+        self._sound_retried = False  # set up again without sound: the TV closed the session when it started
+        self._sound_blamed = False  # and it did not drop the video without the sound too
+        self._sound_first_ns: Optional[int] = None  # when the first sound packet went
+        self._closed_ns = 0  # when the TV closed the session (its video or control connection)
+        self._noticed: set[str] = set()
         self._reset_restarts()
 
     def _reset_restarts(self) -> None:
@@ -451,24 +491,41 @@ class MirrorSession:
             self._task.cancel()
 
     async def _attempts(self) -> str:
-        """One session, and once more with the other avcC ending if the TV dropped the video at
-        once on a first one."""
-        try:
-            return await self._attempt()
-        except MirrorError as ex:
-            other = self._other_trailer(ex)
-            if other is None:
-                raise
-            await self._retry_with(other)
-            if self._stop.is_set():
-                self._check_screen()
-                return "Stopped"
-            return await self._attempt()
+        """One session; once more without sound if the TV closed it when the sound started (and
+        the sound was not asked for this run: _sound_dropped); and once more with the other avcC
+        ending if the TV dropped the video at once on a first one. Each retry at most once."""
+        while True:
+            try:
+                ended = await self._attempt()
+            except MirrorError as ex:
+                if self._sound_dropped():
+                    await self._retry_without_sound()
+                else:
+                    other = self._other_trailer(ex)
+                    if other is None:
+                        raise
+                    if self._sound_retried:  # it dropped the video without the sound as well
+                        self._sound_blamed = False
+                    await self._retry_with(other)
+                if self._stop.is_set():
+                    self._check_screen()
+                    return "Stopped"
+                continue
+            if self._sound_dropped():  # it ended the session itself: "The TV ended screen mirroring"
+                await self._retry_without_sound()
+                if self._stop.is_set():
+                    self._check_screen()
+                    return "Stopped"
+                continue
+            return ended
 
     async def _attempt(self) -> str:
         self._starting = True
         try:
             await self._start()
+        except BaseException:
+            self._halt_sound()  # before run() says how it ended
+            raise
         finally:
             self._starting = False
         return await self._supervise()
@@ -493,13 +550,46 @@ class MirrorSession:
             f"the TV closed the video connection after {first.data_closed_after} frames with avcC ending "
             f"{first.trailer}"))
 
+    def _closed_after_sound(self) -> Optional[float]:
+        """Seconds from the first sound packet to the TV closing the session, if that was within
+        SOUND_DROP_SECONDS; None otherwise."""
+        first, closed = self._sound_first_ns, self._closed_ns
+        if not first or not closed or not 0 <= closed - first < sound.SOUND_DROP_SECONDS * NS:
+            return None
+        return (closed - first) / NS
+
+    def _sound_dropped(self) -> bool:
+        """Whether the TV closed the session when the sound started, and the session is to be set
+        up again without sound: not when the sound was asked for this run (mirror --sound), nor
+        when someone heard it on this TV, nor a second time."""
+        after = self._closed_after_sound()
+        if after is None or self._stop.is_set():
+            return False
+        if self._sound_forced or self._sound_retried or self.profile.sound == profiles.SOUND_HEARD:
+            _LOGGER.info("The TV closed the session %.1f s after the first sound packet", after)
+            return False
+        return True
+
+    async def _retry_without_sound(self) -> None:
+        after = self._closed_after_sound() or 0.0
+        _LOGGER.info("The TV closed the session %.1f s after the first sound packet: setting up again without sound",
+                     after)
+        text = Text("mirror_retry_no_sound", "The TV stopped when the sound started: going on without sound")
+        self._set(State.STARTING, text)
+        self._notice(text)
+        await asyncio.shield(self._release())
+        self._sound_retried = self._sound_blamed = True
+        self.report = SessionReport(trailer=self.profile.trailer,
+                                    retried="the TV closed the session when the sound started")
+
     async def _start(self) -> None:
         loop = asyncio.get_running_loop()
         s = self.settings
         if self.target.needs_fairplay:
             raise needs_fairplay(self.target.name)
         self._stopping = self._timing_probed = self._timing_quiet = self._dropped_at_once = False
-        self._first_sent_ns = None
+        self._first_sent_ns = self._sound_first_ns = None
+        self._closed_ns = 0
         self._reset_restarts()
         self._set(State.STARTING, Text("checking_ffmpeg", "Checking FFmpeg and encoders"))
         ff = ffmpeg.find_ffmpeg(s.ffmpeg_path)
@@ -520,6 +610,12 @@ class MirrorSession:
             backend = await loop.run_in_executor(None, ffmpeg.pick_capture_backend, ff, s, monitor, region)
         self._capture = (ff, monitor, region)
         self._using = (backend, encoder, capture.CPU)  # the first way, for the frame rate (_set_up)
+        if self.source == DESKTOP and not self._knobs.tone and self._sound_wanted(output=False)[0]:
+            # Whether Windows has a sound output to record: soundcard's first import and COM take
+            # a while (2.5 s under Wine), so off the loop, before the TV waits for anything.
+            self._loopback = await loop.run_in_executor(None, system_audio.loopback_available)
+            found, what = self._loopback
+            _LOGGER.info("Sound to record: %s", what if found else f"none ({what})")
 
         self._set(State.CONNECTING, self.target.name)
         try:
@@ -828,13 +924,15 @@ class MirrorSession:
         negotiator.on_reply = self._on_setup_reply
         negotiator.on_restart = self._close_events  # the event channel was the old session's
         channel = await negotiator.connect()
-        # The TV's timing requests and its (silent) audio control port, on ports a firewall rule names.
+        # The TV's timing requests and its audio control port (the sound's syncs, its resend
+        # requests), on ports a firewall rule names.
         transport, self._responder = await bind_udp(NtpResponder, channel.local_ip)
         self._transports.append(transport)
         negotiator.timing_port = self.report.timing_port = self._responder.port
-        transport, _ = await bind_udp(asyncio.DatagramProtocol, channel.local_ip, taken=(negotiator.timing_port,))
+        transport, self._audio_control = await bind_udp(AudioControl, channel.local_ip,
+                                                        taken=(negotiator.timing_port,))
         self._transports.append(transport)
-        negotiator.audio_port = transport.get_extra_info("sockname")[1]
+        negotiator.audio_port = self._audio_control.port
         _LOGGER.info("Timing (NTP) on UDP port %d, audio control on UDP port %d (allow inbound UDP %d-%d)",
                      negotiator.timing_port, negotiator.audio_port, TIMING_PORTS.start, TIMING_PORTS.stop - 1)
         info_answered = True
@@ -851,16 +949,24 @@ class MirrorSession:
             plan.lead_ms, self._lead_why = negotiation.lead_from_env(plan.lead_ms), "MIRRORBRIDGE_LEAD_MS"
         plan.audio = negotiation.audio_from_env(plan.audio)
         plan.timing = self.timing or negotiation.timing_from_env(plan.timing)
+        shown = "on arrival" if on_arrival(s) or ON_ARRIVAL else "at their time"
         _LOGGER.info("Mirroring with lead %d ms (%s), keyframes %s, frames shown %s", plan.lead_ms, self._lead_why,
-                     keyframes_text(self.report.encoder, s),
-                     "on arrival" if on_arrival(s) or ON_ARRIVAL else "at their time")
+                     keyframes_text(self.report.encoder, s), shown)
+        self._sound_on, self._sound_why = self._sound_wanted()
+        if not self._sound_on and self.source == DESKTOP and self._sound_wanted(output=False)[0]:
+            self._notice(Text("mirror_sound_no_output", "No sound: Windows has no sound output to record. Turn on "
+                              "speakers or headphones in Sound settings."))
+        negotiator.audio = self._audio_offer(plan, self._sound_on)
+        # The video's own rule (each frame at its time) is the sound's too: "on arrival" breaks it.
+        _LOGGER.info("Sound knobs: %s; frames shown %s", self._knobs.describe(), shown)
         _LOGGER.info("Experiment knobs: /feedback every %g s (MIRRORBRIDGE_FEEDBACK_S), time requests %s "
                      "(MIRRORBRIDGE_NTP_STOP_S), heartbeat %s (MIRRORBRIDGE_HEARTBEAT_IDLE_ONLY), audio stream %s "
                      "(MIRRORBRIDGE_NO_AUDIO), frame rate %s (mirror --fps, MIRRORBRIDGE_FPS), pattern noise %s "
                      "(MIRRORBRIDGE_PATTERN_NOISE), sender %s with AirPlay %s (MIRRORBRIDGE_SENDER, "
                      "MIRRORBRIDGE_SOURCE_VERSION), H.264 profile %s (MIRRORBRIDGE_H264_PROFILE), thread switch "
                      "interval %g ms (MIRRORBRIDGE_SWITCH_INTERVAL_MS), "
-                     "%s timing (mirror --timing, MIRRORBRIDGE_TIMING)%s",
+                     "%s timing (mirror --timing, MIRRORBRIDGE_TIMING)%s, sound %s (MIRRORBRIDGE_MIRROR_SOUND, mirror "
+                     "--sound)",
                      negotiation.FEEDBACK_INTERVAL,
                      f"answered for {_env_float('MIRRORBRIDGE_NTP_STOP_S', 0):g} s only"
                      if "MIRRORBRIDGE_NTP_STOP_S" in os.environ else "always answered",
@@ -868,8 +974,8 @@ class MirrorSession:
                      "set up" if plan.audio else "left out",
                      f"{self.fps_asked} asked" if self.fps_asked else "as Mirror screen settings say",
                      os.environ.get("MIRRORBRIDGE_PATTERN_NOISE") or "off", negotiation.SENDER_MODEL,
-                     negotiation.SOURCE_VERSION, ffmpeg.MIRROR_PROFILE, sys.getswitchinterval() * 1000, plan.timing.upper(),
-                     self._ptp_knobs(plan))
+                     negotiation.SOURCE_VERSION, ffmpeg.MIRROR_PROFILE, sys.getswitchinterval() * 1000,
+                     plan.timing.upper(), self._ptp_knobs(plan), "on" if self._sound_on else f"off: {self._sound_why}")
         if self.report.info is not None and "PTPInfo" in self.report.info.raw:
             _LOGGER.info("The TV's GET /info has PTPInfo: %r", self.report.info.raw["PTPInfo"])
         elif plan.timing == PTP:  # a TV without it may have no PTP clock at all
@@ -922,8 +1028,13 @@ class MirrorSession:
         self._cipher = VideoCipher(video_key(channel.derive, est.video_id))
         await negotiator.record(est)
         self._record_ns = now_ns()
+        self.report.audio_latency = next((str(value) for key, value in est.record_headers.items()
+                                          if key.lower() == "audio-latency"), "")
+        if self._sound_on and est.audio is not None and self._knobs.volume_db is not None:
+            await negotiator.set_volume(est, self._knobs.volume_db)  # its answer is logged; never fatal
         self._feedback = Feedback(channel)
         self._feedback.start()
+        await self._start_sound(est, channel)
 
     @staticmethod
     def _ptp_knobs(plan: negotiation.Plan) -> str:
@@ -1025,6 +1136,197 @@ class MirrorSession:
         if info.displays:
             self.report.info = info
 
+    # -- the sound ---------------------------------------------------------
+
+    def _sound_wanted(self, output: bool = True) -> tuple[bool, str]:
+        """Whether this session sends the PC's sound, and why not: for now only when asked for
+        (sound.SOUND_BY_DEFAULT), never for the probe, never with Include computer sound off,
+        and not once the TV closed the session when it started (_retry_without_sound).
+        `output`: also that Windows has a sound output to record (_loopback, from _start)."""
+        knobs = self._knobs
+        if self.sound_asked is False:
+            return False, "off for this session"
+        if not self.settings.capture_audio:
+            return False, "Include computer sound is off"
+        if knobs.enable is False:
+            return False, f"{sound.ENV}=0"
+        forced = self.sound_asked is True  # mirror --sound, --beep, --sound-trial
+        if not (forced or knobs.enable or sound.SOUND_BY_DEFAULT):
+            return False, f"not turned on yet (mirror --sound, or {sound.ENV}=1)"
+        if not forced and self.profile.sound == profiles.SOUND_OFF:
+            return False, (f"this TV closed the session when the sound started "
+                           f"({self.profile.sound_note or 'as saved for it'})")
+        if self._sound_retried:  # and its type-96 stream as it always was
+            return False, "going on without sound: the TV closed the session when it started"
+        if output and self.source == DESKTOP and not knobs.tone and not self._loopback[0]:
+            return False, self._loopback[1]
+        return True, ""
+
+    def _audio_offer(self, plan: negotiation.Plan, wanted: bool) -> AudioOffer:
+        """What the type-96 stream asks for: as it always was when the sound is not wanted (every
+        knob left out); else the format the TV's screenStream calls for, and the gap of the lead
+        and the delay, with the knobs' latencies."""
+        if not wanted:
+            return AudioOffer()
+        knobs = self._knobs
+        info = self.report.info
+        fmt, why = choose_format(info.screen_formats if info is not None else None, knobs.codec)
+        _LOGGER.info("Sound format: %s", why)
+        self.report.steps["sound"] = why
+        gap_ms = knobs.gap_ms if knobs.gap_ms is not None else max(sound.MIN_GAP_MS, plan.lead_ms + knobs.delay_ms)
+        return AudioOffer(fmt, knobs.shape, ms_to_samples(gap_ms),
+                          None if knobs.lat_min_ms is None else ms_to_samples(knobs.lat_min_ms),
+                          None if knobs.lat_max_ms is None else ms_to_samples(knobs.lat_max_ms),
+                          knobs.is_media, knobs.redundant, knobs.ports)
+
+    async def _start_sound(self, est: Established, channel: ControlChannel) -> None:
+        """The PC's sound to the TV, if it is wanted and the TV took the type-96 stream with its
+        ports; otherwise why not, in the report. Never stops the session."""
+        off, refused = self._sound_why, False
+        if not off:
+            if est.audio is None:  # no type-96 stream, or the TV did not name its ports for it
+                off, refused = est.audio_note or "no audio stream in this TV's plan", est.plan.audio
+                if not est.plan.audio and not negotiation.audio_from_env(True):
+                    off += " (MIRRORBRIDGE_NO_AUDIO=1)"
+            elif est.plan.timing == PTP:
+                off = "no sound with PTP timing yet"
+        if off:
+            self.report.sound = self.report.steps["sound"] = f"off: {off}"
+            _LOGGER.info("Sound: %s", off)
+            if refused:
+                self._notice(Text("mirror_sound_not_taken", "This TV does not take the PC's sound with Mirror "
+                                  "screen; for a video with sound, use Play a video file."))
+            return
+        assert est.audio is not None and self._audio_control is not None
+        # Kept before anything is awaited: a stop meanwhile must find it to stop it. The test
+        # pattern has the test tone for its sound, as mirror --beep the screen.
+        self._sound = MirrorSound(est.audio, knobs=self._knobs, control=self._audio_control,
+                                  local_ip=channel.local_ip, tv_ip=channel.remote_ip,
+                                  tone=self._knobs.tone or self.source != DESKTOP,
+                                  on_first_packet=self._sound_started, on_failed=self._sound_failed,
+                                  on_device_changed=self._device_changed)
+        self.report.sound = f"on: {est.audio.format.name}"
+        try:
+            await self._sound.start()
+        except Exception as ex:  # pylint: disable=broad-except
+            _LOGGER.debug("The sound did not start", exc_info=True)
+            self._sound.fail(f"it did not start ({ex!r})")
+
+    def _sound_started(self) -> None:
+        """The first sound packet went: when (_sound_dropped), and the PC muted if the TV is known
+        to play the sound (or the knob says so), so that it does not echo."""
+        self._sound_first_ns = now_ns()
+        first = self._first_sent_ns
+        _LOGGER.info("Sound: first packet %s", f"{(self._sound_first_ns - first) / 1e6:.0f} ms after the first frame"
+                     if first is not None else "before the first frame")
+        if (self.source == DESKTOP and not self._knobs.tone and self.settings.mute_pc_audio
+                and (self.profile.sound == profiles.SOUND_HEARD or self._knobs.mute)):
+            self._mute()
+
+    def _mute(self) -> None:
+        if self._speakers.mute():
+            self._muted = True
+        elif getattr(self._speakers, "error", ""):  # not when they were muted already
+            self._notice(Text("mirror_sound_not_muted", "Could not mute this PC: turn its volume down to avoid an "
+                              "echo."))
+
+    def _device_changed(self) -> None:
+        """The sound comes from another output device now: that one is muted instead."""
+        if self._muted:
+            self._restore_speakers()
+            self._mute()
+
+    def _restore_speakers(self) -> None:
+        self._muted = False
+        try:
+            self._speakers.restore()
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.exception("Could not give the speakers back")
+
+    def _halt_sound(self) -> None:
+        """Stop the sound at once and give the speakers back (synchronous, and as often as asked):
+        before the session says it stopped, and when it is released."""
+        if self._sound is not None:
+            try:
+                self._sound.stop()
+            except Exception:  # pylint: disable=broad-except
+                _LOGGER.exception("Stopping the sound failed")
+        self._restore_speakers()
+
+    def _sound_failed(self, reason: str) -> None:
+        """The sound stopped for `reason` (MirrorSound.fail); the picture goes on. Said to the
+        person only while the session itself goes on: when the TV ends it, the sound's errors
+        are only its end."""
+        self._restore_speakers()
+        channel = self._negotiator.channel if self._negotiator is not None else None
+        ending = (self._stopping or self._feedback is None or self._feedback.lost.is_set()
+                  or (self._data is not None and self._data.closed.is_set()) or channel is None or channel.closed)
+        if ending:
+            self.report.sound = self.report.steps["sound"] = f"stopped: the session ended ({reason})"
+            _LOGGER.debug("The sound stopped as the session ended (%s)", reason)
+            return
+        _LOGGER.warning("The sound stopped (%s); the picture goes on", reason)
+        self.report.sound = self.report.steps["sound"] = f"stopped: {reason}"
+        self._notice(Text("mirror_sound_stopped", "The sound stopped; the picture goes on."))
+
+    def _check_sound(self, now: int, log: bool) -> None:
+        """The supervisor's look at the sound (and its log line every LOG_SECONDS): whatever it
+        finds stops the sound, not the session."""
+        if self._sound is None:
+            return
+        try:
+            self._sound.check(now)
+            if log:
+                self._sound.log_window(now)
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.exception("Checking the sound failed")
+
+    def _notice(self, text: Text) -> None:
+        """Tell the person (on_notice), once a session for each kind of notice."""
+        if text.key in self._noticed:
+            return
+        self._noticed.add(text.key)
+        _LOGGER.info("Notice: %s", text)
+        try:
+            self.on_notice(text)
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.exception("Notice callback failed")
+
+    def _sound_verdict(self) -> tuple[str, str]:
+        """What mirroring.json keeps of this TV and the sound (MirrorProfile.sound and its note):
+        "off" once it closed the session when the sound started; nothing known again once a
+        session asked for the sound sent it for SOUND_OK_SECONDS without that; else as it was."""
+        if self._sound_retried and self._sound_blamed:
+            return profiles.SOUND_OFF, f"{time.strftime('%Y-%m-%d')}: closed the session when the sound started"
+        if (self.profile.sound == profiles.SOUND_OFF and self._sound_forced
+                and self.report.sound_stats.get("packets", 0) >= sound.SOUND_OK_SECONDS * (SR // SPF)):
+            _LOGGER.info("The TV took the sound for %d s: it is no longer left out", sound.SOUND_OK_SECONDS)
+            return profiles.SOUND_UNKNOWN, ""
+        return self.profile.sound, self.profile.sound_note
+
+    def _log_sound(self) -> None:
+        """The sound's line at the end, after the session's."""
+        report = self.report
+        stats = report.sound_stats
+        setup = report.established.audio if report.established is not None else None
+        if not stats or setup is None:
+            _LOGGER.info("Mirroring sound: %s", report.sound)
+            return
+
+        def ms(field: str) -> str:
+            return f"{stats[field] * 1000 / SR:.0f} ms"
+
+        headroom = stats["headroom_min_ms"]
+        _LOGGER.info("Mirroring sound: %s; %d packets (%.1f MB), %s, gap %d, latencies %d/%d; resent %d of %d "
+                     "asked (%d gone); filled %s, kept %s, cut %s; corrections +%d/-%d; base steps %d; re-anchored "
+                     "%d; held %d blocks; overflows %d; headroom min %s ms; Audio-Latency %s; last /feedback %s",
+                     report.sound,
+                     stats["packets"], stats["bytes"] / 1e6, setup.format.name, setup.gap, setup.lat_min, setup.lat_max,
+                     stats["resent"], stats["asked"], stats["missed"], ms("filled"), ms("kept"), ms("cut"),
+                     stats["inserted"], stats["deleted"], stats["steps"], stats["reanchors"], stats["held"],
+                     stats["overflow"], f"{headroom:.0f}" if headroom is not None else "-",
+                     report.audio_latency or "none", report.feedback_body or "none")
+
     async def _probe_loop_lag(self) -> None:
         """Experiment: how late a 10 ms sleep wakes on the session's loop, which also answers the
         TV's timing requests (so a late loop stamps them late)."""
@@ -1058,11 +1360,14 @@ class MirrorSession:
                     try:
                         pump.result()  # raises what ended it
                     except _VideoClosed as ex:
+                        self._closed_ns = now
                         return await self._video_closed(str(ex))
                     return "Stopped"
                 if waits["closed"] in done:
+                    self._closed_ns = now
                     return await self._video_closed(self._data.close_reason)
                 if waits["lost"] in done:
+                    self._closed_ns = now
                     return Text("mirror_tv_ended", "The TV ended screen mirroring")
                 if self.seconds is not None and now - started >= self.seconds * NS:
                     self._stopping = True
@@ -1070,9 +1375,12 @@ class MirrorSession:
                 if est.plan.timing == NTP:
                     self._check_timing(now)
                 self._check_frames(now)
-                if self._stats.due(now):
+                due = self._stats.due(now)
+                if due:
                     self._stats.log_window(now, self._responder.requests, self._ptp.summary() if self._ptp else "")
+                self._check_sound(now, due)
         finally:
+            self._halt_sound()  # before run() says the session stopped
             pump.cancel()
             lag_probe.cancel()
             for wait in waits.values():
@@ -1402,6 +1710,8 @@ class MirrorSession:
             self.report.frames_sent = self._stats.frames
             if self._stats.frames == 1:
                 self._first_sent_ns = sent
+                if self._sound is not None:
+                    self._sound.go()  # the sound starts with the picture: the next block anchors its line
                 self.report.first_frame_ms = (sent - self._ffmpeg.started_ns) / 1e6
                 if self.source == TEST_PATTERN:
                     what = Text("mirror_what_test", "the test pattern")
@@ -1513,10 +1823,13 @@ class MirrorSession:
     async def _release_session(self) -> None:
         loop = asyncio.get_running_loop()
         self._stopping = True
+        self._halt_sound()  # again, for a session that failed while it was set up
+        sound_, self._sound = self._sound, None
         feedback, self._feedback = self._feedback, None
         if feedback is not None:
             await feedback.stop()
             self.report.feedback = dict(feedback.answers)
+            self.report.feedback_body = feedback.last_body
         negotiator, self._negotiator = self._negotiator, None
         est = self.report.established
         # TEARDOWN while FFmpeg stops, so that the TV leaves mirroring at once.
@@ -1525,8 +1838,15 @@ class MirrorSession:
             jobs.append(loop.run_in_executor(None, self._stop_ffmpeg, self._ffmpeg))
         if negotiator is not None and est is not None:
             jobs.append(negotiator.teardown(est.uri))
+        if sound_ is not None and sound_.feeder is not None and sound_.feeder.is_alive():
+            jobs.append(loop.run_in_executor(None, sound_.feeder.join, 1.0))  # told to end by _halt_sound
         if jobs:
             await asyncio.gather(*jobs, return_exceptions=True)
+        if sound_ is not None:
+            self.report.sound_stats = sound_.stats.as_dict()
+            if sound_.state != FAILED:  # a failure is as _sound_failed said it
+                self.report.sound = sound_.final_text()
+            self.report.steps["sound"] = self.report.sound
         data, self._data = self._data, None
         if data is not None:
             await data.close()
@@ -1540,6 +1860,7 @@ class MirrorSession:
         for transport in self._transports:
             transport.close()
         self._transports.clear()
+        self._audio_control = None
         self.report.latency = self._stats.summary()
         self.report.frames_sent = self._stats.frames
 
@@ -1575,6 +1896,7 @@ class MirrorSession:
                      f" ({'; '.join(restarts[:10])}{'...' if len(restarts) > 10 else ''})" if restarts else "",
                      self.report.ntp_requests, self.report.feedback or "none", self.report.steps,
                      f"; PTP: {self.report.ptp}" if self.report.ptp else "")
+        self._log_sound()
         est = self.report.established
         # Remembered only once the TV has taken frames and the time: what was asked for works.
         # Not a PTP session (an experiment), nor a profile with PTP in it.
@@ -1585,6 +1907,7 @@ class MirrorSession:
             profile = profiles.MirrorProfile.of(plan, self.profile.trailer)
             if negotiation.audio_from_env(True) is False:  # nor a plan without audio (MIRRORBRIDGE_NO_AUDIO)
                 profile.audio = self.profile.audio
+            profile.sound, profile.sound_note = self._sound_verdict()
             info = self.report.info.summary() if self.report.info else ""
             try:
                 await loop.run_in_executor(None, lambda: profiles.save(

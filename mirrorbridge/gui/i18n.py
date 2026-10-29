@@ -589,6 +589,28 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "The TV dropped the video at once: trying again with the other ending of the H.264 header",
         "es": "La TV cortó el video enseguida: se vuelve a intentar con el otro final de la cabecera H.264",
     },
+    "mirror_retry_no_sound": {
+        "en": "The TV stopped when the sound started: going on without sound",
+        "es": "La TV se detuvo cuando empezó el sonido: se continúa sin sonido",
+    },
+    "mirror_sound_stopped": {
+        "en": "The sound stopped; the picture goes on.",
+        "es": "El sonido se detuvo; la imagen continúa.",
+    },
+    "mirror_sound_no_output": {
+        "en": "No sound: Windows has no sound output to record. Turn on speakers or headphones in Sound settings.",
+        "es": "Sin sonido: Windows no tiene una salida de sonido que grabar. Activa los altavoces o los auriculares "
+              "en Configuración de sonido.",
+    },
+    "mirror_sound_not_taken": {
+        "en": "This TV does not take the PC's sound with Mirror screen; for a video with sound, use Play a video file.",
+        "es": "Esta TV no acepta el sonido del equipo al duplicar la pantalla; para un video con sonido, usa "
+              "Reproducir un archivo de video.",
+    },
+    "mirror_sound_not_muted": {
+        "en": "Could not mute this PC: turn its volume down to avoid an echo.",
+        "es": "No se pudo silenciar este equipo: baja su volumen para evitar el eco.",
+    },
     "mirror_tv_ended": {"en": "The TV ended screen mirroring", "es": "La TV terminó la duplicación de pantalla"},
     "mirror_time_up": {
         "en": "Mirrored for {seconds} s, as asked",

@@ -22,7 +22,9 @@ The samples come from audio.LoopbackFeeder (the PC's sound, WASAPI loopback at 4
 blocks of 352) or from ToneFeeder (a beep at each whole second, for tests and for the TV's
 first try). AudioSender packs, seals and sends the packets and the syncs, keeps the last 256
 for the TV's resend requests, which come in to AudioControl, our audio control port. SoundKnobs
-holds the test switches (MIRRORBRIDGE_MIRROR_SOUND_*), read once per session.
+holds the test switches (MIRRORBRIDGE_MIRROR_SOUND_*), read once per session. MirrorSound puts it
+together for one session (session.py starts it once the TV took the stream, and stops it before
+the session says it stopped); whatever goes wrong with it stops the sound, never the video.
 """
 
 from __future__ import annotations
@@ -36,11 +38,15 @@ import struct
 import threading
 from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Mapping, Optional
+from typing import TYPE_CHECKING, Callable, Mapping, Optional
 
+from .. import audio as system_audio
 from .audiopackets import (FORMATS, FRAME_BYTES, RING_SIZE, SPF, SPF_NS, SR, SYNC_FLAGS, AudioCipher, AudioFormat,
                            PacketRing, parse_resend_request, resend_answer, resend_missing, rtp_header, sync_packet)
 from .clock import NS, now_ns, to_ntp
+
+if TYPE_CHECKING:
+    from .negotiation import AudioSetup
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -363,11 +369,13 @@ class SampleLine:
     def fed_real(self) -> None:
         self.keeping = False
 
-    def sync_point(self, n_sent: int, gap: int) -> tuple[int, int, int]:
+    def sync_point(self, n_sent: int, gap: int, first_index: int = 0) -> tuple[int, int, int]:
         """(field1, NTP time, field3) of a sync sent when n_sent packets have gone: the next
-        packet's first sample, its line time, and the sample heard then (gap samples before)."""
+        packet's first sample, its line time, and the sample heard then (gap samples before), as
+        RTP times of a stream whose first packet was number first_index (a test switch)."""
         s_n = n_sent * SPF
-        return (s_n - gap) & 0xFFFFFFFF, to_ntp(self.line_ns(s_n), epoch=True), s_n & 0xFFFFFFFF
+        rtp = first_index * SPF + s_n
+        return (rtp - gap) & 0xFFFFFFFF, to_ntp(self.line_ns(s_n), epoch=True), rtp & 0xFFFFFFFF
 
 
 # -- packets on the wire ------------------------------------------------------------------------------
@@ -670,3 +678,390 @@ class ToneFeeder(threading.Thread):
                 _LOGGER.debug("The test tone stopped: the sound took no more (%r)", ex)
                 return
             self.blocks += 1
+
+
+# -- one session's sound -------------------------------------------------------------------------------
+
+NEW, HOLDING, RUNNING, STOPPED, FAILED = "new", "holding", "running", "stopped", "failed"
+
+
+class _Halted(Exception):
+    """The sound was stopped: the feeder's thread is to end."""
+
+
+def _loopback_feeder(sink) -> threading.Thread:
+    """The PC's sound: WASAPI loopback of the default output at 44.1 kHz, in blocks of one packet
+    through a 100 ms buffer, each to `sink`."""
+    return system_audio.LoopbackFeeder(sink=sink, samplerate=SR, block_frames=SPF,
+                                       buffer_frames=CAPTURE_BUFFER_FRAMES, name="mirrorbridge-audio")
+
+
+class _DataProtocol(asyncio.DatagramProtocol):
+    """The data socket's end: it sends the packets to the TV's dataPort, reads nothing, and
+    counts what the network refused."""
+
+    def __init__(self, sound: "MirrorSound") -> None:
+        self.sound = sound
+
+    def datagram_received(self, data: bytes, addr) -> None:
+        _LOGGER.debug("Sound data port: %d bytes from %s", len(data), addr[0])
+
+    def error_received(self, exc) -> None:
+        self.sound._send_error(exc)  # pylint: disable=protected-access
+
+
+class MirrorSound:
+    """One session's sound, from the moment the TV took the type-96 stream: the feeder's blocks
+    put on the sample line, packed and sent (AudioSender) to the ports the TV named, with a
+    sync a second and the keeper's zeros from a 10 ms ticker.
+
+    It holds the samples back (they only move the line's base) until go(), when the first video
+    frame has gone, unless MIRRORBRIDGE_MIRROR_SOUND_HOLD=0. Everything runs on the event loop
+    but the feeder's sinks (_on_floats, _on_block), which only hand the blocks over, at most
+    MAX_PENDING_BLOCKS at a time. Nothing here may stop or slow the video: whatever goes wrong
+    stops the sound alone (fail, then on_failed)."""
+
+    def __init__(self, setup: "AudioSetup", *, knobs: SoundKnobs, control: AudioControl, local_ip: str,
+                 tv_ip: str, tone: bool, make_feeder: Optional[Callable[..., threading.Thread]] = None,
+                 on_first_packet: Callable[[], None], on_failed: Callable[[str], None],
+                 on_device_changed: Callable[[], None] = lambda: None, clock: Callable[[], int] = now_ns,
+                 start_index: int = 0) -> None:
+        self.setup = setup
+        self.knobs = knobs
+        self.control = control
+        self.local_ip = local_ip
+        self.tv_ip = tv_ip
+        self.tone = tone
+        self._make_feeder = make_feeder or _loopback_feeder
+        self._on_first_packet = on_first_packet
+        self._on_failed = on_failed
+        self._on_device_changed = on_device_changed
+        self._clock = clock
+        self.start_index = start_index  # a test switch: the first packet's number
+        self.gap = setup.gap
+        self.state = NEW
+        self.reason = ""  # why it failed
+        self.stats = SoundStats()
+        self.line = SampleLine()
+        self.sender: Optional[AudioSender] = None
+        self.feeder: Optional[threading.Thread] = None
+        self.first_packet_ns: Optional[int] = None
+        self.data_port = 0  # ours, the packets' source
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._transport: Optional[asyncio.DatagramTransport] = None
+        self._ticker: Optional[asyncio.Future] = None
+        self._halted = False  # read by the feeder's thread: it is to end
+        # Blocks on their way to the loop, as two counters of one writer each (the feeder's
+        # thread, the loop), so that neither loses the other's updates.
+        self._queued = 0
+        self._fed = 0
+        self._dropped = 0  # samples dropped since the last block handed over (the feeder's)
+        self._dropped_fresh = False
+        self._speaker_id: Optional[str] = None
+        self._went_ns: Optional[int] = None
+        self._stopped_ns: Optional[int] = None
+        self._data_errors = 0
+        self._last_error: Optional[Exception] = None
+        self._errors_since = 0  # the send errors' 1 s window: when it began, and the count then
+        self._errors_at = 0
+        self._window = (0, SoundStats(), 0)  # the log's window: when it began, the counts and send errors then
+        self._window_error: Optional[tuple[float, float]] = None
+        self._window_headroom: Optional[float] = None
+
+    # -- starting and stopping (the loop) --------------------------------------------------------
+
+    async def start(self) -> None:
+        """Open the data socket, take the control port's requests, then start the feeder (last,
+        once nothing can be cancelled any more). Safe to stop() at any point of it."""
+        loop = self._loop = asyncio.get_running_loop()
+        setup = self.setup
+        transport, _ = await loop.create_datagram_endpoint(lambda: _DataProtocol(self),
+                                                           local_addr=(self.local_ip, 0))
+        if self.state != NEW:  # stopped meanwhile
+            transport.close()
+            return
+        self._transport = transport
+        self.data_port = transport.get_extra_info("sockname")[1]
+        ssrc = setup.stream_id & 0xFFFFFFFF if self.knobs.ssrc == "id" else 0
+        self.sender = AudioSender(setup.format, setup.cipher, ssrc=ssrc, tv_ip=self.tv_ip,
+                                  send_data=datagram_sender(transport, (self.tv_ip, setup.data_port)),
+                                  send_control=self.control.send, control_addr=(self.tv_ip, setup.control_port),
+                                  redundant=setup.redundant, sync_flags=self.knobs.sync_flags,
+                                  start_index=self.start_index, clock=self._clock, stats=self.stats)
+        self.control.attach(self.sender)
+        now = self._clock()
+        self._errors_since, self._errors_at = now, self._errors()
+        self._window = (now, dataclasses.replace(self.stats), self._errors_at)
+        self.state = HOLDING
+        _LOGGER.info("Sound: %s to %s:%d (control %s:%d), gap %d samples (%.0f ms), latencies %d/%d, %s, from UDP %d%s",
+                     setup.format.name, self.tv_ip, setup.data_port, self.tv_ip, setup.control_port, self.gap,
+                     self.gap * 1000 / SR, setup.lat_min, setup.lat_max, setup.cipher.name, self.data_port,
+                     "" if self.knobs.hold else ", not waiting for the first video frame")
+        self.feeder = ToneFeeder(self._on_block) if self.tone else self._make_feeder(sink=self._on_floats)
+        self.feeder.start()
+        if not self.knobs.hold:
+            self.go()
+
+    def go(self) -> None:
+        """The first video frame went: the next block anchors the line, and the sound goes."""
+        if self.state == HOLDING:
+            self.state = RUNNING
+            self._went_ns = self._clock()
+
+    def stop(self) -> None:
+        """Stop the sound at once (and as often as asked): the feeder is told to end, the ticker
+        is cancelled, nothing more goes to the TV. The stats stay."""
+        self._halted = True
+        if self.state not in (STOPPED, FAILED):
+            self.state = STOPPED
+        if self._stopped_ns is None:
+            self._stopped_ns = self._clock()
+        feeder = self.feeder
+        if feeder is not None:
+            feeder.stop()  # type: ignore[attr-defined]
+        ticker, self._ticker = self._ticker, None
+        if ticker is not None:
+            ticker.cancel()
+        if self.sender is not None and self.control.sender is self.sender:
+            self.control.detach()
+        transport, self._transport = self._transport, None
+        if transport is not None:
+            transport.close()
+
+    def fail(self, reason: str) -> None:
+        """Stop the sound for `reason` and say so (on_failed); the video goes on."""
+        if self.state in (STOPPED, FAILED):
+            return
+        self.reason = reason
+        self.state = FAILED
+        self.stop()
+        try:
+            self._on_failed(reason)
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.exception("Sound failure callback failed")
+
+    # -- the feeder's thread ----------------------------------------------------------------------
+
+    def _on_floats(self, arr, arrived_ns: int, fresh: bool) -> None:
+        """LoopbackFeeder's sink: its float32 frames as s16 BE."""
+        if self._halted:
+            raise _Halted
+        self._on_block(floats_to_s16be(arr), len(arr), arrived_ns, fresh)
+
+    def _on_block(self, pcm_be: bytes, n: int, arrived_ns: int, fresh: bool) -> None:
+        """A block of n samples that came at arrived_ns (fresh: the first of a new recorder), on
+        to the loop. Past MAX_PENDING_BLOCKS on the way it is dropped, and the line fills the gap
+        it leaves. Raising ends the feeder."""
+        if self._halted:
+            raise _Halted
+        if self._queued - self._fed >= MAX_PENDING_BLOCKS:
+            self._dropped += n
+            self._dropped_fresh = self._dropped_fresh or fresh
+            self.stats.overflow += 1
+            return
+        dropped, dropped_fresh = self._dropped, self._dropped_fresh
+        self._dropped, self._dropped_fresh = 0, False
+        self._queued += 1
+        assert self._loop is not None
+        try:
+            self._loop.call_soon_threadsafe(self._feed, pcm_be, n, arrived_ns, fresh or dropped_fresh, dropped)
+        except RuntimeError as ex:  # the loop is closed: the session is long over
+            raise _Halted from ex
+
+    # -- the loop ----------------------------------------------------------------------------------
+
+    def _feed(self, pcm_be: bytes, n: int, arrived_ns: int, fresh: bool, skipped: int) -> None:
+        """One block on the line, corrected to fit it, into the stream."""
+        try:
+            self._fed += 1
+            if self.state not in (HOLDING, RUNNING):
+                return
+            line = self.line
+            if skipped and not fresh:
+                line.skip(skipped)
+                self.stats.skipped += skipped
+            c0 = line.observe(n, arrived_ns, fresh)
+            self.stats.steps = line.steps
+            if fresh:
+                self._speaker(getattr(self.feeder, "speaker_id", ""), getattr(self.feeder, "speaker_name", ""))
+            if self.state == HOLDING:
+                self.stats.held += 1
+                return
+            sender = self.sender
+            assert sender is not None
+            if line.A is None:
+                line.start(c0)
+                sender.send_sync(self._sync_point(), first=True)
+                self._ticker = asyncio.ensure_future(self._tick())
+            corr = line.correction(c0, n)
+            self._error(line.error_ns)
+            if corr.reanchored:
+                self.stats.reanchors = line.reanchors
+                _LOGGER.info("Sound: the capture was %.0f ms behind the line: anchored again", line.error_ns / 1e6)
+                sender.mark_next()
+                sender.send_sync(self._sync_point(), first=True)
+            out = apply(pcm_be, corr)
+            m = len(out) // 4
+            cut = min(corr.cut, n)
+            net = m - (n - cut) - corr.fill  # the single samples, as apply really made them
+            self.stats.filled += corr.fill
+            self.stats.cut += cut
+            self.stats.inserted += max(0, net)
+            self.stats.deleted += max(0, -net)
+            line.advance(m)
+            if m:
+                line.fed_real()
+            self._pushed(sender.push(out))
+        except Exception as ex:  # pylint: disable=broad-except
+            _LOGGER.debug("The sound failed on a block", exc_info=True)
+            self.fail(repr(ex))
+
+    def _speaker(self, speaker_id: str, name: str) -> None:
+        """A new recorder: on another output device than before, the speakers may need muting
+        again (on_device_changed)."""
+        before, self._speaker_id = self._speaker_id, speaker_id
+        if before is None or before == speaker_id:
+            return
+        _LOGGER.info("Sound: now from %s", name or speaker_id or "another device")
+        try:
+            self._on_device_changed()
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.exception("Sound device callback failed")
+
+    def _sync_point(self) -> tuple[int, int, int]:
+        assert self.sender is not None
+        return self.line.sync_point(self.sender.index - self.start_index, self.gap, self.start_index)
+
+    def _error(self, error_ns: int) -> None:
+        ms = error_ns / 1e6
+        stats = self.stats
+        stats.error_ms = ms
+        stats.error_min_ms = ms if stats.error_min_ms is None else min(stats.error_min_ms, ms)
+        stats.error_max_ms = ms if stats.error_max_ms is None else max(stats.error_max_ms, ms)
+        low, high = self._window_error or (ms, ms)
+        self._window_error = (min(low, ms), max(high, ms))
+
+    def _pushed(self, made: int) -> None:
+        """`made` packets just went: how long before they are heard (rule A's time, an
+        indicator), and the first packet's callback."""
+        if not made:
+            return
+        assert self.sender is not None
+        now = self._clock()
+        first = (self.sender.index - made - self.start_index) * SPF
+        heard = self.line.line_ns(first) + self.gap * NS // SR
+        for i in range(made):
+            headroom = heard + i * SPF * NS // SR - now
+            if headroom < LATE_MARGIN_NS:
+                self.stats.late += 1
+            ms = headroom / 1e6
+            if self.stats.headroom_min_ms is None or ms < self.stats.headroom_min_ms:
+                self.stats.headroom_min_ms = ms
+            if self._window_headroom is None or ms < self._window_headroom:
+                self._window_headroom = ms
+        if self.first_packet_ns is None:
+            self.first_packet_ns = now
+            try:
+                self._on_first_packet()
+            except Exception:  # pylint: disable=broad-except
+                _LOGGER.exception("Sound first-packet callback failed")
+
+    async def _tick(self) -> None:
+        """Every KEEP_TICK_S, the keeper's zeros (a gap in the capture); every SYNC_INTERVAL_S, a
+        sync. On deadlines of the session clock: asyncio's timers may fire early (by up to 15.6 ms
+        on Windows) or late."""
+        tick, interval = round(KEEP_TICK_S * NS), round(SYNC_INTERVAL_S * NS)
+        start = self._clock()
+        next_tick, next_sync = start + tick, start + interval
+        while self.state == RUNNING:
+            await asyncio.sleep(max(0, next_tick - self._clock()) / NS)
+            now = self._clock()
+            next_tick = next_tick + tick if next_tick + tick > now else now + tick
+            try:
+                sender = self.sender
+                assert sender is not None
+                zeros = self.line.keep(now)
+                if zeros:
+                    self.line.advance(zeros)
+                    self.stats.kept += zeros
+                    self._pushed(sender.push(bytes(4 * zeros)))
+                if now >= next_sync:
+                    sender.send_sync(self._sync_point(), first=False)
+                    next_sync = next_sync + interval if next_sync + interval > now else now + interval
+            except Exception as ex:  # pylint: disable=broad-except
+                _LOGGER.debug("The sound's ticker failed", exc_info=True)
+                self.fail(repr(ex))
+                return
+
+    def _send_error(self, exc: Exception) -> None:
+        self._data_errors += 1
+        self._last_error = exc
+        (_LOGGER.warning if self._data_errors == 1 else _LOGGER.debug)("Sound data port %d: %s", self.data_port, exc)
+
+    def _errors(self) -> int:
+        return self._data_errors + self.control.errors
+
+    # -- from the session's supervisor -----------------------------------------------------------
+
+    @property
+    def pending(self) -> int:
+        """Blocks on their way to the loop."""
+        return self._queued - self._fed
+
+    def check(self, now_ns: int) -> None:
+        """The feeder must still run, and the network must not have refused the sound
+        SEND_ERRORS_PER_S times in the last second; otherwise the sound stops (fail)."""
+        if self.state not in (HOLDING, RUNNING):
+            return
+        feeder = self.feeder
+        if feeder is not None and not feeder.is_alive():
+            error = getattr(feeder, "error", None)
+            self.fail(f"the sound capture ended ({error!r})" if error else "the sound capture ended")
+            return
+        if now_ns - self._errors_since >= NS:
+            errors = self._errors()
+            refused, self._errors_since, self._errors_at = errors - self._errors_at, now_ns, errors
+            if refused >= SEND_ERRORS_PER_S:
+                last = self._last_error or self.control.last_error
+                self.fail(f"the network refused the sound {refused} times in 1 s ({last})")
+
+    def log_window(self, now_ns: int) -> None:
+        """The sound's figures since the last call, for the log (with the session's every 5 s)."""
+        if self.state == NEW:
+            return
+        began, before, errors_before = self._window
+        stats = self.stats
+        errors = self._errors()
+        self._window = (now_ns, dataclasses.replace(stats), errors)
+        error, self._window_error = self._window_error, None
+        headroom, self._window_headroom = self._window_headroom, None
+        if self._went_ns is None:
+            _LOGGER.info("Sound: waiting for the first video frame (%d blocks held), queue %d", stats.held,
+                         self.pending)
+            return
+        seconds = max(1e-9, (now_ns - began) / NS)
+        packets = stats.packets - before.packets
+
+        def ms(field: str) -> float:
+            return (getattr(stats, field) - getattr(before, field)) * 1000 / SR
+
+        low, high = error or (stats.error_ms, stats.error_ms)
+        _LOGGER.info("Sound: %d packets (%.1f/s), line error %+.1f ms (%+.1f..%+.1f), corrections +%d/-%d, "
+                     "filled %.0f ms, kept %.0f ms, cut %.0f ms, resends %d/%d asked (%d gone, %d repeated), headroom "
+                     "min %s ms (%d late), queue %d, send errors %d", packets, packets / seconds, stats.error_ms,
+                     low, high, stats.inserted - before.inserted, stats.deleted - before.deleted, ms("filled"),
+                     ms("kept"), ms("cut"), stats.resent - before.resent, stats.asked - before.asked,
+                     stats.missed - before.missed, stats.deduped - before.deduped,
+                     f"{headroom:.0f}" if headroom is not None else "-", stats.late - before.late, self.pending,
+                     errors - errors_before)
+
+    def final_text(self) -> str:
+        """How the sound ended, for the session's report."""
+        if self.state == FAILED:
+            return f"stopped: {self.reason}"
+        if self._went_ns is None:
+            return "held: the picture never went"
+        if self.first_packet_ns is None:
+            return "sent: 0 packets in 0.0 s"
+        end = self._stopped_ns or self._clock()
+        return f"sent: {self.stats.packets} packets in {(end - self.first_packet_ns) / NS:.1f} s"

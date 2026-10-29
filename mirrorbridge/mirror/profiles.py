@@ -128,7 +128,8 @@ def set_sound(identifier: str, value: str, note: str = "", path: Optional[Path] 
     data = _read(path)
     entry = data.get(identifier)
     if not identifier or not isinstance(entry, dict) or not isinstance(entry.get("profile"), dict):
-        _LOGGER.info("Nothing saved for %s yet: its sound (%s) is not kept", identifier or "this TV", value or "unknown")
+        _LOGGER.info("Nothing saved for %s yet: its sound (%s) is not kept", identifier or "this TV",
+                     value or "unknown")
         return None
     entry["profile"] = {**entry["profile"], "sound": value, "sound_note": note}
     _write(path, data)

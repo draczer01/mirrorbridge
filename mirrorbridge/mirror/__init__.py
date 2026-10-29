@@ -14,6 +14,8 @@ such as TCL, Roku, Samsung and LG TVs; Apple TVs and Macs need FairPlay and are 
     flv.py, h264.py reading FFmpeg's output; the avcC record the TV gets
     packets.py      the 128-byte packet header and the video's encryption
     datachannel.py  the TCP connection the video goes over
+    audiopackets.py the type-96 stream's packets: ALAC or PCM, RTP, the sound's encryption
+    sound.py        the PC's sound (or a test tone) on the session clock, to the TV
     stats.py        where each frame's time goes, logged every few seconds
     session.py      MirrorSession: all of it, for the tray and the command line
     probe.py        probe_mirroring(): what a TV takes, step by step

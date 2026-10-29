@@ -503,7 +503,7 @@ class _Probe:
 
         # NTP whatever MIRRORBRIDGE_TIMING says: the probe's checks are made for it.
         session = MirrorSession(self.target, self.settings, status, source=TEST_PATTERN, profile=profile,
-                                seconds=self.seconds, remember=False, timing=NTP)
+                                seconds=self.seconds, remember=False, timing=NTP, sound=False)
         check.report = session.report
         try:
             await asyncio.wait_for(session.run(), self.seconds + STREAM_SETUP_SECONDS)
