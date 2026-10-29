@@ -675,11 +675,13 @@ class Controller(QObject):
         confirms the way, and none means a black TV, so the next way starts."""
         if session is None or session is not self.session or attempt is not self._attempt:
             return  # it has ended, or another way runs
-        shown = getattr(session, "frames_shown", None)
+        if not getattr(session, "frames_reported", False):
+            return  # the TV keeps no event log: unknown, the way stays where it is
+        shown = getattr(session, "frames_shown", 0)
         route = attempt["plan"][attempt["index"]]
-        if shown:
+        if shown and getattr(session, "codec", "vp8") == "vp8":  # with H.264 the TCL counts frames it never shows
             self.routes.worked(attempt["screen"], route, confirmed=True)
-        elif shown == 0:
+        elif not shown:
             _LOGGER.info("%s: the TV showed no frame in %s s", route, SHOWN_CHECK_SECONDS)
             if self.can_try_another_way():
                 self.try_another_way()

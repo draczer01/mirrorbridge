@@ -220,14 +220,20 @@ def test_google_cast_is_confirmed_by_the_frames_the_tv_showed(controller, monkey
     controller.start_primary()
     running.append(True)
     assert controller.started == [routes.CAST_MIRROR]
-    controller.session = SimpleNamespace(frames_shown=120)
+    controller.session = SimpleNamespace(frames_shown=120, frames_reported=True, codec="vp8")
     controller._route_worked()  # pylint: disable=protected-access
     assert controller.routes.last_worked(tv) == ""  # not yet: the TV has not said
+    for unsure in (SimpleNamespace(frames_shown=0, frames_reported=False, codec="vp8"),  # no event log
+                   SimpleNamespace(frames_shown=120, frames_reported=True, codec="h264")):  # H.264 counts black frames
+        saved, controller.session = controller.session, unsure
+        controller._check_shown(unsure, controller._attempt)  # pylint: disable=protected-access
+        assert controller.routes.last_worked(tv) == "" and controller.routes.last(tv, routes.CAST_MIRROR) != "failed"
+        controller.session = saved
     controller._check_shown(controller.session, controller._attempt)  # pylint: disable=protected-access
     assert controller.routes.last_worked(tv) == routes.CAST_MIRROR
 
     # A black TV: none shown, so the next way starts
-    controller.session = SimpleNamespace(frames_shown=0, stop=lambda: None)
+    controller.session = SimpleNamespace(frames_shown=0, frames_reported=True, codec="vp8", stop=lambda: None)
     monkeypatch.setattr(controller.runner, "submit", lambda *a, **k: None)
     running.clear()
     controller.start_primary()
