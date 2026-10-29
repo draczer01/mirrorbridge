@@ -833,7 +833,8 @@ async def test_google_cast_mirroring_keeps_a_keyframe_every_2_s(monkeypatch):
         cmd = started[-1]
         assert _option(cmd, "-force_key_frames") == "expr:gte(t,n_forced*2)" and _option(cmd, "-g") == str(30 * 2)
         assert "-bsf:v" not in cmd
-    assert _option(started[-1], "-vf").startswith("hwdownload,format=bgra,scale=")
+    assert _option(started[-1], "-filter_complex").startswith("ddagrab=output_idx=0:framerate=30:draw_mouse=1,"
+                                                            "hwdownload,format=bgra,scale=")
 
 
 async def test_google_cast_vp8_keeps_periodic_keyframes(monkeypatch):
@@ -885,14 +886,18 @@ def test_mirror_command_test_pattern_and_desktop(monkeypatch):
     mon = ffmpeg.Monitor(1, 0, 0, 2560, 1440, dxgi_output=0)
     cmd = build_command("ffmpeg", settings, source=DESKTOP, encoder="h264_nvenc", width=1920, height=1080, fps=60,
                         backend="ddagrab", monitor=mon, bt709=True)
-    assert "ddagrab=output_idx=0:framerate=60:draw_mouse=1" in cmd
-    # The CPU chain: to memory, scaled into BT.709 limited range (bilinear), tagged as that.
-    assert cmd[cmd.index("-vf") + 1] == (
+    # The CPU chain: ddagrab in the filter graph (no input, so no queue of captured frames ahead of
+    # the filters), to memory, scaled into BT.709 limited range (bilinear), tagged as that.
+    assert not {"-i", "-vf", "-thread_queue_size"} & set(cmd)
+    assert _option(cmd, "-filter_complex") == (
+        "ddagrab=output_idx=0:framerate=60:draw_mouse=1,"
         "hwdownload,format=bgra,scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease"
         ":force_divisible_by=2:flags=bilinear:out_color_matrix=bt709:out_range=tv,format=nv12,"
         "setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709")
     gdi = build_command("ffmpeg", settings, source=DESKTOP, encoder="libx264", width=1280, height=720, fps=30,
                         backend="gdigrab", monitor=mon, bt709=True)
+    # gdigrab is an input, not a filter: its frames are kept to INPUT_QUEUE (by an FFmpeg before 7)
+    assert _option(gdi, "-thread_queue_size") == "2" and "-filter_complex" not in gdi
     assert _option(gdi, "-vf") == (
         "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
         ":flags=bilinear:out_color_matrix=bt709:out_range=tv,format=yuv420p,"
@@ -903,6 +908,25 @@ def test_mirror_command_test_pattern_and_desktop(monkeypatch):
                         backend="gdigrab", monitor=mon)
     assert _option(old, "-vf") == ("scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease"
                                    ":force_divisible_by=2:flags=bilinear,format=yuv420p")
+
+
+def test_a_capture_in_the_filter_graph_runs(monkeypatch):
+    """ddagrab's command as the session asks for it, FFmpeg's test source in ddagrab's place (and
+    no hwdownload: no D3D11 frames here): FFmpeg takes a source in -filter_complex with the
+    encoder's options, and writes the FLV frames the session reads, the first a keyframe."""
+    ff = _ffmpeg()
+    monkeypatch.setattr(source, "_version", lambda ff: (7, 1))
+    mon = ffmpeg.Monitor(1, 0, 0, 2560, 1440, dxgi_output=0)
+    cmd = build_command(ff, Settings(video_bitrate_kbps=1000), source=DESKTOP, encoder="libx264", width=320,
+                        height=180, fps=30, backend="ddagrab", monitor=mon, bt709=True)
+    at = cmd.index("-filter_complex") + 1
+    head = "ddagrab=output_idx=0:framerate=30:draw_mouse=1,hwdownload,format=bgra,"
+    assert cmd[at].startswith(head)
+    cmd[at] = "testsrc=size=640x360:rate=30," + cmd[at][len(head):]
+    cmd = cmd[:-3] + ["-frames:v", "20"] + cmd[-3:]
+    tags = flv.FlvReader().feed(subprocess.run(cmd, check=True, capture_output=True, timeout=60).stdout)
+    frames = [t for t in tags if t.kind == flv.FRAME]
+    assert len(frames) == 20 and frames[0].keyframe
 
 
 def test_mirror_command_on_the_graphics_card(monkeypatch):
@@ -918,13 +942,14 @@ def test_mirror_command_on_the_graphics_card(monkeypatch):
                              fps=60, backend="ddagrab", monitor=monitor, chain=chain, **kw)
 
     native = command(small)
-    assert "ddagrab=output_idx=2:framerate=60:draw_mouse=1" in native
-    assert "-vf" not in native and not any("hwdownload" in a for a in native)
+    assert _option(native, "-filter_complex") == "ddagrab=output_idx=2:framerate=60:draw_mouse=1"
+    assert not {"-i", "-vf"} & set(native) and not any("hwdownload" in a for a in native)
     # The stream says BT.709 primaries and transfer as the other chains do (NVENC's own BT.601 matrix stays).
     assert native[native.index("-bsf:v"):native.index("-bsf:v") + 2] == list(capture.NATIVE_OUTPUT)
     assert native.index("-bsf:v") > native.index("-c:v") and native[-3:] == ["-f", "flv", "pipe:1"]
     scaled = command(big)
-    assert _option(scaled, "-vf") == ("scale_d3d11=width=1920:height=1080:format=nv12,"
+    assert _option(scaled, "-filter_complex") == ("ddagrab=output_idx=0:framerate=60:draw_mouse=1,"
+                                                  "scale_d3d11=width=1920:height=1080:format=nv12,"
                                       "setparams=range=pc:colorspace=bt709:color_primaries=bt709:color_trc=bt709")
     assert "-bsf:v" not in scaled and not any("hwdownload" in a for a in scaled)
     # Options typed into settings.json come after the encoder's; ones that do not parse are left out.
@@ -942,10 +967,9 @@ def test_mirror_command_on_the_graphics_card(monkeypatch):
 GFX_MAIN = ffmpeg.Monitor(0, 0, 0, 2560, 1440, True, 0, device=r"\\.\DISPLAY1")
 # With an FFmpeg whose gfxcapture repeats frames (dup_frames, after FFmpeg 9.1)
 GFX_COMMAND = [
-    "ffmpeg.exe", "-hide_banner", "-nostats", "-loglevel", "warning", "-thread_queue_size", "2",
-    "-f", "lavfi", "-i", "gfxcapture=hmonitor=65537:width=1920:height=1080:resize_mode=scale_aspect:scale_mode=bilinear"
-    ":max_framerate=62:dup_frames=1:capture_cursor=1",
-    "-vf", "setpts='if(isnan(PREV_OUTPTS),PTS,max(PTS,PREV_OUTPTS+0.001/TB))'",
+    "ffmpeg.exe", "-hide_banner", "-nostats", "-loglevel", "warning",
+    "-filter_complex", "gfxcapture=hmonitor=65537:width=1920:height=1080:resize_mode=scale_aspect:scale_mode=bilinear"
+    ":max_framerate=62:dup_frames=1:capture_cursor=1,setpts='if(isnan(PREV_OUTPTS),PTS,max(PTS,PREV_OUTPTS+0.001/TB))'",
     "-an", "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ll", "-rc", "cbr", "-profile:v", "high",
     "-zerolatency", "1", "-delay", "0", "-forced-idr", "1", "-b:v", "8267k", "-maxrate", "8267k", "-bufsize", "133k",
     "-g", "2147483647", "-bf", "0", "-enc_time_base", "1:1000",
@@ -953,8 +977,8 @@ GFX_COMMAND = [
     "-flush_packets", "1", "-flvflags", "no_duration_filesize+no_metadata", "-f", "flv", "pipe:1"]
 # With FFmpeg 8.1.1, whose gfxcapture does not (Scaling "gfx" only): frames only as the screen changes
 GFX_CHANGES_COMMAND = [
-    "ffmpeg.exe", "-hide_banner", "-nostats", "-loglevel", "warning", "-thread_queue_size", "2",
-    "-f", "lavfi", "-i", "gfxcapture=hmonitor=65537:width=1920:height=1080:resize_mode=scale_aspect:scale_mode=bilinear"
+    "ffmpeg.exe", "-hide_banner", "-nostats", "-loglevel", "warning",
+    "-filter_complex", "gfxcapture=hmonitor=65537:width=1920:height=1080:resize_mode=scale_aspect:scale_mode=bilinear"
     ":max_framerate=62:capture_cursor=1",
     "-an", "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ll", "-rc", "cbr", "-profile:v", "high",
     "-zerolatency", "1", "-delay", "0", "-forced-idr", "1", "-b:v", "8267k", "-maxrate", "8267k", "-bufsize", "533k",
@@ -983,20 +1007,22 @@ def test_mirror_command_with_gfxcapture(monkeypatch, repeats):
     expected = GFX_COMMAND if repeats else GFX_CHANGES_COMMAND
     assert command() == expected
     assert not any("ddagrab" in arg or "hwdownload" in arg for arg in expected)
-    assert _option(command(Settings(show_cursor=False)), "-i").endswith(":capture_cursor=0")
+    assert ":capture_cursor=0" in _option(command(Settings(show_cursor=False)), "-filter_complex")
     # Every 2 s (as for the other chains): the forced keyframes by time, -g only a bound at 62 fps.
     periodic = command(keyframes=2)
     assert _option(periodic, "-force_key_frames") == "expr:gte(t,n_forced*2)"
     assert _option(periodic, "-g") == "124"
     thirty = command(fps=30)
-    assert ("-vf" in thirty) == repeats and _option(thirty, "-b:v") == "8533k"
+    assert ("setpts" in _option(thirty, "-filter_complex")) == repeats and _option(thirty, "-b:v") == "8533k"
     if repeats:
-        assert ":max_framerate=32:dup_frames=1:" in _option(thirty, "-i") and _option(thirty, "-bufsize") == "267k"
+        assert ":max_framerate=32:dup_frames=1:" in _option(thirty, "-filter_complex")
+        assert _option(thirty, "-bufsize") == "267k"
     else:
-        assert ":max_framerate=32:capture_cursor=1" in _option(thirty, "-i") and _option(thirty, "-bufsize") == "1067k"
+        assert ":max_framerate=32:capture_cursor=1" in _option(thirty, "-filter_complex")
+        assert _option(thirty, "-bufsize") == "1067k"
     # The display gone since: no option for it, so FFmpeg ends at once, saying so.
     gone = dataclasses.replace(GFX_MAIN, device=r"\\.\DISPLAY9")
-    assert _option(command(monitor=gone), "-i").startswith("gfxcapture=width=1920:height=1080:")
+    assert _option(command(monitor=gone), "-filter_complex").startswith("gfxcapture=width=1920:height=1080:")
     # A gfxcapture chain is only in place of ddagrab: gdigrab gets the CPU one.
     gdi = command(backend="gdigrab")
     assert _option(gdi, "-vf").startswith("scale=w='min(1920,iw)'") and _option(gdi, "-b:v") == "8000k"

@@ -181,6 +181,14 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   that is on time, so that the TV is not left behind. The log's "Mirroring:" lines count the
   frames sent late, and a line says how long the network held up and how many frames went late
   instead of being dropped.
+- *Mirror screen* keeps the picture fresh when the PC cannot capture and scale the screen as
+  fast as the frame rate asks: the screen capture (ddagrab, gfxcapture) now runs inside FFmpeg's
+  filters (`-filter_complex`), so a frame is captured only when the filters are ready for it. As
+  an FFmpeg input, up to 10 captured frames waited in FFmpeg 7 and later (`-thread_queue_size`
+  no longer applies to inputs there). On a 1440p screen with a full-screen video playing, the
+  processor's chain made 54 of the 60 frames a second, and they reached the TV 60 to 170 ms
+  old, past its lead; every 2 to 3 seconds frames were dropped and FFmpeg was started again for
+  a keyframe, a jump in the picture each time. Now fewer frames come, but each on time.
 - The stream's server answers the CORS preflight (OPTIONS) of video players that run in a web
   page, and lets them read its errors.
 - `cast --file` and *Play a video file* pick `/play` or the play queue as a cast does.
