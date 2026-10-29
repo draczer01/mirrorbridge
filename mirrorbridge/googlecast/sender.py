@@ -51,6 +51,10 @@ class SenderStats:
     reports: int = 0
     lost_reported: int = 0  # the receiver's cumulative lost count, from its last report
     target_delay_ms: int = 0  # what the receiver's feedback says it uses
+    decoded: int = 0  # frames the receiver says it decoded (its event log)
+    played: int = 0  # ...and showed
+    played_late: int = 0  # ...after their time
+    spare_ms: Optional[int] = None  # the last frame shown: ms before its time (negative: late)
 
 
 class VideoSender(asyncio.DatagramProtocol):
@@ -112,6 +116,11 @@ class VideoSender(asyncio.DatagramProtocol):
         if rtcp.pli:
             self.stats.plis += 1
             self.pli_pending = True
+        self.stats.decoded += rtcp.decoded
+        for spare in rtcp.played:
+            self.stats.played += 1
+            self.stats.played_late += spare < 0
+            self.stats.spare_ms = spare
         if rtcp.feedback is not None:
             self.stats.feedbacks += 1
             self._on_feedback(rtcp.feedback)

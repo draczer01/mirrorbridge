@@ -41,6 +41,8 @@ from .discovery import CastDevice
 from .offer import VIDEO_PAYLOAD_TYPE, AnswerError, VideoOffer, parse_answer
 from .rtp import FrameCipher, Packetizer
 from .sender import VideoSender
+from .vp8 import ENCODER as VP8_ENCODER
+from .vp8 import IvfSource, vp8_command
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -59,6 +61,9 @@ STATS_SECONDS = 5
 SUPERVISE_SECONDS = 0.25
 STOP_SECONDS = 3
 DELAY_ENV = "MIRRORBRIDGE_CAST_DELAY_MS"  # a test value for the delay, from a .bat
+CODEC_ENV = "MIRRORBRIDGE_CAST_CODEC"  # h264 or vp8, from a .bat
+H264, VP8 = "h264", "vp8"
+CODECS = (H264, VP8)
 
 
 class CastMirrorError(Exception):
@@ -74,6 +79,12 @@ def choose_delay(wanted: Optional[int]) -> int:
         except ValueError:
             wanted = 0
     return max(MIN_DELAY_MS, min(MAX_DELAY_MS, wanted or DEFAULT_DELAY_MS))
+
+
+def choose_codec(wanted: Optional[str]) -> str:
+    """The codec to send: `wanted`, the test value in CODEC_ENV, or H.264."""
+    wanted = (wanted or os.environ.get(CODEC_ENV, "") or H264).strip().lower()
+    return wanted if wanted in CODECS else H264
 
 
 def find_app(status: dict) -> Optional[dict]:
@@ -92,6 +103,7 @@ class GoogleCastMirror:
         source: str = DESKTOP,
         seconds: Optional[float] = None,
         delay_ms: Optional[int] = None,
+        codec: Optional[str] = None,
         max_canvas: tuple[int, int] = MAX_CANVAS,
     ) -> None:
         self.device = device
@@ -100,6 +112,7 @@ class GoogleCastMirror:
         self.source = source
         self.seconds = seconds
         self.delay_ms = choose_delay(delay_ms)
+        self.codec = choose_codec(codec)
         self.max_canvas = max_canvas
         self.state = State.IDLE
         self.error: Optional[Exception] = None
@@ -127,7 +140,15 @@ class GoogleCastMirror:
         self._length_size = 4
         self._first_sent_ns: Optional[int] = None
         self._dropped = 0
+        self._shown = 0
         self._xscreen: Optional[extended.ExtendedScreen] = None
+
+    @property
+    def frames_shown(self) -> int:
+        """Frames the receiver's own event log says it showed: the proof the picture is on the
+        TV (frames sent, even acknowledged, can still leave it black)."""
+        sender = self._sender
+        return sender.stats.played if sender is not None else self._shown
 
     def _set(self, state: State, message: str = "") -> None:
         self.state = state
@@ -179,7 +200,10 @@ class GoogleCastMirror:
         s = self.settings
         self._set(State.STARTING, Text("checking_ffmpeg", "Checking FFmpeg and encoders"))
         ff = ffmpeg.find_ffmpeg(s.ffmpeg_path)
-        encoder = await loop.run_in_executor(None, ffmpeg.pick_encoder, ff, s.encoder, True)
+        if self.codec == VP8:
+            encoder = VP8_ENCODER
+        else:
+            encoder = await loop.run_in_executor(None, ffmpeg.pick_encoder, ff, s.encoder, True)
         backend, monitor, region = TEST_PATTERN, None, None
         if self.source == DESKTOP:
             if extended.wanted(s):
@@ -199,7 +223,7 @@ class GoogleCastMirror:
         self._sources = [(backend, encoder)]
         if backend == "ddagrab":
             self._sources.append(("gdigrab", encoder))
-        if encoder != "libx264":
+        if encoder not in ("libx264", VP8_ENCODER):
             self._sources.append((self._sources[-1][0], "libx264"))
         self._start_source()
 
@@ -246,7 +270,7 @@ class GoogleCastMirror:
 
         width, height = canvas_limit(s, self.max_canvas)
         offer = VideoOffer(width=width, height=height, fps=max(1, min(60, s.framerate or 30)),
-                           kbps=s.video_bitrate_kbps, delay_ms=self.delay_ms)
+                           kbps=s.video_bitrate_kbps, delay_ms=self.delay_ms, codec=self.codec)
         try:
             reply = await channel.request(NS_WEBRTC, offer.message(), app["transportId"], timeout=ANSWER_SECONDS,
                                           key="seqNum")
@@ -266,8 +290,8 @@ class GoogleCastMirror:
         if answer.max_kbps and answer.max_kbps < s.video_bitrate_kbps:
             _LOGGER.info("The receiver takes at most %d kbps", answer.max_kbps)
             self.settings = s = dataclasses.replace(s, video_bitrate_kbps=max(300, answer.max_kbps))
-        _LOGGER.info("Sending %dx%d at %d fps, %d kbps, shown %d ms after capture", width, height, self.fps,
-                     s.video_bitrate_kbps, self.delay_ms)
+        _LOGGER.info("Sending %s %dx%d at %d fps, %d kbps, shown %d ms after capture", self.codec, width, height,
+                     self.fps, s.video_bitrate_kbps, self.delay_ms)
 
         sender = VideoSender(FrameCipher(offer.key, offer.iv_mask), Packetizer(offer.ssrc, VIDEO_PAYLOAD_TYPE),
                              answer.receiver_ssrc)
@@ -295,8 +319,11 @@ class GoogleCastMirror:
         ff, monitor, region = self._capture
         backend, encoder = self._using = self._sources.pop(0)
         width, height = self.canvas
-        cmd = build_command(ff, self.settings, source=self.source, encoder=encoder, width=width, height=height,
-                            fps=self.fps, backend=backend, monitor=monitor, region=region)
+        cmd = build_command(ff, self.settings, source=self.source, encoder="libx264" if encoder == VP8_ENCODER
+                            else encoder, width=width, height=height, fps=self.fps, backend=backend, monitor=monitor,
+                            region=region)
+        if encoder == VP8_ENCODER:
+            cmd = vp8_command(cmd, self.settings.video_bitrate_kbps, self.fps, self.settings.mirror_keyframe_seconds)
         self.encoder = encoder
         self._set(State.STARTING, Text("encoder_via", "{encoder} via {backend}",
                                        encoder=ffmpeg.ENCODER_LABELS.get(encoder, encoder),
@@ -310,7 +337,7 @@ class GoogleCastMirror:
             except RuntimeError:
                 pass
 
-        self._ffmpeg = FFmpegSource(cmd, hand_over)
+        self._ffmpeg = (IvfSource if encoder == VP8_ENCODER else FFmpegSource)(cmd, hand_over)
         self._ffmpeg.start()
 
     @staticmethod
@@ -342,9 +369,12 @@ class GoogleCastMirror:
                 continue
             if unit.kind != FRAME:
                 continue
-            nals, sps, pps = frame_nals(split_avcc(unit.data, self._length_size))
-            self._sps, self._pps = sps or self._sps, pps or self._pps
-            keyframe = unit.keyframe or is_idr(nals)
+            if self.codec == VP8:
+                nals, keyframe = [], unit.keyframe
+            else:
+                nals, sps, pps = frame_nals(split_avcc(unit.data, self._length_size))
+                self._sps, self._pps = sps or self._sps, pps or self._pps
+                keyframe = unit.keyframe or is_idr(nals)
             if frames.take_trimmed():
                 waiting_keyframe = True
             if not keyframe and self._behind(sender, unit.arrived_ns):
@@ -352,10 +382,10 @@ class GoogleCastMirror:
             if waiting_keyframe and not keyframe:
                 self._dropped += 1
                 continue
-            if keyframe and not self._sps:
+            if keyframe and not self._sps and self.codec == H264:
                 continue  # no parameter sets yet: nothing the receiver could decode
             waiting_keyframe = False
-            data = to_annexb((self._sps + self._pps if keyframe else []) + nals)
+            data = unit.data if self.codec == VP8 else to_annexb((self._sps + self._pps if keyframe else []) + nals)
             sender.send_frame(data, keyframe, unit.arrived_ns)
             if self._first_sent_ns is None:
                 self._first_sent_ns = now_ns()
@@ -435,9 +465,11 @@ class GoogleCastMirror:
             return
         st = sender.stats
         _LOGGER.info("Cast: %d frames (%d keyframes, %d dropped), %.1f MB, %d packets sent again, %d waiting for "
-                     "the TV, %d lost by its count, %d keyframe requests, TV delay %d ms",
+                     "the TV, %d lost by its count, %d keyframe requests, TV delay %d ms; the TV decoded %d and "
+                     "showed %d (%d late, last with %s ms to spare)",
                      st.frames, st.keyframes, self._dropped, st.bytes / 1e6, st.resent, max(0, sender.in_flight()),
-                     st.lost_reported, st.plis, st.target_delay_ms)
+                     st.lost_reported, st.plis, st.target_delay_ms, st.decoded, st.played, st.played_late,
+                     st.spare_ms)
 
     # -- the end -----------------------------------------------------------------
 
@@ -448,6 +480,7 @@ class GoogleCastMirror:
             await loop.run_in_executor(None, self._stop_ffmpeg, source)
         if self._sender is not None:
             self._log_stats()
+            self._shown = self._sender.stats.played
             self._sender.close()
             self._sender = None
         channel, self._channel = self._channel, None

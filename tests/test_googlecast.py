@@ -155,6 +155,7 @@ async def test_mirrors_a_test_pattern(tv, tmp_path):
     assert len(tv.frames) >= 60
     assert _decoded_frames(ff, tv.annexb(), tmp_path) == len(tv.frames)
     assert session.canvas == (640, 360)
+    assert session.frames_shown == len(tv.frames)  # from the receiver's event log
 
 
 async def test_lost_packets_are_sent_again(tmp_path):
@@ -237,3 +238,35 @@ async def test_stop_while_mirroring(tv):
     await asyncio.wait_for(task, 20)
     assert session.state is State.STOPPED and tv.stopped
     assert any(dest == TRANSPORT for _ns, dest, _p in tv.messages)
+
+
+async def test_mirrors_vp8(tv, tmp_path):
+    ff = _ffmpeg()
+    session, _states = await _mirror(tv, seconds=2.5, codec="vp8")
+    stream = tv.offer["offer"]["supportedStreams"][0]
+    assert stream["codecName"] == "vp8" and session.encoder == "libvpx"
+    assert tv.frames and tv.frames[0][1] and not tv.frames[0][2][0] & 1  # a VP8 keyframe first
+    ivf = bytearray(b"DKIF" + struct.pack("<HHIHHIIII", 0, 32, 0x30385056, 640, 360, 30, 1, len(tv.frames), 0))
+    for index, (_id, _key, data) in enumerate(tv.frames):
+        ivf += struct.pack("<IQ", len(data), index) + data
+    path = tmp_path / "video.ivf"
+    path.write_bytes(bytes(ivf))
+    out = subprocess.run([ff, "-hide_banner", "-v", "error", "-i", str(path), "-f", "null", "-"],
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0 and not out.stderr, out.stderr
+    assert len(tv.frames) >= 45 and session.frames_shown == len(tv.frames)
+
+
+def test_receiver_event_log():
+    items = struct.pack(">IIhHhHhH", 3000, 2 << 24, 0, 13 << 12, -20, 12 << 12, 7, 14 << 12)
+    body = struct.pack(">I4s", RECEIVER_SSRC, CAST) + items
+    rtcp = parse_rtcp(struct.pack(">BBH", 0x82, 204, len(body) // 4) + body)
+    assert rtcp.decoded == 1 and rtcp.played == [-20]
+
+
+def test_codec_from_environment(monkeypatch):
+    monkeypatch.setenv(gc_session.CODEC_ENV, "VP8")
+    assert gc_session.choose_codec(None) == "vp8"
+    assert gc_session.choose_codec("h264") == "h264"
+    monkeypatch.setenv(gc_session.CODEC_ENV, "av1")
+    assert gc_session.choose_codec(None) == "h264"
