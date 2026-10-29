@@ -31,6 +31,7 @@ RTP_HEADER = 12
 CAST_HEADER = 7
 MAX_PAYLOAD = MAX_PACKET - RTP_HEADER - CAST_HEADER - 4  # Chrome keeps room for one extension
 VIDEO_CLOCK = 90000
+AUDIO_CLOCK = 48000  # Opus, at its own sample rate
 RTCP_SECONDS = 0.5
 
 KEYFRAME_BIT = 0x80
@@ -130,7 +131,8 @@ class CastFeedback:
 class Rtcp:
     """What one compound RTCP packet from the receiver said."""
 
-    ssrc: Optional[int] = None
+    ssrc: Optional[int] = None  # the receiver's, which it has for each stream
+    media_ssrc: Optional[int] = None  # the sender's stream its feedback is about
     feedback: Optional[CastFeedback] = None
     pli: bool = False
     report: Optional[dict] = None  # fraction lost, cumulative lost, jitter, last SR, delay since it
@@ -183,9 +185,12 @@ def parse_rtcp(packet: bytes) -> Rtcp:
             out.report = {"fraction_lost": lost >> 24, "lost": lost & 0xFFFFFF, "highest": high,
                           "jitter": jitter, "last_sr": last_sr, "since_sr": since}
         elif kind == PT_PSFB and count == 15 and len(body) >= 8:
+            out.media_ssrc = struct.unpack_from(">I", body, 4)[0]
             out.feedback = _cast_feedback(body[8:]) or out.feedback
         elif kind == PT_PSFB and count == 1:
             out.pli = True
+            if len(body) >= 8:
+                out.media_ssrc = struct.unpack_from(">I", body, 4)[0]
         elif kind == PT_APP and count == RECEIVER_LOG and body[4:8] == CAST:
             out.log = True
             _receiver_log(body[8:], out)
