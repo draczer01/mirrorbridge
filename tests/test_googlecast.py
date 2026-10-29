@@ -5,6 +5,7 @@ lost packets sent again, and the ways a receiver says no or goes away."""
 import asyncio
 import struct
 import subprocess
+import sys
 
 import pytest
 
@@ -412,3 +413,18 @@ def test_speakers_are_muted_and_put_back(monkeypatch):
     assert not again.mute()
     again.restore()
     assert FakeVolume.state["muted"]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows' audio endpoints")
+def test_speakers_through_com_do_not_crash():
+    # A CI machine may have no speakers (then nothing is muted); either way the COM calls must
+    # neither crash nor leave anything muted.
+    from mirrorbridge import speakers
+
+    muted = speakers.MutedSpeakers()
+    did = muted.mute()
+    muted.restore()
+    if did:
+        volume = speakers._Volume()  # pylint: disable=protected-access
+        assert not volume.muted()
+        volume.release()
