@@ -66,10 +66,15 @@ MIN_GAP_MS = 20  # the smallest sync gap the lead and the delay may make
 MAX_PENDING_BLOCKS = 64  # blocks on their way to the event loop; more are dropped, and filled
 CAPTURE_BUFFER_FRAMES = 4410  # WASAPI's buffer for the loopback recorder: 100 ms
 SEND_BUFFER_LIMIT = 64 * 1024  # bytes waiting in the data socket's buffer: past it, packets are dropped
-SEND_ERRORS_PER_S = 50  # the network refusing the sound this often in a second stops it
+SEND_ERRORS_PER_S = 50  # the network refusing the sound this often in a second, for SEND_ERROR_SECONDS
+SEND_ERROR_SECONDS = 5  # seconds in a row, stops it (a Wi-Fi reconnect takes less, and the picture rides it out)
 RESEND_MAX = RING_SIZE  # packets one request may ask for (each at most once in audiopackets.RESEND_REPEAT_NS)
+RESEND_PER_S = 2 * SR // SPF  # answers to resend requests a second at most, in all: twice the stream's own packets
+RESEND_BURST = RESEND_MAX  # and at once, after a quiet while: a whole ring's worth
+RESEND_LOG_NS = NS  # a resend request in the log at most this often (a TV may ask with each packet it gets)
 LATE_MARGIN_NS = 10_000_000  # a packet sent with less time than this before it is heard is late
-SOUND_DROP_SECONDS = 5  # a TV that ends the session this soon after the first sound packet
+SOUND_DROP_SECONDS = 5  # a TV that closes the session this soon after the first sound packet
+SOUND_ENDED_SECONDS = 2  # but this soon when it ended mirroring as its remote does: later, a person more likely did
 SOUND_OK_SECONDS = 60  # sound sent this long without the TV ending the session: it takes it
 TONE_HZ = 880  # the test tone: a 100 ms beep (TONE_SAMPLES) at each whole second, at -12 dBFS (TONE_LEVEL)
 TONE_SAMPLES = 4410
@@ -403,12 +408,13 @@ class SoundStats:
     resend_requests: int = 0
     asked: int = 0  # packets asked for again
     resent: int = 0
-    deduped: int = 0  # asked for again within 20 ms of going again: not sent
+    deduped: int = 0  # asked for again within 20 ms of being answered: not answered again
     missed: int = 0  # no longer held: the 8-byte answer
+    limited: int = 0  # not answered: past RESEND_PER_S, or the control port's buffer full
     unknown_control: int = 0
     foreign_control: int = 0  # from another address than the TV's
     send_errors: int = 0
-    send_dropped: int = 0  # not sent: the socket's buffer was full
+    send_dropped: int = 0  # not sent: the socket's buffer was full (a packet, or a resend answer)
     late: int = 0
     headroom_min_ms: Optional[float] = None
     error_ms: float = 0.0  # the last line error
@@ -436,18 +442,21 @@ class AudioSender:
     """Makes the stream's packets from s16 BE samples, seals them (the AudioCipher), keeps the
     last RING_SIZE and sends them, sends the syncs it is given, and answers the TV's resend
     requests. It knows no socket and no event loop: send_data sends a data packet (False: it
-    was dropped), send_control a datagram from our control port."""
+    was dropped), send_control a datagram from our control port (a sync), and send_answer an
+    answer to a resend request from it (False: it was dropped; send_control's by default)."""
 
     def __init__(self, fmt: AudioFormat, cipher: AudioCipher, *, ssrc: int, tv_ip: str,
                  send_data: Callable[[bytes], bool], send_control: Callable[[bytes, tuple], None],
                  control_addr: tuple[str, int], redundant: int = 0, sync_flags: int = SYNC_FLAGS,
-                 start_index: int = 0, clock: Callable[[], int] = now_ns, stats: Optional[SoundStats] = None) -> None:
+                 start_index: int = 0, clock: Callable[[], int] = now_ns, stats: Optional[SoundStats] = None,
+                 send_answer: Optional[Callable[[bytes, tuple], bool]] = None) -> None:
         self.fmt = fmt
         self.cipher = cipher
         self.ssrc = ssrc
         self.tv_ip = tv_ip
         self._send_data = send_data
         self._send_control = send_control
+        self._send_answer = send_answer or (lambda data, addr: send_control(data, addr) is not False)
         self.control_addr = control_addr
         self.redundant = redundant
         self.sync_flags = sync_flags
@@ -458,6 +467,13 @@ class AudioSender:
         self.ring = PacketRing()
         self._carry = b""  # samples short of a whole packet
         self._marker = True
+        # Resend answers: how many may go now (RESEND_PER_S, up to RESEND_BURST) and when that
+        # was worked out; when each seq no longer held was last answered; the log's last line.
+        self._allowance = float(RESEND_BURST)
+        self._allowance_ns: Optional[int] = None
+        self._gone: dict[int, int] = {}
+        self._logged_ns: Optional[int] = None
+        self._unlogged = 0
 
     @property
     def carry(self) -> int:
@@ -512,7 +528,10 @@ class AudioSender:
 
     def on_control(self, data: bytes, addr: tuple) -> None:
         """A datagram on our control port: from the TV, a request for lost packets. Each one
-        still held goes again (at most once in 20 ms), each one gone gets iOS's 8-byte answer."""
+        still held goes again, each one gone gets iOS's 8-byte answer; neither again within
+        20 ms of the last time, and RESEND_PER_S answers a second at most in all: a TV that
+        asks for a gap again with each packet it gets, and never gets it (the answers lost too),
+        is not to flood the network the picture goes over, nor the event loop it is sent from."""
         if addr[0] != self.tv_ip:
             self.stats.foreign_control += 1
             _LOGGER.debug("Sound control port: %d bytes from %s, not the TV", len(data), addr[0])
@@ -528,23 +547,54 @@ class AudioSender:
         self.stats.asked += count
         newest = self.index - 1
         now = self._clock()
-        resent = gone = repeated = 0
+        self._allow(now)
+        repeat_ns = self.ring.repeat_ns
+        resent = gone = repeated = limited = 0
         for i in range(count):
             seq = (first + i) & 0xFFFF
             packet = self.ring.get(seq, newest)
             if packet is None:
-                self._send_control(resend_missing(seq), addr)
-                gone += 1
-            elif not self.ring.mark_resent(seq, newest, now):
+                answered = self._gone.get(seq)
+                if answered is not None and now - answered < repeat_ns:
+                    repeated += 1
+                    continue
+            elif not self.ring.due(seq, newest, now):
                 repeated += 1
+                continue
+            if self._allowance < 1:
+                limited = count - i
+                break
+            if not self._send_answer(resend_answer(packet) if packet is not None else resend_missing(seq), addr):
+                self.stats.send_dropped += 1
+                limited = count - i
+                break
+            self._allowance -= 1
+            if packet is None:
+                self._gone[seq] = now
+                gone += 1
             else:
-                self._send_control(resend_answer(packet), addr)
+                self.ring.mark_resent(seq, newest, now)
                 resent += 1
+        if len(self._gone) > 2 * RESEND_MAX:
+            self._gone = {seq: at for seq, at in self._gone.items() if now - at < repeat_ns}
         self.stats.resent += resent
         self.stats.missed += gone
         self.stats.deduped += repeated
-        _LOGGER.debug("The TV asked for %d packets again from seq %d: %d sent, %d gone, %d sent just before", count,
-                      first, resent, gone, repeated)
+        self.stats.limited += limited
+        self._unlogged += 1
+        if self._logged_ns is None or now - self._logged_ns >= RESEND_LOG_NS:
+            _LOGGER.debug("The TV asked for %d packets again from seq %d: %d sent, %d gone, %d answered just before, "
+                          "%d over the limit%s", count, first, resent, gone, repeated, limited,
+                          f" ({self._unlogged} requests since the last line)" if self._unlogged > 1 else "")
+            self._logged_ns, self._unlogged = now, 0
+
+    def _allow(self, now: int) -> None:
+        """The resend answers that may go now: RESEND_PER_S more for each second since the last
+        request, up to RESEND_BURST."""
+        if self._allowance_ns is not None:
+            self._allowance = min(float(RESEND_BURST),
+                                  self._allowance + (now - self._allowance_ns) * RESEND_PER_S / NS)
+        self._allowance_ns = now
 
 
 class AudioControl(asyncio.DatagramProtocol):
@@ -587,6 +637,16 @@ class AudioControl(asyncio.DatagramProtocol):
     def send(self, data: bytes, addr: tuple) -> None:
         if self.transport is not None and not self.transport.is_closing():
             self.transport.sendto(data, addr)
+
+    def answer(self, data: bytes, addr: tuple) -> bool:
+        """send() for an answer to a resend request: False, and nothing sent, while more than
+        SEND_BUFFER_LIMIT waits in the socket's buffer (Windows' event loop sends one datagram
+        at a time, and holds the rest without end). The syncs never wait on this."""
+        transport = self.transport
+        if transport is None or transport.is_closing() or transport.get_write_buffer_size() > SEND_BUFFER_LIMIT:
+            return False
+        transport.sendto(data, addr)
+        return True
 
     def error_received(self, exc) -> None:
         self.errors += 1
@@ -764,6 +824,7 @@ class MirrorSound:
         self._last_error: Optional[Exception] = None
         self._errors_since = 0  # the send errors' 1 s window: when it began, and the count then
         self._errors_at = 0
+        self._refused_s = 0  # the windows in a row with SEND_ERRORS_PER_S errors or more
         self._window = (0, SoundStats(), 0)  # the log's window: when it began, the counts and send errors then
         self._window_error: Optional[tuple[float, float]] = None
         self._window_headroom: Optional[float] = None
@@ -787,7 +848,8 @@ class MirrorSound:
                                   send_data=datagram_sender(transport, (self.tv_ip, setup.data_port)),
                                   send_control=self.control.send, control_addr=(self.tv_ip, setup.control_port),
                                   redundant=setup.redundant, sync_flags=self.knobs.sync_flags,
-                                  start_index=self.start_index, clock=self._clock, stats=self.stats)
+                                  start_index=self.start_index, clock=self._clock, stats=self.stats,
+                                  send_answer=self.control.answer)
         self.control.attach(self.sender)
         now = self._clock()
         self._errors_since, self._errors_at = now, self._errors()
@@ -1010,7 +1072,10 @@ class MirrorSound:
 
     def check(self, now_ns: int) -> None:
         """The feeder must still run, and the network must not have refused the sound
-        SEND_ERRORS_PER_S times in the last second; otherwise the sound stops (fail)."""
+        SEND_ERRORS_PER_S times a second for SEND_ERROR_SECONDS in a row; otherwise the sound
+        stops (fail). A shorter while (a Wi-Fi reconnect, the route gone for a moment) is
+        ridden out as the picture's connection rides it out: the packets go on into the ring,
+        on their line, and what the TV missed it may ask for again."""
         if self.state not in (HOLDING, RUNNING):
             return
         feeder = self.feeder
@@ -1018,12 +1083,21 @@ class MirrorSound:
             error = getattr(feeder, "error", None)
             self.fail(f"the sound capture ended ({error!r})" if error else "the sound capture ended")
             return
-        if now_ns - self._errors_since >= NS:
-            errors = self._errors()
-            refused, self._errors_since, self._errors_at = errors - self._errors_at, now_ns, errors
-            if refused >= SEND_ERRORS_PER_S:
-                last = self._last_error or self.control.last_error
-                self.fail(f"the network refused the sound {refused} times in 1 s ({last})")
+        if now_ns - self._errors_since < NS:
+            return
+        errors = self._errors()
+        refused, self._errors_since, self._errors_at = errors - self._errors_at, now_ns, errors
+        last = self._last_error or self.control.last_error
+        if refused < SEND_ERRORS_PER_S:
+            if self._refused_s:
+                _LOGGER.info("Sound: the network takes it again, after %d s", self._refused_s)
+            self._refused_s = 0
+            return
+        self._refused_s += 1
+        if self._refused_s == 1:
+            _LOGGER.info("Sound: the network refused it %d times in 1 s (%s); going on", refused, last)
+        if self._refused_s >= SEND_ERROR_SECONDS:
+            self.fail(f"the network refused the sound {refused} times in 1 s, for {self._refused_s} s ({last})")
 
     def log_window(self, now_ns: int) -> None:
         """The sound's figures since the last call, for the log (with the session's every 5 s)."""
@@ -1047,11 +1121,11 @@ class MirrorSound:
 
         low, high = error or (stats.error_ms, stats.error_ms)
         _LOGGER.info("Sound: %d packets (%.1f/s), line error %+.1f ms (%+.1f..%+.1f), corrections +%d/-%d, "
-                     "filled %.0f ms, kept %.0f ms, cut %.0f ms, resends %d/%d asked (%d gone, %d repeated), headroom "
-                     "min %s ms (%d late), queue %d, send errors %d", packets, packets / seconds, stats.error_ms,
-                     low, high, stats.inserted - before.inserted, stats.deleted - before.deleted, ms("filled"),
-                     ms("kept"), ms("cut"), stats.resent - before.resent, stats.asked - before.asked,
-                     stats.missed - before.missed, stats.deduped - before.deduped,
+                     "filled %.0f ms, kept %.0f ms, cut %.0f ms, resends %d/%d asked (%d gone, %d repeated, %d over "
+                     "the limit), headroom min %s ms (%d late), queue %d, send errors %d", packets, packets / seconds,
+                     stats.error_ms, low, high, stats.inserted - before.inserted, stats.deleted - before.deleted,
+                     ms("filled"), ms("kept"), ms("cut"), stats.resent - before.resent, stats.asked - before.asked,
+                     stats.missed - before.missed, stats.deduped - before.deduped, stats.limited - before.limited,
                      f"{headroom:.0f}" if headroom is not None else "-", stats.late - before.late, self.pending,
                      errors - errors_before)
 

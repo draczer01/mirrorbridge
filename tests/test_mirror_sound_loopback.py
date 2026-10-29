@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import statistics
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -24,7 +25,7 @@ from mirrorbridge.mirror import session as mirror_session
 from mirrorbridge.mirror.audiopackets import SPF, SR, ChaChaShk, ms_to_samples
 from mirrorbridge.mirror.clock import NS, from_ntp
 from mirrorbridge.mirror.h264 import TRAILER_ISO
-from mirrorbridge.mirror.negotiation import MEDIA_FIRST, NTP, PTP
+from mirrorbridge.mirror.negotiation import FEEDBACK_SECONDS, MEDIA_FIRST, NTP, PTP
 from mirrorbridge.mirror.sound import SoundKnobs
 from mirrorbridge.session import State
 
@@ -353,6 +354,19 @@ async def test_test_this_tv_sends_no_sound(tv, monkeypatch):
     assert result.worked and tv.audios and all(audio.datagrams == 0 for audio in tv.audios)
     (check,) = result.streams
     assert check.report.sound == "off: off for this session"
+
+
+@pytest.mark.parametrize("verdict", [profiles.SOUND_HEARD, profiles.SOUND_OFF])
+async def test_test_this_tv_keeps_what_is_known_of_the_sound(tv, verdict):
+    """The probe saves the way that worked, and what was known of the sound with it: muting
+    (heard) and the sound left out (off) go on as before."""
+    _ffmpeg()
+    profiles.save("fake-tv", profiles.MirrorProfile(MEDIA_FIRST, sound=verdict, sound_note="2026-10-29: as saved"),
+                  name="TCL")
+    result = await asyncio.wait_for(probe_mirroring(tv.target(), SETTINGS, seconds=1), 120)
+    assert result.worked and result.saved and result.profile.sound == verdict
+    saved = profiles.load("fake-tv")
+    assert (saved.sound, saved.sound_note) == (verdict, "2026-10-29: as saved") and saved.checked
 
 
 async def test_no_audio_stream_means_no_sound_and_the_saved_profile_keeps_its_audio_stream(tv, monkeypatch):
@@ -706,6 +720,28 @@ async def test_the_tvs_audio_latency_and_feedback_are_kept_and_logged(tv, caplog
     assert "RECORD answered 200; Audio-Latency: 11025" in caplog.text
 
 
+async def test_a_volume_the_tv_does_not_answer_holds_nothing_up(tv, caplog):
+    """MIRRORBRIDGE_MIRROR_SOUND_VOLUME (the sound trial's try 2) on a TV that never answers
+    SET_PARAMETER: the picture and the sound go all the same, and the request is given up when
+    the session ends."""
+    caplog.set_level(logging.INFO, "mirrorbridge")
+    tv.reconfigure(answer_volume=False)
+    run = await _mirror(tv, 2, sound_knobs=SoundKnobs(tone=True, volume_db=-20.0))
+    assert run.last == (State.STOPPED, "Mirrored for 2 s, as asked") and run.report.sound.startswith("sent: ")
+    ((body, asked),) = tv.parameters
+    assert body == b"volume: -20.000000\r\n"
+    assert tv.videos[0].arrived[0] - asked < FEEDBACK_SECONDS * NS  # not after the request's time ran out
+    assert _streamed(tv).packets and "volume" not in run.report.steps and "SET_PARAMETER volume" not in caplog.text
+    assert tv.teardowns == 1
+
+
+async def test_a_volume_the_tv_answers_is_logged(tv, caplog):
+    caplog.set_level(logging.INFO, "mirrorbridge")
+    run = await _mirror(tv, 1.5, sound_knobs=SoundKnobs(tone=True, volume_db=-20.0))
+    assert run.report.steps["volume"] == 200 and "SET_PARAMETER volume -20 dB: 200" in caplog.text
+    assert len(tv.parameters) == 1
+
+
 # -- muting this PC -----------------------------------------------------------------------------------
 
 
@@ -751,6 +787,50 @@ async def test_this_pc_is_muted_only_when_the_tv_is_known_to_play_its_sound(tv, 
     else:
         assert recorder.asked("mute") == []
     assert not recorder.muted and run.keys == []
+
+
+async def test_a_new_output_device_is_muted_in_place_of_the_old_one(tv, monkeypatch):
+    """The default output changes while the PC is muted (headphones plugged in): the recorder
+    follows it, the old one is given back and the new one muted, and that one is given back
+    before the session says it stopped."""
+    from mirrorbridge import audio as system_audio
+    from test_mirror_sound import _FakeSoundcard
+
+    card = _FakeSoundcard(switch_after=10**9, empty_at=10**9, fail_at=10**9, pace=SR)
+    monkeypatch.setitem(sys.modules, "soundcard", card)
+    monkeypatch.setattr(system_audio, "SPEAKER_CHECK_SECONDS", 0)
+    monkeypatch.setattr(mirror_session.system_audio, "loopback_available", lambda: (True, "Speakers A"))
+    made = _sounds(monkeypatch)
+    endpoints = []  # (what was asked, of which endpoint, when)
+
+    class Endpoints(Speakers):
+        """Mutes the default output of the moment, and gives back the one it muted."""
+
+        endpoint = ""
+
+        def mute(self) -> bool:
+            if self.muted:
+                return False
+            self.muted, self.endpoint = True, card.default_speaker().id
+            endpoints.append(("mute", self.endpoint, time.perf_counter_ns()))
+            if len(endpoints) == 1:
+                card.switch_after = card.records + 40  # the new device comes about 0.3 s later
+            return True
+
+        def restore(self) -> None:
+            if self.muted:
+                endpoints.append(("restore", self.endpoint, time.perf_counter_ns()))
+            self.muted = False
+
+    monkeypatch.setattr(mirror_session, "MutedSpeakers", Endpoints)
+    profiles.save("fake-tv", profiles.MirrorProfile(MEDIA_FIRST, sound=profiles.SOUND_HEARD))
+    run = await _mirror(tv, 2.5, settings=DESKTOP_SETTINGS, source=mirror_session.DESKTOP, remember=False)
+    assert run.report.sound.startswith("sent: ") and run.keys == []
+    assert [(what, endpoint) for what, endpoint, _ in endpoints] == [
+        ("mute", "{speaker-A}"), ("restore", "{speaker-A}"), ("mute", "{speaker-B}"), ("restore", "{speaker-B}")]
+    assert endpoints[0][2] >= made[0].first_packet_ns and endpoints[-1][2] < run.at(State.STOPPED)
+    assert [opened for opened, _ in card.opened] == ["{speaker-A}", "{speaker-B}"]
+    assert _contiguous(_streamed(tv))  # the sound went on through the change
 
 
 async def test_a_mute_that_fails_is_told_once(tv, monkeypatch, speakers):
@@ -817,6 +897,88 @@ async def test_a_tv_that_closes_the_session_when_the_sound_starts_is_mirrored_wi
     else:
         assert run.last == (State.STOPPED, "The TV ended screen mirroring")
     assert profiles.load("fake-tv").sound == profiles.SOUND_OFF
+
+
+async def test_someone_ending_mirroring_on_the_tv_is_not_taken_for_the_sound(tv, monkeypatch, caplog):
+    """Back on the TV's remote 2.5 s in (the sound turned on, not asked for this run): the TV
+    ends mirroring as it would for the sound, but too late for that to be the likelier; the
+    session is not set up again on the TV just left, and the sound is not left out for it."""
+    caplog.set_level(logging.INFO, "mirrorbridge")
+    monkeypatch.setenv(sound.ENV, "1")
+    casting = asyncio.Event()
+    run = _session(tv, None, on_state=lambda state: state == State.CASTING and casting.set(), sound=None)
+    task = asyncio.ensure_future(run.session.run())
+    await asyncio.wait_for(casting.wait(), 30)
+    await asyncio.sleep(2.5)
+    tv.end_mirroring()
+    await asyncio.wait_for(task, 30)
+    assert run.last == (State.STOPPED, "The TV ended screen mirroring") and not run.report.retried
+    assert len(tv.videos) == 1 and run.keys == [] and run.report.sound.startswith("sent: ")
+    assert profiles.load("fake-tv").sound == profiles.SOUND_UNKNOWN
+    assert re.search(r"The TV ended mirroring 2\.\d s after the first sound packet: taken for someone ending it",
+                     caplog.text)
+
+
+async def test_a_tv_that_ends_the_session_without_sound_as_soon_is_not_kept_from_the_sound(tv, monkeypatch,
+                                                                                          caplog):
+    """The TV closed the session when the sound started, and then the one without sound as soon
+    (someone pressing Back twice, say): the sound is not what it took against, nothing is kept."""
+    caplog.set_level(logging.INFO, "mirrorbridge")
+    monkeypatch.setenv(sound.ENV, "1")
+    tv.reconfigure(close_on_audio=0.3)
+    loop = asyncio.get_running_loop()
+    casting = []
+
+    def on_state(state):
+        if state == State.CASTING:
+            casting.append(state)
+            if len(casting) == 2:
+                loop.call_later(2.5, tv.end_mirroring)  # later than at once, sooner than SOUND_DROP_SECONDS
+
+    run = await _mirror(tv, 10, sound=None, on_state=on_state)
+    assert run.report.retried == "the TV closed the session when the sound started" and len(casting) == 2
+    assert run.last == (State.STOPPED, "The TV ended screen mirroring") and run.keys == ["mirror_retry_no_sound"]
+    saved = profiles.load("fake-tv")
+    assert saved is not None and saved.sound == profiles.SOUND_UNKNOWN
+    assert "The TV ended the session without sound as well" in caplog.text
+
+
+async def test_a_tv_left_without_sound_has_it_again_once_a_run_that_asked_sent_it_long_enough(tv, monkeypatch):
+    monkeypatch.setattr(sound, "SOUND_OK_SECONDS", 1)
+    profiles.save("fake-tv", profiles.MirrorProfile(MEDIA_FIRST, sound=profiles.SOUND_OFF, sound_note="before"))
+    run = await _mirror(tv, 2.5)  # mirror --sound
+    assert run.report.sound_stats["packets"] >= SR // SPF and not run.report.retried
+    assert profiles.load("fake-tv").sound == profiles.SOUND_UNKNOWN
+
+
+@dataclass
+class SimpleTarget:
+    """Enough of a Target for a session that is never run."""
+
+    name: str = "TCL"
+    identifier: str = "fake-tv"
+    needs_fairplay: bool = False
+
+
+@pytest.mark.parametrize("forced, packets, retried, blamed, saved, verdict", [
+    (True, 60 * 125, False, False, "off", ""),  # 60 s sent by a run that asked: known again
+    (True, 60 * 125 - 1, False, False, "off", "off"),
+    (False, 60 * 125, False, False, "off", "off"),  # not asked for: it was never sent
+    (False, 0, True, True, "", "off"),
+    (False, 0, True, False, "", ""),  # closed as soon without the sound
+    (False, 10, False, False, "heard", "heard"),
+])
+def test_the_sound_verdict_kept_for_the_tv(forced, packets, retried, blamed, saved, verdict):
+    session = MirrorSession(SimpleTarget(), SETTINGS, sound=True if forced else None,
+                            profile=profiles.MirrorProfile(sound=saved, sound_note="before" if saved else ""))
+    session.report.sound_stats = {"packets": packets}
+    session._sound_retried, session._sound_blamed = retried, blamed  # pylint: disable=protected-access
+    got, note = session._sound_verdict()  # pylint: disable=protected-access
+    assert got == verdict
+    if retried and blamed:
+        assert re.fullmatch(r"\d{4}-\d\d-\d\d: closed the session when the sound started", note)
+    else:
+        assert note == ("before" if verdict and verdict == saved else "")
 
 
 # -- mirror --sound-trial ------------------------------------------------------------------------------

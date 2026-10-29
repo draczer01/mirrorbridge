@@ -460,7 +460,9 @@ class _Probe:
             await (self._stream(check) if self.send_test_pattern else self._hold(check))
             self.say(check.line())
             if check.worked:
-                self.result.profile = profiles.MirrorProfile.of(shape, trailer)
+                # What is known of the PC's sound on this TV stays as it was: the probe sends none.
+                self.result.profile = dataclasses.replace(profiles.MirrorProfile.of(shape, trailer),
+                                                          sound=self.start.sound, sound_note=self.start.sound_note)
                 self._save()
                 return shape
             report = check.report

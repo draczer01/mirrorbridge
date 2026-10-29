@@ -81,8 +81,10 @@ when asked for (MIRRORBRIDGE_MIRROR_SOUND=1, mirror --sound; never for Test this
 timing): held until the first frame has gone, then sent with the picture's lead, the test tone
 in its place for the test pattern. Nothing the sound does may stop or slow the picture: whatever
 goes wrong stops the sound alone, and the person is told once (on_notice). A TV that closes the
-session within SOUND_DROP_SECONDS of the first sound packet gets it set up once more without
-sound (but for a run that asked for the sound), and mirroring.json keeps that for the next ones.
+session within SOUND_DROP_SECONDS of the first sound packet (SOUND_ENDED_SECONDS when it ends
+mirroring as its remote does) gets it set up once more without sound (but for a run that asked
+for the sound), and mirroring.json keeps that for the next ones, unless the TV closed that one
+as soon.
 """
 
 from __future__ import annotations
@@ -408,6 +410,7 @@ class MirrorSession:
         self.on_notice = on_notice or (lambda text: None)  # what the person should know of the sound, once
         self._sound: Optional[MirrorSound] = None
         self._audio_control: Optional[AudioControl] = None  # our audio control port, bound before SETUP
+        self._volume: Optional[asyncio.Future] = None  # SET_PARAMETER volume (MIRRORBRIDGE_MIRROR_SOUND_VOLUME)
         self._speakers = MutedSpeakers()
         self._muted = False
         self._loopback: tuple[bool, str] = (False, "not checked")  # Windows has a sound output to record (_start)
@@ -511,12 +514,16 @@ class MirrorSession:
                     self._check_screen()
                     return "Stopped"
                 continue
-            if self._sound_dropped():  # it ended the session itself: "The TV ended screen mirroring"
+            if self._sound_dropped(ended=True):  # it ended the session itself: "The TV ended screen mirroring"
                 await self._retry_without_sound()
                 if self._stop.is_set():
                     self._check_screen()
                     return "Stopped"
                 continue
+            if self._sound_retried and self._closed_soon():
+                # Ended as soon without the sound (the person ending it, say): not the sound's doing.
+                _LOGGER.info("The TV ended the session without sound as well: the sound is not left out for it")
+                self._sound_blamed = False
             return ended
 
     async def _attempt(self) -> str:
@@ -558,15 +565,28 @@ class MirrorSession:
             return None
         return (closed - first) / NS
 
-    def _sound_dropped(self) -> bool:
+    def _closed_soon(self) -> bool:
+        """Whether the TV closed this session before its first frame or within SOUND_DROP_SECONDS
+        of it."""
+        first, closed = self._first_sent_ns, self._closed_ns
+        return bool(closed) and (first is None or closed - first < sound.SOUND_DROP_SECONDS * NS)
+
+    def _sound_dropped(self, ended: bool = False) -> bool:
         """Whether the TV closed the session when the sound started, and the session is to be set
         up again without sound: not when the sound was asked for this run (mirror --sound), nor
-        when someone heard it on this TV, nor a second time."""
+        when someone heard it on this TV, nor a second time. `ended`: the TV ended mirroring
+        (both its connections closed, as its remote closes them); that counts only within
+        SOUND_ENDED_SECONDS, since later a person ending it is the likelier, and no TV is to be
+        set up again just after someone left it."""
         after = self._closed_after_sound()
         if after is None or self._stop.is_set():
             return False
         if self._sound_forced or self._sound_retried or self.profile.sound == profiles.SOUND_HEARD:
             _LOGGER.info("The TV closed the session %.1f s after the first sound packet", after)
+            return False
+        if ended and after >= sound.SOUND_ENDED_SECONDS:
+            _LOGGER.info("The TV ended mirroring %.1f s after the first sound packet: taken for someone ending it, "
+                         "not for the sound", after)
             return False
         return True
 
@@ -1030,10 +1050,12 @@ class MirrorSession:
         self._record_ns = now_ns()
         self.report.audio_latency = next((str(value) for key, value in est.record_headers.items()
                                           if key.lower() == "audio-latency"), "")
-        if self._sound_on and est.audio is not None and self._knobs.volume_db is not None:
-            await negotiator.set_volume(est, self._knobs.volume_db)  # its answer is logged; never fatal
         self._feedback = Feedback(channel)
         self._feedback.start()
+        if self._sound_on and est.audio is not None and self._knobs.volume_db is not None:
+            # After the first /feedback, and never waited for: a TV that does not answer it must
+            # not hold the picture. Its answer is logged; it is never fatal.
+            self._volume = asyncio.ensure_future(negotiator.set_volume(est, self._knobs.volume_db))
         await self._start_sound(est, channel)
 
     @staticmethod
@@ -1294,8 +1316,9 @@ class MirrorSession:
 
     def _sound_verdict(self) -> tuple[str, str]:
         """What mirroring.json keeps of this TV and the sound (MirrorProfile.sound and its note):
-        "off" once it closed the session when the sound started; nothing known again once a
-        session asked for the sound sent it for SOUND_OK_SECONDS without that; else as it was."""
+        "off" once it closed the session when the sound started, and kept it without (not when
+        it closed that one as soon: _attempts); nothing known again once a session asked for the
+        sound sent it for SOUND_OK_SECONDS without that; else as it was."""
         if self._sound_retried and self._sound_blamed:
             return profiles.SOUND_OFF, f"{time.strftime('%Y-%m-%d')}: closed the session when the sound started"
         if (self.profile.sound == profiles.SOUND_OFF and self._sound_forced
@@ -1318,11 +1341,12 @@ class MirrorSession:
 
         headroom = stats["headroom_min_ms"]
         _LOGGER.info("Mirroring sound: %s; %d packets (%.1f MB), %s, gap %d, latencies %d/%d; resent %d of %d "
-                     "asked (%d gone); filled %s, kept %s, cut %s; corrections +%d/-%d; base steps %d; re-anchored "
-                     "%d; held %d blocks; overflows %d; headroom min %s ms; Audio-Latency %s; last /feedback %s",
-                     report.sound,
+                     "asked (%d gone, %d over the limit); filled %s, kept %s, cut %s; corrections +%d/-%d; base steps "
+                     "%d; re-anchored %d; held %d blocks; overflows %d; headroom min %s ms; Audio-Latency %s; last "
+                     "/feedback %s", report.sound,
                      stats["packets"], stats["bytes"] / 1e6, setup.format.name, setup.gap, setup.lat_min, setup.lat_max,
-                     stats["resent"], stats["asked"], stats["missed"], ms("filled"), ms("kept"), ms("cut"),
+                     stats["resent"], stats["asked"], stats["missed"], stats["limited"], ms("filled"), ms("kept"),
+                     ms("cut"),
                      stats["inserted"], stats["deleted"], stats["steps"], stats["reanchors"], stats["held"],
                      stats["overflow"], f"{headroom:.0f}" if headroom is not None else "-",
                      report.audio_latency or "none", report.feedback_body or "none")
@@ -1825,6 +1849,13 @@ class MirrorSession:
         self._stopping = True
         self._halt_sound()  # again, for a session that failed while it was set up
         sound_, self._sound = self._sound, None
+        volume, self._volume = self._volume, None
+        if volume is not None:
+            volume.cancel()  # if still unanswered: TEARDOWN is not to wait behind it
+            try:
+                await volume
+            except (asyncio.CancelledError, Exception):  # pylint: disable=broad-except
+                pass
         feedback, self._feedback = self._feedback, None
         if feedback is not None:
             await feedback.stop()

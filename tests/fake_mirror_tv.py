@@ -104,6 +104,7 @@ class TvProfile:
     close_on_audio: Optional[float] = None  # s after the first audio packet: close the video and control connections
     record_headers: dict = field(default_factory=dict)  # more headers in RECORD's answer, e.g. Audio-Latency
     feedback_body: Optional[dict] = None  # POST /feedback's answer (None: empty, as TCL's TVs answer)
+    answer_volume: bool = True  # answer SET_PARAMETER (False: never)
 
 
 TCL = TvProfile()
@@ -452,6 +453,7 @@ class _Handler(AirPlayServerAuth):
         self.add_route("POST", "^/feedback$", self.handle_feedback)
         self.add_route("TEARDOWN", ".*", self.handle_teardown)
         self.add_route("SETPEERS", ".*", self.handle_setpeers)
+        self.add_route("SET_PARAMETER", ".*", self.handle_set_parameter)
 
     def enable_encryption(self, output_key: bytes, input_key: bytes) -> None:
         self.conn.pending_keys = (output_key, input_key)  # after the M4 answer has gone out
@@ -737,6 +739,22 @@ class _Handler(AirPlayServerAuth):
             self.tv.ptp.begin(self.tv.profile.ptp)
         return self._answer(request, 200)
 
+    def handle_set_parameter(self, request: HttpRequest):
+        body = request.body if isinstance(request.body, bytes) else str(request.body).encode()
+        self.tv.parameters.append((body, time.perf_counter_ns()))
+        if self.tv.profile.answer_volume:
+            return self._answer(request, 200)
+        task = asyncio.ensure_future(self._unanswered())
+        self.tasks.append(task)
+        return task
+
+    @staticmethod
+    async def _unanswered() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return None  # the connection closed: no answer at all
+
     def handle_teardown(self, request: HttpRequest):
         self.tv.teardowns += 1
         self.close()
@@ -824,6 +842,7 @@ class FakeMirrorTV:
         self.ptp: Optional[FakePtp] = None  # its PTP clock, once ptp_ports() opened it
         self.event_ports: list[int] = []  # the port of each event channel the sender opened
         self.audios: list[AudioReceived] = []  # each type-96 stream set up, with what came over it
+        self.parameters: list[tuple[bytes, int]] = []  # each SET_PARAMETER's body, and when it came
 
     def ptp_ports(self) -> tuple[int, int]:
         """The UDP ports of its PTP clock (event, general), opened at the first call."""

@@ -254,10 +254,12 @@ def test_packet_ring_finds_packets_by_seq_across_the_wrap():
 def test_packet_ring_sends_a_packet_again_at_most_once_in_20_ms():
     ring = ap.PacketRing()
     ring.put(7, b"x")
+    assert ring.due(7, 7, 1_000_000_000) and ring.due(7, 7, 1_000_000_000)  # due() marks nothing
     assert ring.mark_resent(7, 7, 1_000_000_000)
+    assert not ring.due(7, 7, 1_000_000_000 + 19_000_000) and ring.due(7, 7, 1_000_000_000 + 20_000_000)
     assert not ring.mark_resent(7, 7, 1_000_000_000 + 19_000_000)
     assert ring.mark_resent(7, 7, 1_000_000_000 + 25_000_000)
-    assert not ring.mark_resent(8, 8, 0)  # not held
+    assert not ring.mark_resent(8, 8, 0) and not ring.due(8, 8, 0)  # not held
     ring.put(7 + 256, b"y")
     assert ring.mark_resent(7 + 256, 7 + 256, 1_000_000_000 + 26_000_000)  # a new packet in the slot
 
@@ -623,6 +625,34 @@ def test_loopback_feeder_hands_blocks_to_a_sink(monkeypatch):
     assert got[29][1] - got[28][1] >= 0.45 * NS  # half a second before reopening after the failure
 
 
+def test_loopback_feeder_gives_up_on_a_device_it_cannot_record_at_the_rate(monkeypatch, caplog):
+    """A sink waits for blocks: a recorder that never opens (WASAPI refusing 44.1 kHz) ends the
+    thread with its error after SINK_OPEN_TRIES, instead of reopening twice a second for good."""
+    card = _FakeSoundcard()
+    opened = []
+
+    class Refused:
+        def __enter__(self):
+            opened.append(time.perf_counter())
+            raise OSError("0x88890008 AUDCLNT_E_UNSUPPORTED_FORMAT")
+
+        def __exit__(self, *exc):
+            pass
+
+    card.get_microphone = lambda ident, include_loopback=False: SimpleNamespace(recorder=lambda **kw: Refused())
+    monkeypatch.setitem(sys.modules, "soundcard", card)
+    feeder = audio.LoopbackFeeder(sink=lambda *args: None, samplerate=44100, block_frames=352, buffer_frames=4410)
+    with caplog.at_level(logging.WARNING, logger="mirrorbridge.audio"):
+        feeder.start()
+        feeder.join(10)
+    assert not feeder.is_alive() and isinstance(feeder.error, OSError) and feeder.blocks == 0
+    assert len(opened) == audio.SINK_OPEN_TRIES == 4
+    assert caplog.messages.count("Audio output changed or failed (0x88890008 AUDCLNT_E_UNSUPPORTED_FORMAT); "
+                                 "reopening") == 3
+    assert caplog.messages[-1] == ("Could not capture system audio at 44100 Hz from Speakers A (4 tries): "
+                                   "0x88890008 AUDCLNT_E_UNSUPPORTED_FORMAT")
+
+
 def test_loopback_feeder_sink_with_a_source_and_without_a_port_or_sink():
     import numpy as np
 
@@ -773,6 +803,116 @@ def test_the_sender_sends_a_packet_again_at_most_once_in_20_ms():
     clock[0] += 10_000_000  # 25 ms after the first
     sender.on_control(request, tv)
     assert len(control) == 4 and sender.stats.resent == 4 and control[2][0][4:] == data[3]
+
+
+def test_a_tv_that_keeps_asking_for_a_gap_gets_twice_the_streams_rate_at_most():
+    """UxPlay asks for its whole leading gap again with each packet it gets: a gap our answers
+    never fill (lost too) is answered at RESEND_PER_S, after a first ring's worth at once, and
+    each request takes next to no time once the allowance is spent."""
+    sender, _, control, clock = _recording_sender(0, 300)
+    tv = ("192.168.1.20", 6002)
+    request = struct.pack(">BBHHH", 0x80, 0xD5, 1, 44, 256)
+    sender.on_control(request, tv)
+    assert len(control) == sound.RESEND_BURST == 256 and sender.stats.resent == 256
+    clock[0] += 8_000_000
+    sender.on_control(request, tv)  # each answered 8 ms ago
+    assert len(control) == 256 and sender.stats.deduped == 256 and sender.stats.limited == 0
+    clock[0] += 16_000_000  # 24 ms after the first: due again, 6 allowed by then
+    sender.on_control(request, tv)
+    assert len(control) == 262 and sender.stats.limited == 250
+    assert [p[2:4] for p, _ in control[256:]] == [struct.pack(">H", seq) for seq in range(44, 50)]  # the gap's front
+    began = len(control)
+    for _ in range(1250):  # 10 s of a request every 8 ms
+        clock[0] += 8_000_000
+        sender.on_control(request, tv)
+    assert sound.RESEND_PER_S == 250 and 2400 <= len(control) - began <= 2501
+    assert sender.stats.resend_requests == 1253 and sender.stats.send_dropped == 0
+
+
+def test_answers_for_packets_no_longer_held_are_limited_too():
+    sender, _, control, clock = _recording_sender(0, 300)
+    tv = ("192.168.1.20", 6002)
+    gone = bytes.fromhex("80d5000100100002")  # seqs 16 and 17: long gone
+    sender.on_control(gone, tv)
+    clock[0] += 15_000_000
+    sender.on_control(gone, tv)
+    assert [p.hex() for p, _ in control] == ["80d6000100100000", "80d6000100110000"] and sender.stats.deduped == 2
+    clock[0] += 10_000_000
+    sender.on_control(gone, tv)
+    assert len(control) == 4 and sender.stats.missed == 4
+    for _ in range(300):  # one gone seq after another, every 1 ms: past the allowance
+        clock[0] += 1_000_000
+        sender.on_control(struct.pack(">BBHHH", 0x80, 0xD5, 1, (sender.stats.resend_requests * 2) & 0xFFFF, 2), tv)
+    assert len(control) <= 4 + 254 + 300 * sound.RESEND_PER_S // 1000 + 1 and sender.stats.limited > 0
+    assert len(sender._gone) <= 2 * sound.RESEND_MAX + 2  # pylint: disable=protected-access
+
+
+def test_a_full_control_buffer_drops_resend_answers_but_never_a_sync():
+    class Transport:
+        size = 70_000
+        sent: list = []
+
+        def is_closing(self):
+            return False
+
+        def get_write_buffer_size(self):
+            return self.size
+
+        def sendto(self, data, addr):
+            self.sent.append(data)
+
+    control = sound.AudioControl()
+    control.connection_made(Transport())
+    clock = [NS]
+    sender = sound.AudioSender(ap.ALAC_44100, ap.ChaChaShk(bytes(32)), ssrc=0, tv_ip="192.168.1.20",
+                               send_data=lambda packet: True, send_control=control.send, send_answer=control.answer,
+                               control_addr=("192.168.1.20", 6002), clock=lambda: clock[0])
+    sender.push(_ramp() * 10)
+    tv = ("192.168.1.20", 6002)
+    sender.on_control(bytes.fromhex("80d5000100020003"), tv)
+    assert control.transport.sent == [] and sender.stats.send_dropped == 1 and sender.stats.limited == 3
+    sender.send_sync((0, 0, 0), first=True)
+    assert len(control.transport.sent) == 1 and control.transport.sent[0][1] == 0xD4  # the sync went
+    control.transport.size = 0
+    sender.on_control(bytes.fromhex("80d5000100020003"), tv)  # at once: nothing was marked as sent
+    assert [p[:4].hex() for p in control.transport.sent[1:]] == ["80d60002", "80d60003", "80d60004"]
+    assert sender.stats.resent == 3
+    control.transport = None
+    assert control.answer(b"x", tv) is False
+
+
+def test_the_network_refusing_the_sound_stops_it_only_when_it_lasts(caplog):
+    """A Wi-Fi reconnect (the route gone for a moment: every send refused at once) is ridden
+    out; SEND_ERROR_SECONDS of it in a row stops the sound (check, then on_failed)."""
+    failed = []
+    control = sound.AudioControl()
+    made = sound.MirrorSound(SimpleNamespace(gap=4410), knobs=sound.SoundKnobs(), control=control,
+                             local_ip="127.0.0.1", tv_ip="127.0.0.1", tone=True, on_first_packet=lambda: None,
+                             on_failed=failed.append)
+    made.state = sound.RUNNING
+    refused = OSError(101, "Network is unreachable")
+
+    def second(at: int, errors: int) -> None:
+        for i in range(errors):
+            if i % 10:
+                made._send_error(refused)  # pylint: disable=protected-access
+            else:
+                control.error_received(refused)  # a sync
+        made.check(at * NS - NS // 2)  # within the window: not looked at yet
+        made.check(at * NS)
+
+    with caplog.at_level(logging.INFO, logger="mirrorbridge.mirror.sound"):
+        for at in range(1, 5):
+            second(at, 63)
+        assert made.state == sound.RUNNING and failed == []
+        second(5, 3)
+        assert "Sound: the network takes it again, after 4 s" in caplog.messages
+        for at in range(6, 6 + sound.SEND_ERROR_SECONDS):
+            assert made.state == sound.RUNNING
+            second(at, sound.SEND_ERRORS_PER_S)
+    assert made.state == sound.FAILED and made.final_text().startswith("stopped: the network refused")
+    assert failed == [f"the network refused the sound 50 times in 1 s, for {sound.SEND_ERROR_SECONDS} s ({refused})"]
+    assert caplog.messages.count(f"Sound: the network refused it 63 times in 1 s ({refused}); going on") == 1
 
 
 def test_the_sender_packs_whole_packets_and_marks_the_first():

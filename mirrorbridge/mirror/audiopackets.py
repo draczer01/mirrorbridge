@@ -246,9 +246,14 @@ class PacketRing:
         slot = self._slot(index)
         return slot[1] if slot is not None else None
 
+    def due(self, seq: int, newest: int, now: int) -> bool:
+        """Whether the packet with this seq may go again at `now`: held, and not sent again less
+        than repeat_ns ago (a TV that asks again at once)."""
+        slot = self._find(seq, newest)
+        return slot is not None and (slot[2] is None or now - slot[2] >= self.repeat_ns)
+
     def mark_resent(self, seq: int, newest: int, now: int) -> bool:
-        """Note that the packet with this seq goes again at `now`. False if it is not held, or
-        went again less than repeat_ns ago (a TV that asks again at once)."""
+        """Note that the packet with this seq goes again at `now`. False if it may not (due)."""
         slot = self._find(seq, newest)
         if slot is None or (slot[2] is not None and now - slot[2] < self.repeat_ns):
             return False

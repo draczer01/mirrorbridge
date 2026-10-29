@@ -21,6 +21,7 @@ SAMPLE_RATE = 48000
 CHANNELS = 2
 BLOCK_FRAMES = 480  # 10 ms
 SPEAKER_CHECK_SECONDS = 2  # how often the recorder looks for a new default output device
+SINK_OPEN_TRIES = 4  # a sink's recorders in a row that fail before giving a block: the capture gives up
 
 
 def loopback_available() -> tuple[bool, str]:
@@ -59,7 +60,9 @@ class LoopbackFeeder(threading.Thread):
     sink(float32 array of (frames, 2), time.perf_counter_ns() when it came, fresh), fresh
     being True for the first block of each recorder opened (speaker_id and speaker_name
     then name its device). Nothing is sent for a gap: the sink fills it as it needs. If
-    the sink raises, the thread ends.
+    the sink raises, the thread ends; so it does, with `error` set, if SINK_OPEN_TRIES
+    recorders in a row fail before giving a block (a device that cannot be recorded at
+    this rate), since the sink would otherwise wait for a block that never comes.
     """
 
     def __init__(self, port: int | None = None, source=None, *, samplerate: int = SAMPLE_RATE,
@@ -78,6 +81,7 @@ class LoopbackFeeder(threading.Thread):
         self.error: Exception | None = None
         self.speaker_id = ""  # set each time a recorder opens
         self.speaker_name = ""
+        self.blocks = 0  # handed to the sink
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -149,6 +153,7 @@ class LoopbackFeeder(threading.Thread):
 
     def _deliver(self, data, fresh: bool) -> None:
         arrived = time.perf_counter_ns()
+        self.blocks += 1
         try:
             self._sink(data, arrived, fresh)
         except Exception as ex:  # pylint: disable=broad-except
@@ -171,6 +176,7 @@ class LoopbackFeeder(threading.Thread):
 
             ctypes.windll.ole32.CoInitializeEx(None, 0)
 
+        failed = 0  # sink mode: recorders in a row that failed before giving a block
         while not self._stop_event.is_set():
             try:
                 speaker = soundcard.default_speaker()
@@ -184,6 +190,7 @@ class LoopbackFeeder(threading.Thread):
                 continue
             _LOGGER.info("Capturing system audio from: %s", speaker.name)
             self.speaker_id, self.speaker_name = speaker.id, speaker.name
+            blocks = self.blocks
             try:
                 self._record(emit, mic, speaker.id, soundcard)
             except (_FFmpegGone, _SinkGone):
@@ -191,6 +198,13 @@ class LoopbackFeeder(threading.Thread):
             except Exception as ex:  # pylint: disable=broad-except
                 if self._stop_event.is_set():
                     return
+                if self._sink is not None:
+                    failed = failed + 1 if self.blocks == blocks else 0
+                    if failed >= SINK_OPEN_TRIES:
+                        self.error = ex
+                        _LOGGER.warning("Could not capture system audio at %d Hz from %s (%d tries): %s",
+                                        self.samplerate, speaker.name, failed, ex)
+                        return
                 _LOGGER.warning("Audio output changed or failed (%s); reopening", ex)
                 silence(0.5)
 
