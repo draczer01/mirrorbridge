@@ -830,16 +830,32 @@ async def _udp_sender(audio, **kw):
     return sender, control, data
 
 
-async def _send_frames(sender, frames: list[bytes]) -> None:
+async def _paced_push(sender, data, pcm: bytes) -> None:
+    """Push as a stream would, not all at once: Windows' event loop sends one datagram at a
+    time (under Wine about one in 0.4 ms) and holds the rest, which datagram_sender drops past
+    64 KiB; and on Linux the receiving socket's buffer must not overflow."""
+    sender.push(pcm)
+    await asyncio.sleep(0.001)
+    while data.get_write_buffer_size() > 8 * 1448:
+        await asyncio.sleep(0.001)
+
+
+async def _sent(audio, data, last: int) -> None:
+    """Until the data transport has sent everything and packet `last` came (3 s at most)."""
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and (data.get_write_buffer_size() or last not in audio.packets):
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.1)  # for what is still on its way
+
+
+async def _send_frames(sender, data, audio, frames: list[bytes]) -> None:
     line = sound.SampleLine()
     line.observe(352, time.perf_counter_ns(), True)
     line.start(0)
     sender.send_sync(line.sync_point(0, 4410), first=True)
-    for k, frame in enumerate(frames):
-        sender.push(frame)
-        if k % 4 == 3:
-            await asyncio.sleep(0.002)  # about as fast as the stream itself, which the sockets' buffers take
-    await asyncio.sleep(0.2)
+    for frame in frames:
+        await _paced_push(sender, data, frame)
+    await _sent(audio, data, len(frames) - 1)
 
 
 @pytest.mark.parametrize("profile", [{}, {"audio_lose": (30, 31)}, {"redundant": 2}])
@@ -853,7 +869,7 @@ async def test_the_sender_over_udp_to_the_fake_tvs_audio_ports(profile):
     frames = _random_frames(200, seed=3)
     port = control.port
     try:
-        await _send_frames(sender, frames)
+        await _send_frames(sender, data, audio, frames)
     finally:
         control.close()
         data.close()
@@ -947,10 +963,8 @@ async def test_the_tone_through_the_line_and_the_sender_is_heard_at_whole_second
             assert corr == sound.Correction()
             out = sound.apply(pcm, corr)
             line.advance(len(out) // 4)
-            sender.push(out)
-            if k % 4 == 3:
-                await asyncio.sleep(0.002)
-        await asyncio.sleep(0.2)
+            await _paced_push(sender, data, out)
+        await _sent(audio, data, sender.index - 1)
     finally:
         control.close()
         data.close()
