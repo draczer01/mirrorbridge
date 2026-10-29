@@ -11,7 +11,7 @@ import json
 import logging
 import os
 import time
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Optional
 
@@ -118,16 +118,20 @@ def save(identifier: str, profile: MirrorProfile, *, name: str = "", info: str =
     return path
 
 
-def set_sound(identifier: str, value: str, note: str = "", path: Optional[Path] = None) -> Optional[Path]:
+def set_sound(identifier: str, value: str, note: str = "", path: Optional[Path] = None, *,
+              profile: Optional[MirrorProfile] = None, name: str = "") -> Optional[Path]:
     """Keep what is known of the PC's sound on this device (SOUND_VERDICTS) in its saved entry,
-    the rest of it as it was. None if nothing is saved for it yet: there is no entry to keep it
-    in, and a new one would pass the defaults off as what worked."""
+    the rest of it as it was. With nothing saved for it yet, `profile` (what the session that
+    found it out used) is saved with it; without one, nothing is, and None is returned: the
+    defaults are not to pass for what worked."""
     if value not in SOUND_VERDICTS:
         raise ValueError(f"not a sound verdict: {value!r}")
     path = path or profiles_file()
     data = _read(path)
     entry = data.get(identifier)
     if not identifier or not isinstance(entry, dict) or not isinstance(entry.get("profile"), dict):
+        if identifier and profile is not None:
+            return save(identifier, replace(profile, sound=value, sound_note=note), name=name, path=path)
         _LOGGER.info("Nothing saved for %s yet: its sound (%s) is not kept", identifier or "this TV",
                      value or "unknown")
         return None

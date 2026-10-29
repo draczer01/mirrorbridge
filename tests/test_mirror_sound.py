@@ -1262,6 +1262,11 @@ def test_the_saved_profile_keeps_what_is_known_of_the_sound(tmp_path):
     assert (profiles.load("tcl", path).sound, profiles.load("tcl", path).sound_note) == ("heard", "")
     with pytest.raises(ValueError):
         profiles.set_sound("tcl", "loud", path=path)
+    # With nothing saved, what the session that heard it used is saved with it.
+    used = profiles.MirrorProfile("media-first", checked="2026-10-29 12:00")
+    assert profiles.set_sound("roku", "heard", path=path, profile=used, name="Roku") == path
+    assert profiles.load("roku", path) == dataclasses.replace(used, sound="heard")
+    assert json.loads(path.read_text())["roku"]["name"] == "Roku" and profiles.load("tcl", path).sound == "heard"
     for odd in ("loud", None, 3):
         assert profiles.MirrorProfile.from_dict({"sound": odd, "sound_note": 5}).sound == ""
     assert profiles.MirrorProfile.from_dict({"sound_note": 5}).sound_note == ""
