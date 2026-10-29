@@ -207,20 +207,20 @@ class ProbeReport:
         return any(result.worked for result in self.results)
 
     def conclusion(self) -> Text:
-        """What the tests say, and whether Mirror screen should work, when the mirroring test ran."""
+        """What the tests say, and whether Show my screen should work, when the mirroring test ran."""
         casting = self._casting()
         mirrored = next((result for result in self.results if result.test == MIRROR and result.skipped is None), None)
         if mirrored is None:
             return casting
         if not mirrored.worked:
-            return Text("probe_mirror_not_working", "{conclusion} Mirror screen did not work on this TV in the test: "
-                        "please send the report, and say whether the moving test pattern appeared on the TV.",
+            return Text("probe_mirror_not_working", "{conclusion} Show my screen did not work on this TV in the "
+                        "test: please send the report, and say whether the moving test pattern appeared on the TV.",
                         conclusion=casting)
         if casting.key == "probe_none":
-            return Text("probe_mirror_only", "{device} did not take the video it was sent to cast, but Mirror "
-                        "screen should work on this TV: it accepted screen mirroring and kept the video open.",
+            return Text("probe_mirror_only", "{device} did not take the video it was sent to cast, but Show "
+                        "my screen should work on this TV: it accepted screen mirroring and kept the video open.",
                         device=self.device)
-        return Text("probe_mirror_works", "{conclusion} Mirror screen should work on this TV: it accepted screen "
+        return Text("probe_mirror_works", "{conclusion} Show my screen should work on this TV: it accepted screen "
                     "mirroring and kept the video open.", conclusion=casting)
 
     def _casting(self) -> Text:

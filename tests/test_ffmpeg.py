@@ -256,6 +256,26 @@ def test_the_encoder_probe_keeps_the_encoder_s_own_line(monkeypatch, caplog):
         + (every * 4).splitlines()[-ffmpeg.PROBE_TAIL_LINES:])
 
 
+def test_the_encoder_probe_warns_once_for_a_cause_whatever_ffmpegs_addresses(monkeypatch, caplog):
+    """Each FFmpeg names its encoder at another address ("[h264_nvenc @ 000001d2c3a4b5c0]"): the
+    same cause from the next probe (the next session) is not another warning."""
+    addresses = iter(["000001d2c3a4b5c0", "000002a1b2c3d4e5", "0x5641a41f3b40"])
+
+    def run(args, timeout=15):
+        return subprocess.CompletedProcess(args, 1, "", f"[h264_nvenc @ {next(addresses)}] Cannot load nvcuda.dll\n")
+
+    monkeypatch.setattr(ffmpeg, "_run", run)
+    monkeypatch.setattr(ffmpeg, "_WORKING_ENCODERS", set())
+    monkeypatch.setattr(ffmpeg, "_WARNED", set())
+    with caplog.at_level(logging.DEBUG, logger="mirrorbridge.ffmpeg"):
+        for _ in range(3):
+            assert not ffmpeg.encoder_works("ff", "h264_nvenc", True)
+    said = [(r.levelno, r.getMessage()) for r in caplog.records if "does not work here" in r.getMessage()]
+    assert [level for level, _ in said] == [logging.WARNING, logging.DEBUG, logging.DEBUG]
+    assert said[0][1] == ("Encoder NVIDIA NVENC does not work here: [h264_nvenc @ 000001d2c3a4b5c0] Cannot load "
+                          "nvcuda.dll")
+
+
 def _wait_segments(path, n, timeout=20):
     deadline = time.time() + timeout
     while time.time() < deadline:

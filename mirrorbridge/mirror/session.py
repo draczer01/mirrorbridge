@@ -21,14 +21,15 @@ past that, when the TV (or the network) takes the video slower than it comes, ar
 dropped up to the next keyframe, and the drop ends on a keyframe that is on time, so that the
 TV is back to real time. A TV that takes nothing for VIDEO_STALL_SECONDS ends the session. So
 does FFmpeg giving no picture (FIRST_FRAME_SECONDS, FRAME_GAP_SECONDS), but not gfxcapture's
-once it gave a frame: it gives one only when the screen changes, so while it runs a screen that
-stays as it is is no fault; setting up has START_SECONDS in all.
+once it gave a frame: it gives one only when the screen changes, so a screen that stays as it
+is is no fault (FFmpeg ending is still seen to); setting up has START_SECONDS in all.
 
 Keyframes come only when needed (ffmpeg.mirror_encoder_args): a keyframe made through the
 small buffer that keeps the delay down is a blur on text, so FFmpeg makes one when it starts
 and none after. When frames were dropped (or the TV took none for a while, FrameQueue), FFmpeg
 is started again (_restart): its first frame is a keyframe. That is at most once every
-KEYFRAME_RESTART_SECONDS, and the TV is told nothing: the frames' times go on from where they
+KEYFRAME_RESTART_SECONDS, without waiting for another frame (gfxcapture gives none while the
+screen stays as it is), and the TV is told nothing: the frames' times go on from where they
 were (PtsMapper.restart) and the same picture settings need no new codec packet.
 
 FFmpeg is also started again when Windows took the screen capture away (a display or its driver
@@ -38,8 +39,10 @@ CAPTURE_LOST_SECONDS ends the session with its own error. FFmpeg ending before i
 for another reason (the driver refuses ddagrab, the GPU encoder is out of sessions) goes on
 the next way, as a cast does: the graphics card's chain (capture.py: NVENC with ddagrab, or with
 gfxcapture when the screen must be scaled), then the processor's, then GDI capture, then the CPU
-encoder. A graphics card chain that ends so, or makes a picture of the wrong size (its first
-SPS), gives way to the processor's on that display for the rest of the run.
+encoder. A graphics card chain that ends so (but for Windows keeping the screen from it, which
+is no fault of the chain), or makes a picture of the wrong size (its first SPS), gives way to
+the processor's on that display for the rest of the run; one at the display's own size whose
+display comes back at a size to be scaled is chosen again (_rechoose_chain).
 
 Mirror screen settings: Latency (MIRROR_LATENCIES, the TV's wait for each frame, the lead:
 Normal is the one saved for the TV) and Frame rate (choose_mirror_fps: Automatic is 60 with a
@@ -565,7 +568,7 @@ class MirrorSession:
         cmd = build_command(ff, s, source=self.source, encoder=encoder, width=canvas[0], height=canvas[1], fps=fps,
                             backend=backend, monitor=monitor, region=region, chain=chain,
                             extra=s.mirror_encoder_extra,
-                            keyframe_seconds=ffmpeg.mirror_keyframe_seconds(s.mirror_keyframes))
+                            keyframe_seconds=ffmpeg.mirror_keyframe_seconds(s.mirror_keyframes), bt709=True)
         self._generation += 1
         gen = self._accepting = self._generation
         self._gen_frames = 0
@@ -618,10 +621,16 @@ class MirrorSession:
         said = failed.errors(STDERR_LINES)
         if kind in (capture.GPU, capture.GFX):
             ff, monitor, _region = self._capture
-            capture.mark_broken(ff, monitor, kind)
-            _LOGGER.warning("%s with %s on the graphics card failed on %s (not tried there again until MirrorBridge "
-                            "quits), trying the processor's chain. FFmpeg said:\n%s",
-                            capture.capture_name(backend, kind), encoder, capture.display_key(monitor), said)
+            lost = capture.capture_lost(said, kind=kind, returncode=failed.returncode)
+            if lost:  # Windows kept the screen from it (a UAC prompt, the lock screen): not the chain's fault
+                _LOGGER.warning("%s with %s on the graphics card could not capture %s (%s), trying the processor's "
+                                "chain. FFmpeg said:\n%s", capture.capture_name(backend, kind), encoder,
+                                capture.display_key(monitor), lost, said)
+            else:
+                capture.mark_broken(ff, monitor, kind)
+                _LOGGER.warning("%s with %s on the graphics card failed on %s (not tried there again until "
+                                "MirrorBridge quits), trying the processor's chain. FFmpeg said:\n%s",
+                                capture.capture_name(backend, kind), encoder, capture.display_key(monitor), said)
         else:
             _LOGGER.warning("%s with %s failed, trying the next option. FFmpeg said:\n%s", backend, encoder, said)
         self._frames.clear()
@@ -645,6 +654,7 @@ class MirrorSession:
             await loop.run_in_executor(None, self._kill_ffmpeg, old)
         if refresh:
             await self._refresh_capture()
+            await self._rechoose_chain()
         if self._stopping:
             return
         self._last_restart_ns = now_ns()
@@ -682,10 +692,37 @@ class MirrorSession:
                          f", the window at {window}" if window != region else "")
         self._capture = (ff, found, window)
 
+    async def _rechoose_chain(self) -> None:
+        """The graphics card chain at the display's own size (GPU) for a display that came back
+        at a size that has to be scaled now: the chain is chosen again as at the start
+        (capture.choose_chain: gfxcapture, else the processor's, never scale_d3d11 while it is
+        off), the ways after it staying as they were."""
+        backend, encoder, kind = self._using
+        ff, monitor, region = self._capture
+        canvas = self.report.canvas or FALLBACK_CANVAS
+        if kind != capture.GPU or not capture.needs_scaling(capture.capture_size(backend, monitor, region), canvas):
+            return
+        chosen, why = await asyncio.get_running_loop().run_in_executor(None, functools.partial(
+            capture.choose_chain, ff, encoder=encoder, backend=backend, monitor=monitor, region=region,
+            canvas=canvas, scaler=self.settings.mirror_scaler))
+        if chosen == kind:
+            return
+        _LOGGER.info("Capture chain from now on: %s (%s)", capture.KIND_WORDS[chosen], why)
+        self._using = (backend, encoder, chosen)
+        if self._sources and self._sources[0] == self._using:
+            self._sources.pop(0)  # the processor's chain is the way now, not the next one
+
     def _want_keyframe(self, why: str) -> None:
         """A keyframe is needed (`why`, for the log): FFmpeg is started again for one (_pump)."""
         if not self._keyframe_wanted and not self._stopping:
             self._keyframe_wanted = why
+
+    def _keyframe_due_in(self) -> Optional[float]:
+        """Seconds until FFmpeg may be started again for the keyframe asked for (0: now), at most
+        once every KEYFRAME_RESTART_SECONDS; None if none is asked for."""
+        if not self._keyframe_wanted or self._stopping:
+            return None
+        return max(0.0, KEYFRAME_RESTART_SECONDS - (now_ns() - self._last_restart_ns) / NS)
 
     async def _set_up(self) -> None:
         """Connect and pair-verify, GET /info, SETUP, the video connection, RECORD, /feedback."""
@@ -849,9 +886,9 @@ class MirrorSession:
 
     def _check_frames(self, now: int) -> None:
         """FFmpeg must give a first frame, and then keep giving them; gfxcapture's gives them only
-        as the screen changes, so once it gave one, a gap is a fault only if it ended. A screen
-        capture that was lost must come back within CAPTURE_LOST_SECONDS (the FFmpegs started
-        meanwhile give none)."""
+        as the screen changes, so once it gave one, a gap is no fault (its end is _ended's). A
+        screen capture that was lost must come back within CAPTURE_LOST_SECONDS (the FFmpegs
+        started meanwhile give none)."""
         assert self._frames is not None and self._ffmpeg is not None
         if self._recovering_since:
             if now - self._recovering_since > CAPTURE_LOST_SECONDS * NS:
@@ -862,8 +899,10 @@ class MirrorSession:
         if last is None and now - self._ffmpeg.started_ns > FIRST_FRAME_SECONDS * NS:
             raise self._no_picture(FIRST_FRAME_SECONDS)
         if last is not None and now - last > FRAME_GAP_SECONDS * NS:
-            if self._stats.variable_rate and self._gen_frames and self._ffmpeg.running():
-                return  # a screen that stays as it is
+            # A screen that stays as it is; if FFmpeg ended meanwhile, its end goes to _ended,
+            # which says why (a lost capture, the virtual screen gone), not this.
+            if self._stats.variable_rate and self._gen_frames:
+                return
             raise self._no_picture(FRAME_GAP_SECONDS)
 
     def _no_picture(self, seconds: int) -> MirrorError:
@@ -882,8 +921,8 @@ class MirrorSession:
         reason = self._lost or "no picture"
         self.report.steps["picture"] = f"capture lost ({reason})"
         return MirrorError(Text(
-            "mirror_capture_lost", "Windows stopped the screen capture and it did not come back ({reason}). Start "
-            "mirroring again.", reason=reason,
+            "mirror_capture_lost", "Windows stopped the screen capture and it did not come back ({reason}). Choose "
+            "Show my screen again.", reason=reason,
         ), step="capture", steps=self.report.steps)
 
     async def _video_closed(self, reason: str) -> str:
@@ -1011,16 +1050,25 @@ class MirrorSession:
             dropped_at = now_ns()
 
         while True:
-            unit = await frames.get()
+            # A keyframe asked for is not left waiting for a frame: gfxcapture gives none while
+            # the screen stays as it is. Nor is it got for an FFmpeg that has ended: that end
+            # goes to _ended first (a lost capture, the next way), with the frames before it.
+            due_in = self._keyframe_due_in()
+            if due_in == 0 and not frames.ended() and self._ffmpeg.running():
+                _LOGGER.info("Starting FFmpeg again for a keyframe: %s", self._keyframe_wanted)
+                await self._restart(f"a keyframe: {self._keyframe_wanted}")
+                restarted()
+                continue
+            if not due_in:
+                unit = await frames.get()
+            else:
+                try:
+                    unit = await asyncio.wait_for(frames.get(), due_in)  # FrameQueue.get takes nothing if cancelled
+                except asyncio.TimeoutError:
+                    continue  # no frame came meanwhile: the keyframe is due now
             if unit is None:
                 if self._stopping or not await self._ended():
                     return
-                restarted()
-                continue
-            if (self._keyframe_wanted and not self._stopping
-                    and now_ns() - self._last_restart_ns >= KEYFRAME_RESTART_SECONDS * NS):
-                _LOGGER.info("Starting FFmpeg again for a keyframe: %s", self._keyframe_wanted)
-                await self._restart(f"a keyframe: {self._keyframe_wanted}")
                 restarted()
                 continue
             taken = now_ns()
@@ -1069,8 +1117,10 @@ class MirrorSession:
                 if not wait_for_idr:
                     _LOGGER.info("Dropping frames up to the next keyframe: %s", why)
                     dropped_at = taken
-                    if on_demand and not frames.keyframe_waiting():
-                        self._want_keyframe(why)
+                # A drop that begins asks for a keyframe, unless one is waiting; so does a keyframe
+                # dropped, one that waited too long (with a keyframe every 10 s, the next is far off).
+                if on_demand and (idr or not wait_for_idr) and not frames.keyframe_waiting():
+                    self._want_keyframe(why)
                 wait_for_idr = True
                 behind_since = late_frames = held_ns = 0
                 self._stats.drop()

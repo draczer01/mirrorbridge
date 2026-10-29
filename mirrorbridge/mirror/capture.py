@@ -87,6 +87,10 @@ GPU_SCALED_COLOUR = Colour("pc", "bt709", measured=False)
 # their place when it opens (fftools/ffmpeg_enc.c), and ddagrab and gfxcapture tag their frames
 # sRGB. So the stream's header is changed instead.
 NATIVE_OUTPUT = ("-bsf:v", "h264_metadata=colour_primaries=1:transfer_characteristics=1")
+# gfxcapture's frames have the times the screen changed at, on a link that says max_framerate a
+# second: FFmpeg would give the encoder 1/max_framerate as its time base and move each frame onto
+# that grid (a steady 60 a second came out 14, 15 and 28 ms apart: judder). In ms, as FLV has them.
+GFX_OUTPUT = ("-enc_time_base", "1:1000")
 
 # (ffmpeg, display_key, GPU or GFX) where that chain failed, for the rest of the run
 BROKEN: set[tuple[str, str, str]] = set()
@@ -265,19 +269,26 @@ def gpu_filters(chain: Chain) -> list[str]:
 
 
 def output_args(chain: Optional[Chain]) -> list[str]:
-    """Output options a chain needs after the encoder's (RGB into NVENC: GPU at its own size, GFX)."""
-    return list(NATIVE_OUTPUT) if chain is not None and (chain.native or chain.kind == GFX) else []
+    """Output options a chain needs after the encoder's (RGB into NVENC: GPU at its own size, GFX;
+    and GFX's times as they came, GFX_OUTPUT)."""
+    if chain is None or not (chain.native or chain.kind == GFX):
+        return []
+    return (list(GFX_OUTPUT) if chain.kind == GFX else []) + list(NATIVE_OUTPUT)
 
 
-def cpu_filters(prefilters: list[str], width: int, height: int, encoder: str) -> list[str]:
+def cpu_filters(prefilters: list[str], width: int, height: int, encoder: str, bt709: bool = True) -> list[str]:
     """The CPU chain's -vf: the capture's own filters (ddagrab's frames brought to memory), then
     swscale fitting it into width x height (never up, even sides; bilinear: a quarter less CPU
     than bicubic for a 1440p desktop on a 1080p TV, every frame) into BT.709 limited range, and
-    the frames tagged as that."""
+    the frames tagged as that. Without bt709, swscale's own choice and nothing said, as before
+    (BT.601, limited: what Google Cast's VP8 is taken as, which can say nothing else)."""
+    scale = (f"scale=w='min({width},iw)':h='min({height},ih)':force_original_aspect_ratio=decrease"
+             ":force_divisible_by=2:flags=bilinear")
+    pixels = "format=yuv420p" if encoder == "libx264" else "format=nv12"
+    if not bt709:
+        return list(prefilters) + [scale, pixels]
     return list(prefilters) + [
-        f"scale=w='min({width},iw)':h='min({height},ih)':force_original_aspect_ratio=decrease"
-        ":force_divisible_by=2:flags=bilinear:out_color_matrix=bt709:out_range=tv",
-        "format=yuv420p" if encoder == "libx264" else "format=nv12",
+        scale + ":out_color_matrix=bt709:out_range=tv", pixels,
         "setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709",
     ]
 
@@ -341,8 +352,17 @@ def gfx_filters(fps: int) -> list[str]:
     to know how many times to repeat it, so on a screen that changes now and then each change
     would show only with the next one, and the time between them would come at once, as repeats
     of the frame before (seen with a source like gfxcapture's: a frame 1.5 s late, then 84
-    repeats in 70 ms)."""
-    return [f"select='isnan(prev_selected_t)+gt(floor(t*{fps}),floor(prev_selected_t*{fps}))'"]
+    repeats in 70 ms).
+
+    The slots are half of one off the first frame: gfxcapture's times start at 0 with it, so on a
+    screen refreshed at the frame rate (60 Hz) the next ones would come at the slots' edges, and
+    a few microseconds early would put one in the slot of the frame before, which loses it (half
+    of a 60 a second, in a test with times 0.05 ms either side of the edges).
+
+    A frame that comes in the slot of the one before is left out (on a 200 Hz screen, gfxcapture
+    gives 66 a second for 60: one in ten): if it was the last change for a while, the TV shows
+    the one before it until the screen changes again."""
+    return [f"select='isnan(prev_selected_t)+gt(floor(t*{fps}+0.5),floor(prev_selected_t*{fps}+0.5))'"]
 
 
 # -- the picture made ------------------------------------------------------------------------------

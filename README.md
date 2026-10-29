@@ -214,7 +214,9 @@ are greyed out until it stops. The full window's big button does the same.
 * *Frame rate*: *Automatic* (the default) is 60 fps when the graphics card encodes and Desktop
   Duplication captures, and 30 fps with x264 (the processor) or GDI capture; *30 fps* and
   *60 fps* keep to that rate. It is never more than the TV takes. *Quality*'s frame rate and
-  delay are the cast's only.
+  delay are the cast's. On a Google Cast TV the main item mirrors by Google Cast, which these
+  two do not change yet: it has the PC's sound (*Include computer sound*) and *Quality*'s frame
+  rate, so while one is chosen they are named without "when transmitting".
 
 **What to send back** after trying it on your TV:
 
@@ -277,16 +279,19 @@ included.
   (FFmpeg's `gfxcapture`, which the FFmpeg 8.1.1 inside `MirrorBridge.exe` has) takes the
   screen at the TV's size, scaled on the graphics card; another FFmpeg without it scales on the
   processor. That capture gives a frame only when the screen changes, at most at the frame
-  rate, so a screen that stays as it is sends no new frames and does not end the session.
-  (FFmpeg's `scale_d3d11` is not used: on an RTX 4080 SUPER with driver 621.01 it could not
-  make its picture.) If the capture ends before its first picture, or the picture comes out at
-  another size than asked for, that display goes back to the processor until MirrorBridge
-  quits. Quick Sync, AMF and Media Foundation scale on the processor.
+  rate, so a screen that stays as it is sends no new frames; MirrorBridge does not end the
+  session for that, but how long a TV keeps a still picture is still to be tried. MirrorBridge's
+  own command for this capture has not yet run on real hardware. (FFmpeg's `scale_d3d11` is not
+  used: on an RTX 4080 SUPER with driver 621.01 it could not make its picture.) If the capture
+  ends before its first picture, or the picture comes out at another size than asked for, that
+  display goes back to the processor until MirrorBridge quits; when Windows takes the capture
+  away instead, it is started again as below. Quick Sync, AMF and Media Foundation scale on the
+  processor.
 * A keyframe (a complete picture) goes only when it is needed: at the start, and after frames
-  were dropped, when FFmpeg is started again for a fresh one at once (at most every 2 seconds).
-  A keyframe every 2 seconds made text blur every 2 seconds, because in a one-frame buffer it
-  gets far fewer bits than the frames around it. Quick Sync, AMF and Media Foundation, not yet
-  tried that way, still make one every 10 seconds.
+  were dropped, when FFmpeg is started again for a fresh one at once (at most every 2 seconds),
+  whether or not the screen changes meanwhile. A keyframe every 2 seconds made text blur every 2
+  seconds, because in a one-frame buffer it gets far fewer bits than the frames around it. Quick
+  Sync, AMF and Media Foundation, not yet tried that way, still make one every 10 seconds.
 * When Windows takes the screen capture away (a display driver installed or removed, a logoff,
   a change of resolution, a UAC prompt), FFmpeg is started again on the same display, looked
   up again (the virtual screen too), up to five times in 10 seconds; only then does the session

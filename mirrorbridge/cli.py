@@ -55,8 +55,9 @@ def _cli_words(message: str, device: Device) -> str:
         "Quality > Encoder > x264 (CPU)": "--encoder libx264",
         "What to cast > Extended screen size > 720p": "--extend-mode 720p",
         "More options > Test this TV": f'probe -d "{device.name}"',
-        "Mirror screen should work": f'mirror -d "{device.name}" should work',
-        "Mirror screen did not work": f'mirror -d "{device.name}" did not work',
+        "Show my screen should work": f'mirror -d "{device.name}" should work',
+        "Show my screen did not work": f'mirror -d "{device.name}" did not work',
+        "Choose Show my screen again": f'Run mirror -d "{device.name}" again',
     }
     for item, option in paths.items():
         message = message.replace(item, option)

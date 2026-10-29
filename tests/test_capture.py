@@ -81,7 +81,8 @@ def test_the_chains_and_their_filters():
     # gfxcapture: scaled by Windows into fit_even's size, RGB into NVENC as at the screen's own size.
     gfx = capture.chain_for(capture.GFX, (2560, 1440), CANVAS)
     assert gfx.size_out == (1920, 1080) and not gfx.native and gfx.label == "GPU gfxcapture"
-    assert gfx.colour == capture.NATIVE_COLOUR and capture.output_args(gfx) == list(capture.NATIVE_OUTPUT)
+    assert gfx.colour == capture.NATIVE_COLOUR and capture.output_args(gfx) == ["-enc_time_base", "1:1000",
+                                                                               *capture.NATIVE_OUTPUT]
     assert capture.chain_for(capture.GFX, (682, 2560), CANVAS).size_out == (286, 1080)
     for kind in (capture.GPU, capture.GFX):
         with pytest.raises(ValueError):
@@ -221,7 +222,8 @@ def test_gfxcapture_input_and_filters():
         ":max_framerate=40:capture_cursor=0")
     # No display: no option for it, and FFmpeg ends at once ("No capture source specified").
     assert capture.gfx_input("", (1920, 1080), 60, True)[-1].startswith("gfxcapture=width=1920:")
-    assert capture.gfx_filters(60) == ["select='isnan(prev_selected_t)+gt(floor(t*60),floor(prev_selected_t*60))'"]
+    assert capture.gfx_filters(60) == [
+        "select='isnan(prev_selected_t)+gt(floor(t*60+0.5),floor(prev_selected_t*60+0.5))'"]
     # NVENC is told 70 fps: as much more bitrate gives each frame its share at 60, and the same VBV.
     assert capture.gfx_kbps(8000, 60) == 9333 and capture.gfx_kbps(8000, 30) == 10667
     assert "-bufsize" in (args := ffmpeg.mirror_encoder_args("h264_nvenc", 9333, 70))
@@ -229,22 +231,40 @@ def test_gfxcapture_input_and_filters():
         ffmpeg.mirror_encoder_args("h264_nvenc", 8000, 60).index("-bufsize") + 1]
 
 
-def test_gfxcapture_is_kept_to_the_frame_rate_without_repeats(tmp_path):
-    """gfx_filters on a source like gfxcapture's (a frame every 15 ms while the screen changes,
-    none while it does not): 60 a second at most, each with its own time, and nothing while the
-    screen is still (the fps filter fills that time with repeats of the frame before, all at once
-    when the next frame comes, and holds each frame back until then)."""
-    ff = _ffmpeg()
+def _gfx_pts(ff: str, source: str, tmp_path) -> list[int]:
+    """The frame times (ms) FFmpeg writes for a source like gfxcapture's (`source`: its times,
+    on a link that says 70 frames a second, as gfxcapture's does for 60) through the GFX chain's
+    filters and output options, into FLV."""
     made = tmp_path / "vfr.flv"
-    source = ("testsrc=size=160x90:rate=200,settb=1/10000000,"
-              "select='lt(mod(t\\,1)\\,0.5)*not(mod(n\\,3))'")  # 0.5 s changing, 0.5 s still
+    output = capture.output_args(capture.chain_for(capture.GFX, (1920, 1080), CANVAS))
     subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", source, "-t", "2",
-                    "-vf", ",".join(capture.gfx_filters(60)), "-c:v", "libx264", "-preset", "ultrafast",
+                    "-vf", ",".join(capture.gfx_filters(60)), "-c:v", "libx264", "-preset", "ultrafast", *output,
                     "-f", "flv", str(made)], check=True, capture_output=True, timeout=60)
-    pts = [t.pts_ms for t in flv.FlvReader().feed(made.read_bytes()) if t.kind == flv.FRAME]
+    return [t.pts_ms for t in flv.FlvReader().feed(made.read_bytes()) if t.kind == flv.FRAME]
+
+
+def test_gfxcapture_is_kept_to_the_frame_rate_without_repeats(tmp_path):
+    """gfx_filters on a source like gfxcapture's on a 200 Hz screen (a frame every 15 ms while the
+    screen changes, none while it does not): 60 a second at most, each at its own time, and
+    nothing while the screen is still (the fps filter fills that time with repeats of the frame
+    before, all at once when the next frame comes, and holds each frame back until then)."""
+    ff = _ffmpeg()
+    pts = _gfx_pts(ff, "testsrc=size=160x90:rate=70,settb=1/10000000,setpts=N*150000,"
+                       "select='lt(mod(t\\,1)\\,0.5)'", tmp_path)  # 0.5 s changing, 0.5 s still
     assert len(pts) == len(set(pts)) and 55 <= len(pts) <= 61  # two half seconds of at most 30 frames
     assert not [p for p in pts if 500 <= p < 1000 or p >= 1500]  # none while the screen is still
-    assert min(b - a for a, b in zip(pts, pts[1:])) >= 15
+    assert {b - a for a, b in zip(pts, pts[1:]) if b - a < 400} <= {15, 30}  # on the screen's 15 ms
+
+
+def test_gfxcapture_on_a_60_hz_screen_keeps_every_frame_at_its_time(tmp_path):
+    """A screen refreshed 60 times a second, its frames' times a little either side of where
+    gfx_filters' slots would be if they began with the first frame: all 60 a second, 16 or 17 ms
+    apart as they came, not moved onto the 1/70 s that the link says (14, 15 and 28 ms apart:
+    judder) nor one in two lost."""
+    ff = _ffmpeg()
+    pts = _gfx_pts(ff, "testsrc=size=160x90:rate=70,settb=1/10000000,"
+                       "setpts=N*166667+if(mod(N\\,2)\\,-500\\,500)", tmp_path)
+    assert len(pts) == 120 and {b - a for a, b in zip(pts, pts[1:])} == {16, 17}
 
 
 def test_the_size_of_what_a_gpu_chain_made_is_checked():
@@ -330,6 +350,19 @@ def _ffmpeg() -> str:
     return ff
 
 
+def _vui(ff: str, made) -> dict:
+    """The colour description in the SPS of the H.264 in `made` (trace_headers)."""
+    trace = subprocess.run([ff, "-hide_banner", "-loglevel", "debug", "-i", str(made), "-c", "copy",
+                            "-bsf:v", "trace_headers", "-f", "null", "-"], capture_output=True, text=True, timeout=60)
+    fields = {}
+    for line in trace.stderr.splitlines():
+        parts = line.split()
+        if len(parts) >= 4 and parts[-4] in ("colour_primaries", "transfer_characteristics", "matrix_coefficients",
+                                             "video_full_range_flag"):
+            fields.setdefault(parts[-4], int(parts[-1]))  # [trace_headers @ 0x..] 87  colour_primaries  00000001 = 1
+    return fields
+
+
 def test_the_native_chains_stream_says_bt709_primaries_and_transfer(tmp_path):
     """NATIVE_OUTPUT rewrites the colour description in the SPS whatever the encoder; here x264
     is given frames tagged as ddagrab tags them (sRGB transfer)."""
@@ -341,11 +374,32 @@ def test_the_native_chains_stream_says_bt709_primaries_and_transfer(tmp_path):
                     "-f", "flv", str(made)], check=True, capture_output=True, timeout=60)
     tags = flv.FlvReader().feed(made.read_bytes())
     assert tags[0].kind == flv.CONFIG and sum(t.kind == flv.FRAME for t in tags) == 5
-    trace = subprocess.run([ff, "-hide_banner", "-loglevel", "debug", "-i", str(made), "-c", "copy",
-                            "-bsf:v", "trace_headers", "-f", "null", "-"], capture_output=True, text=True, timeout=60)
-    fields = {}
-    for line in trace.stderr.splitlines():
-        parts = line.split()
-        if len(parts) >= 4 and parts[-4] in ("colour_primaries", "transfer_characteristics", "matrix_coefficients"):
-            fields.setdefault(parts[-4], int(parts[-1]))  # [trace_headers @ 0x..] 87  colour_primaries  00000001 = 1
-    assert fields == {"colour_primaries": 1, "transfer_characteristics": 1, "matrix_coefficients": 5}
+    fields = _vui(ff, made)
+    assert {name: fields.get(name) for name in ("colour_primaries", "transfer_characteristics",
+                                                "matrix_coefficients")} == {
+        "colour_primaries": 1, "transfer_characteristics": 1, "matrix_coefficients": 5}
+
+
+@pytest.mark.parametrize("bt709, red", [(True, (63, 102, 240)), (False, (82, 90, 240))])
+def test_the_processors_chain_makes_and_says_bt709_limited_range(tmp_path, bt709, red):
+    """cpu_filters on the screen's BGRA, as ddagrab's frames come to memory: pure red is BT.709's
+    limited-range red, and the stream says BT.709 and limited range; without bt709 (Google Cast),
+    swscale's own BT.601, and nothing said, as before."""
+    ff = _ffmpeg()
+    source = "color=c=red:size=64x64:rate=30,format=bgra"
+    filters = ",".join(capture.cpu_filters(["format=bgra"], 64, 64, "libx264", bt709=bt709))
+    raw = subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", source, "-frames:v", "1",
+                          "-vf", filters, "-f", "rawvideo", "-pix_fmt", "yuv420p", "pipe:1"],
+                         check=True, capture_output=True, timeout=60).stdout
+    y, u, v = raw[64 * 64 // 2], raw[64 * 64 + 16 * 32 + 16], raw[64 * 64 * 5 // 4 + 16 * 32 + 16]
+    assert all(abs(got - want) <= 1 for got, want in zip((y, u, v), red)), (y, u, v)
+    made = tmp_path / "cpu.flv"
+    subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", source, "-frames:v", "5",
+                    "-vf", filters, "-c:v", "libx264", "-f", "flv", str(made)], check=True, capture_output=True,
+                   timeout=60)
+    fields = _vui(ff, made)
+    if bt709:
+        assert fields == {"video_full_range_flag": 0, "colour_primaries": 1, "transfer_characteristics": 1,
+                          "matrix_coefficients": 1}
+    else:
+        assert fields.get("matrix_coefficients", 2) == 2  # unspecified, or no colour description at all

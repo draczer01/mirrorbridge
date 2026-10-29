@@ -53,15 +53,18 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   unless it needed more; the default) or Smooth (200 ms, for Wi-Fi that falters), and *Frame
   rate* Automatic (60 fps with a hardware encoder and Desktop Duplication, 30 with x264 or GDI
   capture, and never more than the TV takes; the default), 30 or 60 fps. Choosing a Latency
-  puts *Debug > TV wait* back on Automatic. *Quality*'s frame rate and delay are now the casts'
-  only, and say so.
+  puts *Debug > TV wait* back on Automatic. *Quality*'s delay is now the casts' only, and its
+  frame rate the casts' and Google Cast mirroring's (which does not read *Mirror screen
+  settings* yet); both say so, the frame rate without "when transmitting" while a Google Cast TV
+  is chosen.
 - Mirror screen sends a keyframe (a whole picture) only when it is needed: at the start, and
   after frames were dropped, when FFmpeg is started again for a fresh one at once (at most every
-  2 seconds). The keyframe every 2 seconds made text blur every 2 seconds: in a one-frame
-  buffer, a 1440p desktop at 8 Mbit/s on NVENC got its keyframes at quantizer 39 against 7 for
-  the other frames. NVENC and x264 make no other keyframe; Quick Sync, AMF and Media Foundation,
-  not yet tried that way, still make one every 10 seconds. *Test this TV* keeps one every
-  2 seconds.
+  2 seconds), also on a screen that does not change meanwhile. The keyframe every 2 seconds made
+  text blur every 2 seconds: in a one-frame buffer, a 1440p desktop at 8 Mbit/s on NVENC got its
+  keyframes at quantizer 39 against 7 for the other frames. NVENC and x264 make no other
+  keyframe; Quick Sync, AMF and Media Foundation, not yet tried that way, still make one every
+  10 seconds (AMF by its IDR period alone: the keyframes FFmpeg forces on it are not IDRs).
+  *Test this TV* keeps one every 2 seconds.
 - When Windows takes the screen capture away (a display driver installed or removed, a logoff,
   a change of resolution), Mirror screen starts FFmpeg again on the same display, looked up
   again (the virtual screen too): up to five times in 10 seconds, the first a quarter of a
@@ -72,21 +75,24 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   gets it goes from the capture to the encoder untouched, and otherwise Windows Graphics
   Capture (FFmpeg's `gfxcapture`, which the FFmpeg 8.1.1 inside `MirrorBridge.exe` has) takes
   the screen at that size, scaled on the graphics card (an FFmpeg without it scales on the
-  processor). On an RTX 4080 SUPER (driver 621.01) that made a 1440p screen into 1080p at 60 fps
-  for 0.05 of a processor core, where the processor's chain takes 1.3 cores; FFmpeg's
-  `scale_d3d11` is not used, because there it could not make its picture ("Could not create the
-  texture (80070057)"). The display is given to `gfxcapture` by its handle, since its numbering
-  is not Desktop Duplication's, and the capture is asked for 10 frames a second more than the
-  frame rate (a 200 Hz monitor gave 51 fps for 60), then kept to the frame rate without
-  repeating any. It gives a frame only when the screen changes: a screen that stays as it is
-  sends no new frames, which does not end the session while FFmpeg runs, nor warns of a slow
-  frame rate. NVENC is told the capture's top rate, with the bitrate raised to match, so that a
-  frame gets the share of bits it gets at the frame rate. A capture that ends before its first
-  picture, or a picture of another size than asked for, sends that display back to the
-  processor, at once and until MirrorBridge quits; a capture that Windows closes (the display
-  gone) is started again, as Desktop Duplication's is. The log's line for each FFmpeg says that
-  the frames come only as the screen changes and what NVENC is told. Quick Sync, AMF and Media
-  Foundation scale on the processor, as before.
+  processor). In a test of FFmpeg's `gfxcapture` alone on an RTX 4080 SUPER (driver 621.01), it
+  made a 1440p screen into 1080p at 60 fps for 0.05 of a processor core, where the processor's
+  chain takes 1.3 cores; MirrorBridge's own command for it has not yet been tried on hardware.
+  FFmpeg's `scale_d3d11` is not used, because there it could not make its picture ("Could not
+  create the texture (80070057)"). The display is given to `gfxcapture` by its handle, since its
+  numbering is not Desktop Duplication's, and the capture is asked for 10 frames a second more
+  than the frame rate (in that test a 200 Hz monitor gave 51 fps for 60), then kept to the frame
+  rate without repeating any, each frame at the time it was captured (to the millisecond). It
+  gives a frame only when the screen changes: a screen that stays as it is sends no new frames,
+  which does not end the session, nor warns of a slow frame rate (how long the TV keeps a still
+  picture is still to be tried). NVENC is told the capture's top rate, with the bitrate raised to
+  match, so that a frame gets the share of bits it gets at the frame rate. A capture that ends
+  before its first picture (but for Windows keeping the screen from it), or a picture of another
+  size than asked for, sends that display back to the processor, at once and until MirrorBridge
+  quits; a capture that Windows closes (the display gone) is started again, as Desktop
+  Duplication's is, and a display that comes back at a size to be scaled gets its chain chosen
+  again. The log's line for each FFmpeg says that the frames come only as the screen changes
+  and what NVENC is told. Quick Sync, AMF and Media Foundation scale on the processor, as before.
 - With *Extend screen* on, *Mirror screen* (and `mirror --extend`, with `--extend-mode`) sends
   the virtual screen, as a cast does, instead of the PC's main display: the TV works as a second
   screen a fraction of a second behind, for PowerPoint's Presenter View with the notes on the
@@ -130,9 +136,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   way, 3-7 s delay)*, for a TV that does not show the screen otherwise. *Play a video file*
   stays where it was. *Device* lists every TV once, those found by Google Cast too, with what
   choosing it means (*Ready*, *A speaker*...), and *Include computer sound* says that it is only
-  for casts: Mirror screen has no sound yet. While the main item's way runs and the TV takes
-  another, *Nothing on the TV? Try another way*, under *Stop*, goes to the next one, as the
-  window's button does.
+  for casts: Mirror screen has no sound yet (while a Google Cast TV is chosen, whose mirroring
+  has the sound, it says nothing more, and the main item's tooltip says the sound goes too).
+  While the main item's way runs and the TV takes another, *Nothing on the TV? Try another way*,
+  under *Stop*, goes to the next one, as the window's button does.
 - `MirrorBridge.exe` carries FFmpeg 8.1.1 (gyan.dev's essentials build, checked against the
   size and SHA-256 in `packaging/ffmpeg_pin.json`) in place of the FFmpeg 7.1 of
   `imageio-ffmpeg`, for `gfxcapture` (Windows Graphics Capture, which scales the screen on the
@@ -140,9 +147,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   older one MirrorBridge uses the next encoder, and the log's warning has FFmpeg's line on the
   driver it needs. An FFmpeg named in the settings still goes first, and `doctor` says which
   one is used.
-- The video says which colours it carries: the processor's picture is now converted and tagged
-  as BT.709 (HD's colours), and the graphics card's carries BT.709 primaries and transfer, where
-  NVENC fed the screen directly said BT.601.
+- Mirror screen's video says which colours it carries: the processor's picture is now converted
+  and tagged as BT.709 (HD's colours), and the graphics card's carries BT.709 primaries and
+  transfer, where NVENC fed the screen directly said BT.601. Google Cast mirroring's VP8, which
+  means BT.601, keeps its colours as before.
 - *Mirror screen* rides out short network stalls: the picture freezes only while the network
   holds the video up, no longer until the next keyframe. With the PC on Ethernet and a TCL TV
   on Wi-Fi, the network now and then took 100 to 480 ms to take a frame, and each time every

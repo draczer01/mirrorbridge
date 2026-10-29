@@ -20,7 +20,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     "status_idle": {"en": "Not casting", "es": "Sin transmitir"},
     "status_casting": {"en": "Casting to {device}", "es": "Transmitiendo a {device}"},
     "status_busy": {"en": "{state}…", "es": "{state}…"},
-    # The main item, "Show my screen on {device}" (ui_show_on) when a TV is chosen
+    # The main item, "Show my screen on {device}" (ui_show_on) when a TV is chosen; texts name it as
+    # "Show my screen" ({menu_mirror}: Test this TV's verdict)
     "show_no_device": {
         "en": "Show my screen (choose a TV under Device)",
         "es": "Mostrar mi pantalla (elige una TV en Dispositivo)",
@@ -37,8 +38,6 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "La transmisión de antes, para una TV que no muestra tu pantalla de otra forma: va unos segundos atrás, "
               "pero funciona con más TVs y lleva sonido.",
     },
-    # The feature's name, as texts name it ({menu_mirror}: Test this TV's verdict)
-    "mirror_screen": {"en": "Mirror screen", "es": "Duplicar pantalla"},
     "stop_mirror": {"en": "Stop mirroring", "es": "Detener la duplicación"},
     "status_mirroring": {"en": "Mirroring to {device}", "es": "Duplicando la pantalla en {device}"},
     "mirror_hint": {
@@ -570,8 +569,8 @@ _STRINGS: dict[str, dict[str, str]] = {
               "{errors}",
     },
     "mirror_capture_lost": {
-        "en": "Windows stopped the screen capture and it did not come back ({reason}). Start mirroring again.",
-        "es": "Windows detuvo la captura de pantalla y no volvió ({reason}). Vuelve a duplicar la pantalla.",
+        "en": "Windows stopped the screen capture and it did not come back ({reason}). Choose {menu_mirror} again.",
+        "es": "Windows detuvo la captura de pantalla y no volvió ({reason}). Vuelve a elegir {menu_mirror}.",
     },
     "mirror_no_frames": {
         "en": "No video went to {device}: FFmpeg made no frame in {seconds} s.",
@@ -1149,7 +1148,7 @@ def _menu_paths() -> dict[str, str]:
         "menu_x264": (_item("quality_menu"), _item("encoder"), "x264 (CPU)"),
         "menu_720p": (_item("source_menu"), _item("extend_size"), "720p"),
         "menu_probe": (_item("more"), _item("probe")),
-        "menu_mirror": (_item("mirror_screen"),),
+        "menu_mirror": (_item("show_no_device"),),
     }
     return {name: " > ".join(words) for name, words in paths.items()}
 

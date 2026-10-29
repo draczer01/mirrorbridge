@@ -24,7 +24,7 @@ from .theme import app_icon
 _LOGGER = logging.getLogger(__name__)
 
 RESOLUTIONS = [("720p", 720), ("1080p", 1080), ("1440p", 1440), ("4K", 2160), ("native", 0)]
-FRAMERATES = [24, 30, 60]  # Quality > Frame rate: for casts (Mirror screen's is MIRROR_FRAMERATES)
+FRAMERATES = [24, 30, 60]  # Quality > Frame rate: casts, Google Cast mirroring (Mirror screen: MIRROR_FRAMERATES)
 LATENCIES = [("lat_low", "low"), ("lat_balanced", "balanced"), ("lat_smooth", "smooth")]  # Quality > Delay: casts
 BITRATES = [4, 8, 12, 20, 30]
 MIRROR_LEVELS = CHOICES["mirror_latency"]  # Mirror screen settings > Latency: low, normal, smooth
@@ -153,10 +153,12 @@ class TrayMenu(QObject):
 
         self._device_menu(self._submenu(menu, tr("device_menu") + (f": {_escape(screen.name)}" if screen else "")))
         self._source_menu(self._submenu(menu, tr("source_menu")))
+        # The sound and Quality's frame rate are a cast's and Google Cast mirroring's: AirPlay's Mirror
+        # screen has no sound yet, and its own frame rate (Mirror screen settings).
+        google = bool(screen and c.plan(screen)[:1] == [routes.CAST_MIRROR])
         self._mirror_menu(self._submenu(menu, tr("mirror_settings")))
-        self._quality_menu(self._submenu(menu, tr("quality_menu")))
-        # Mirror screen has no sound yet
-        self._action(menu, tr("audio_cast"), lambda on: c.update_settings(capture_audio=on),
+        self._quality_menu(self._submenu(menu, tr("quality_menu")), google)
+        self._action(menu, tr("audio" if google else "audio_cast"), lambda on: c.update_settings(capture_audio=on),
                      checkable=True, checked=s.capture_audio)
         self._action(menu, tr("play_file"), self._choose_file, enabled=bool(device) and not c.is_active)
         menu.addSeparator()
@@ -193,6 +195,8 @@ class TrayMenu(QObject):
         steps = c.plan(screen)
         if not steps:
             return c.device_line(screen)  # a speaker, or AirPlay restricted to some senders
+        if steps[0] == routes.CAST_MIRROR:
+            return tr("ui_hint_cast_mirror")  # with its sound
         if steps[0] in routes.MIRRORING:
             first = steps[0] == routes.AIRPLAY_MIRROR and not screen.airplay.is_paired
             return (tr("ui_hint_mirror_first") + " " if first else "") + tr("ui_hint_mirror")
@@ -293,14 +297,16 @@ class TrayMenu(QObject):
         rates.setToolTipsVisible(True)
         rates.actions()[MIRROR_FRAMERATES.index(0)].setToolTip(tr("mirror_fps_auto_hint"))
 
-    def _quality_menu(self, sub: QMenu) -> None:
-        """The picture's size, bitrate and encoder; its frame rate and delay are the casts' only
-        (Mirror screen has its own, in Mirror screen settings)."""
+    def _quality_menu(self, sub: QMenu, google: bool = False) -> None:
+        """The picture's size, bitrate and encoder; its delay is the casts' only, and its frame rate
+        the casts' and Google Cast mirroring's (`google`: the main item's way on the chosen TV, so
+        said without "when transmitting"). Mirror screen has its own, in Mirror screen settings."""
         c, s = self.c, self.c.settings
         radio = self._radio
         radio(sub, tr("resolution"), [(tr("native") if v == 0 else n, v) for n, v in RESOLUTIONS],
               s.output_height, "output_height")
-        radio(sub, tr("framerate_cast"), [(f"{f} fps", f) for f in FRAMERATES], s.framerate, "framerate")
+        radio(sub, tr("framerate" if google else "framerate_cast"), [(f"{f} fps", f) for f in FRAMERATES],
+              s.framerate, "framerate")
         radio(sub, tr("latency"), [(tr(k), v) for k, v in LATENCIES], s.latency_mode, "latency_mode")
         radio(sub, tr("bitrate"), [(f"{b} Mbps", b * 1000) for b in BITRATES], s.video_bitrate_kbps,
               "video_bitrate_kbps")

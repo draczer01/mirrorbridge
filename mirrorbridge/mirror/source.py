@@ -96,6 +96,7 @@ def build_command(
     chain: "capture.Chain | None" = None,
     extra: str = "",
     keyframe_seconds: int = ffmpeg.MIRROR_KEYFRAME_SECONDS,
+    bt709: bool = False,
 ) -> list[str]:
     """FFmpeg: the source, fitted into width x height, encoded for mirroring, FLV to stdout.
 
@@ -103,7 +104,9 @@ def build_command(
     ones only in place of ddagrab: GPU on ddagrab's frames, GFX with gfxcapture instead of it.
     `extra` is more FFmpeg options after the encoder's (Settings.mirror_encoder_extra),
     keyframe_seconds the time between keyframes (0: only the first; the default is a keyframe
-    every 2 s, for callers that do not start FFmpeg again for one, as Google Cast mirroring).
+    every 2 s, for callers that do not start FFmpeg again for one, as Google Cast mirroring),
+    bt709 the CPU chain's pixels in BT.709 and tagged so (capture.cpu_filters; the default is
+    the pixels from before, for callers that do not ask, as Google Cast's VP8).
     """
     output: list[str] = []
     kbps, rate = settings.video_bitrate_kbps, fps  # what the encoder is told
@@ -125,7 +128,7 @@ def build_command(
             filters = capture.gpu_filters(chain)
             output = capture.output_args(chain)
         else:
-            filters = capture.cpu_filters(prefilters, width, height, encoder)
+            filters = capture.cpu_filters(prefilters, width, height, encoder, bt709=bt709)
     video_in = _paced(video_in, ff)
     cmd = [ff, "-hide_banner", "-nostats", "-loglevel", "warning", "-thread_queue_size", str(INPUT_QUEUE), *video_in]
     if filters:
@@ -289,6 +292,10 @@ class FrameQueue:
 
     def keyframe_waiting(self) -> bool:
         return any(unit is not None and unit.kind == FRAME and unit.keyframe for unit in self._units)
+
+    def ended(self) -> bool:
+        """Whether the end (None) is waiting: the FFmpeg these frames came from has ended."""
+        return any(unit is None for unit in self._units)
 
     def take_trimmed(self) -> int:
         """Frames that made way for newer ones since the last call."""

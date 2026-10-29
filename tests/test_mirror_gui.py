@@ -350,7 +350,13 @@ def test_the_device_menu_lists_every_tv_however_it_was_found(controller):
     assert controller.settings.last_device_id == "cast:abc" and Settings.load().last_device_id == "cast:abc"
     tray._rebuild()  # pylint: disable=protected-access
     item = _main(tray)
-    assert item.text() == "Show my screen on Sala && cocina" and item.isEnabled() and item.toolTip() == MIRRORING_HINT
+    assert item.text() == "Show my screen on Sala && cocina" and item.isEnabled()
+    assert item.toolTip() == "Your screen and its sound appear on the TV almost at once."  # as the window says
+    # Google Cast mirroring has the sound and Quality's frame rate, so they are named without "when transmitting"
+    texts = _texts(tray)
+    assert "Include computer sound" in texts and "Include computer sound (only when transmitting)" not in texts
+    assert [action.text() for action in _submenu(tray.menu, "Quality").actions()] == [
+        "Resolution", "Frame rate", "Delay (when transmitting)", "Bitrate", "Encoder"]
     devices = _submenu(tray.menu, "Device: Sala && cocina")
     assert _checked(devices) == ["Sala && cocina  (Ready)"]
     items = _choices(devices)

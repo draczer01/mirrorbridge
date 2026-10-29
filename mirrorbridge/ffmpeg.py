@@ -173,6 +173,7 @@ def has_input_format(ffmpeg: str, name: str) -> bool:
 
 _WORKING_ENCODERS: set[tuple[str, str, bool, int | None]] = set()
 _WARNED: set[tuple[str, str, str]] = set()  # (ffmpeg, encoder, why): each one is a warning once a run
+_ADDRESS = re.compile(r"@ (?:0x)?[0-9a-fA-F]+\]")  # "[h264_nvenc @ 000001d2c3a4b5c0]": another in each FFmpeg
 # What FFmpeg says when the NVIDIA driver is older than its NVENC needs (570 for FFmpeg 8.1.1).
 _DRIVER_LINE = re.compile(r"minimum required Nvidia driver|required nvenc API version", re.IGNORECASE)
 PROBE_TAIL_LINES = 4  # of FFmpeg's stderr in the warning, after up to as many of the encoder's own
@@ -222,7 +223,7 @@ def encoder_works(ffmpeg: str, encoder: str, mirror: bool = False, keyframes: in
 
 
 def _unusable(ffmpeg: str, encoder: str, why: str) -> None:
-    key = (ffmpeg, encoder, why)
+    key = (ffmpeg, encoder, _ADDRESS.sub("@ ...]", why))
     log = _LOGGER.debug if key in _WARNED else _LOGGER.warning
     _WARNED.add(key)
     log("Encoder %s does not work here: %s", ENCODER_LABELS.get(encoder, encoder), why)
@@ -467,7 +468,12 @@ def mirror_encoder_args(encoder: str, kbps: int, fps: int, vbv_frames: float = M
     rate = ["-b:v", f"{kbps}k", "-maxrate", f"{kbps}k", "-bufsize", f"{bufsize}k"]
     if seconds:
         gop = max(1, round(fps * seconds))
-        common = ["-g", str(gop), "-bf", "0", "-force_key_frames", f"expr:gte(t,n_forced*{seconds})"]
+        common = ["-g", str(gop), "-bf", "0"]
+        # AMF's keyframes come from -g (its IDR period) alone: the ones -force_key_frames asks
+        # for, FFmpeg 7.1 leaves out, and 8.0 and later make plain I-frames (h264_amf's forced_idr
+        # is off), a blur that ends nothing; AMD's docs keep forced picture types for no IDR period.
+        if encoder != "h264_amf":
+            common += ["-force_key_frames", f"expr:gte(t,n_forced*{seconds})"]
         keyint = f"keyint={gop}:min-keyint={gop}:scenecut=0"
     else:
         common = ["-g", str(NO_PERIODIC_GOP), "-bf", "0"]

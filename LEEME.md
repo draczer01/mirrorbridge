@@ -46,10 +46,11 @@ español, elige una vez **Language / Idioma** > **Español** en su menú.
      como segunda pantalla), y si se ve el puntero.
    * **Ajustes de Duplicar pantalla**: **Latencia** y **Cuadros por segundo** al duplicar
      (ver *Duplicar la pantalla*).
-   * **Calidad**: resolución, calidad del video y codificador; sus cuadros por segundo y su
-     retraso son solo para transmitir.
+   * **Calidad**: resolución, calidad del video y codificador; su retraso es solo para
+     transmitir, y sus cuadros por segundo para transmitir y para una TV con Google Cast.
    * **Incluir el sonido del equipo (solo al transmitir)**: la duplicación todavía no lleva
-     sonido.
+     sonido, salvo en una TV con Google Cast; con una elegida se llama **Incluir el sonido del
+     equipo**.
    * **Reproducir un archivo de video** en la TV.
    * **Más opciones**: **Transmitir (modo anterior, 3-7 s de retraso)**, para una TV que no
      muestra la pantalla de la otra forma; iniciar con Windows, crear acceso directo en el
@@ -161,7 +162,10 @@ demás queda en gris hasta que termine. El botón grande de la ventana completa 
 * *Cuadros por segundo*: *Automático* (lo predeterminado) son 60 cuando la tarjeta de video
   codifica y la captura es Desktop Duplication, y 30 con x264 (el procesador) o con la captura
   GDI; *30 fps* y *60 fps* se quedan en ese valor. Nunca más de lo que acepta la TV. Los
-  cuadros por segundo y el retraso de **Calidad** son solo para transmitir.
+  cuadros por segundo y el retraso de **Calidad** son para transmitir. En una TV con Google Cast
+  el elemento principal duplica por Google Cast, que estos dos ajustes todavía no cambian: lleva
+  el sonido del equipo (**Incluir el sonido del equipo**) y los cuadros por segundo de
+  **Calidad**, que con una de esas TVs elegida no dicen "al transmitir".
 
 **Qué mandar** después de probarlo con tu TV:
 
@@ -224,17 +228,19 @@ Igual que `cast`, `mirror` parte de los ajustes de la app: sin `--monitor`, `--w
   de FFmpeg, que tiene el FFmpeg 8.1.1 que viene dentro de `MirrorBridge.exe`) toma la
   pantalla ya al tamaño de la TV, escalada en la tarjeta de video; otro FFmpeg sin él la escala
   en el procesador. Esa captura da un cuadro solo cuando la pantalla cambia, como mucho a los
-  cuadros por segundo elegidos, así que una pantalla que no cambia no manda cuadros nuevos y no
-  termina la sesión. (El `scale_d3d11` de FFmpeg no se usa: en una RTX 4080 SUPER con el
-  controlador 621.01 no pudo hacer su imagen.) Si la captura termina antes de su primera
-  imagen, o la imagen sale de otro tamaño que el pedido, esa pantalla vuelve al procesador
-  hasta que se cierra MirrorBridge. Quick Sync, AMF y Media Foundation escalan en el
-  procesador.
+  cuadros por segundo elegidos, así que una pantalla que no cambia no manda cuadros nuevos;
+  MirrorBridge no termina la sesión por eso, pero falta probar cuánto tiempo aguanta una TV una
+  imagen quieta. El comando que arma MirrorBridge para esta captura todavía no se probó en un
+  equipo real. (El `scale_d3d11` de FFmpeg no se usa: en una RTX 4080 SUPER con el controlador
+  621.01 no pudo hacer su imagen.) Si la captura termina antes de su primera imagen, o la
+  imagen sale de otro tamaño que el pedido, esa pantalla vuelve al procesador hasta que se
+  cierra MirrorBridge; si es Windows quien corta la captura, vuelve a arrancar como se explica
+  abajo. Quick Sync, AMF y Media Foundation escalan en el procesador.
 * Un cuadro clave (una imagen completa) se manda solo cuando hace falta: al empezar, y después
-  de descartar cuadros, cuando FFmpeg vuelve a arrancar para dar uno enseguida (como mucho
-  cada 2 segundos). Un cuadro clave cada 2 segundos hacía que el texto se viera borroso cada
-  2 segundos. Quick Sync, AMF y Media Foundation, que todavía no se probaron así, siguen
-  mandando uno cada 10 segundos.
+  de descartar cuadros, cuando FFmpeg vuelve a arrancar para dar uno enseguida (como mucho cada
+  2 segundos), cambie o no la pantalla mientras tanto. Un cuadro clave cada 2 segundos hacía que
+  el texto se viera borroso cada 2 segundos. Quick Sync, AMF y Media Foundation, que todavía no
+  se probaron así, siguen mandando uno cada 10 segundos.
 * Si Windows corta la captura de pantalla (al instalar o quitar un controlador de video, al
   cerrar sesión, al cambiar la resolución, con un aviso de UAC), FFmpeg vuelve a arrancar en
   la misma pantalla, buscada de nuevo (también la virtual), hasta cinco veces en 10 segundos;
