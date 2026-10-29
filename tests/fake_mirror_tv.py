@@ -110,6 +110,34 @@ class VideoReceived:
     closed_by_us: bool = False
 
 
+def parse_alac(frame: bytes) -> bytes:
+    """The s16 BE samples of an ALAC frame in the verbatim (escape) form, with its sample count
+    or without it (352 then), or ValueError: anything else in the header, no END tag, or bits
+    other than zeros after it."""
+    bits = len(frame) * 8
+    v = int.from_bytes(frame, "big")
+    pos = bits - 23
+    if pos < 0:
+        raise ValueError(f"{len(frame)} bytes")
+    head = v >> pos
+    tag, instance, unused = head >> 20, (head >> 16) & 0xF, (head >> 4) & 0xFFF
+    has_size, shift, escape = (head >> 3) & 1, (head >> 1) & 3, head & 1
+    if (tag, instance, unused, shift, escape) != (1, 0, 0, 0, 1):
+        raise ValueError(f"header {head:#08x}")
+    count = 352
+    if has_size:
+        pos -= 32
+        count = (v >> pos) & 0xFFFFFFFF
+    pos -= count * 32 + 3
+    if pos < 0 or pos >= 8:
+        raise ValueError(f"{len(frame)} bytes for {count} samples")
+    if (v >> pos) & 7 != 7:
+        raise ValueError("no END tag")
+    if v & ((1 << pos) - 1):
+        raise ValueError("bits after the END tag")
+    return ((v >> (pos + 3)) & ((1 << (count * 32)) - 1)).to_bytes(count * 4, "big")
+
+
 def _avcc_params(record: bytes) -> tuple[list[bytes], list[bytes], bytes]:
     """SPS, PPS and what follows them in an avcC record."""
     pos = 6
