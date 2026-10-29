@@ -175,6 +175,7 @@ _WORKING_ENCODERS: set[tuple[str, str, bool, int | None]] = set()
 _WARNED: set[tuple[str, str, str]] = set()  # (ffmpeg, encoder, why): each one is a warning once a run
 # What FFmpeg says when the NVIDIA driver is older than its NVENC needs (570 for FFmpeg 8.1.1).
 _DRIVER_LINE = re.compile(r"minimum required Nvidia driver|required nvenc API version", re.IGNORECASE)
+PROBE_TAIL_LINES = 4  # of FFmpeg's stderr in the warning, after up to as many of the encoder's own
 
 
 def encoder_works(ffmpeg: str, encoder: str, mirror: bool = False, keyframes: int = 2) -> bool:
@@ -184,9 +185,10 @@ def encoder_works(ffmpeg: str, encoder: str, mirror: bool = False, keyframes: in
     start right after logon gets probed again on the next cast. mirror=True tries the
     options of screen mirroring (mirror_encoder_args, with a keyframe every `keyframes`
     seconds, MIRROR_KEYFRAME_SECONDS unless told, 0 for the first only) instead of those of a
-    cast. A failure is a warning in the log (once a run for each reason), with FFmpeg's line
-    about the NVIDIA driver if it wrote one: with a driver too old for this FFmpeg, NVENC is
-    lost without another word.
+    cast. A failure is a warning in the log (once a run for each reason), with the encoder's
+    own lines, which say why (no such GPU, a DLL missing), and FFmpeg's line about the NVIDIA
+    driver if it wrote one: with a driver too old for this FFmpeg, NVENC is lost without
+    another word.
     """
     key = (ffmpeg, encoder, mirror, keyframes if mirror else None)
     if key in _WORKING_ENCODERS:
@@ -206,10 +208,14 @@ def encoder_works(ffmpeg: str, encoder: str, mirror: bool = False, keyframes: in
         _unusable(ffmpeg, encoder, f"FFmpeg did not answer: {ex}")
         return False
     if result.returncode != 0:
-        stderr = result.stderr.strip()
-        tail = stderr[-300:]
-        driver = [line.strip() for line in stderr.splitlines() if _DRIVER_LINE.search(line) and line not in tail]
-        _unusable(ffmpeg, encoder, "\n".join(driver + [tail]).strip() or f"exit code {result.returncode}")
+        lines = [line.strip() for line in result.stderr.splitlines() if line.strip()]
+        # Whole lines: FFmpeg's last ones are the same for every cause ("Error while opening
+        # encoder"), and the encoder's own ("[h264_nvenc @ ...] Cannot load nvEncodeAPI64.dll",
+        # the driver it needs) come before them, maybe far up.
+        tail = lines[-PROBE_TAIL_LINES:]
+        cause = [line for line in lines[:-PROBE_TAIL_LINES]
+                 if _DRIVER_LINE.search(line) or line.startswith(f"[{encoder} @")][:PROBE_TAIL_LINES]
+        _unusable(ffmpeg, encoder, "\n".join(cause + tail) or f"exit code {result.returncode}")
         return False
     _WORKING_ENCODERS.add(key)
     return True
