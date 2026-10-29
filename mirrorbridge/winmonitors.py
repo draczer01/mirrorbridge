@@ -5,7 +5,8 @@ pixels whatever the DPI scaling, so a 4K panel at 150% shows as 3840x2160, not
 2560x1440. The DXGI adapter and output index are what FFmpeg's ddagrab filter needs;
 ddagrab only sees outputs of the default adapter (adapter 0), so displays drawn by
 another GPU (a virtual screen on a laptop's integrated GPU, for example) are captured
-with gdigrab instead.
+with gdigrab instead. FFmpeg's gfxcapture (Windows Graphics Capture) takes a display's
+HMONITOR instead (monitor_handles).
 """
 
 from __future__ import annotations
@@ -250,6 +251,44 @@ def _list_displays() -> list[WinDisplay]:
     # Primary first, then left-to-right, which is how people number their screens.
     displays.sort(key=lambda d: (not d.primary, d.left, d.top))
     return displays
+
+
+@dataclass
+class MonitorHandle:
+    """A display as EnumDisplayMonitors gives it: its HMONITOR (FFmpeg's gfxcapture takes it as
+    hmonitor=), its place in that order (gfxcapture's monitor_idx, which is not ddagrab's
+    output_idx), its device name and its top-left corner in physical pixels."""
+
+    handle: int
+    index: int
+    device: str
+    left: int
+    top: int
+
+
+def monitor_handles() -> list[MonitorHandle]:
+    """Every display, in EnumDisplayMonitors' order."""
+    with physical_pixels():
+        user32 = ctypes.windll.user32
+        handles: list[int] = []
+        monitor_enum_proc = ctypes.WINFUNCTYPE(
+            wintypes.BOOL, wintypes.HMONITOR, wintypes.HDC, ctypes.POINTER(wintypes.RECT), wintypes.LPARAM
+        )
+
+        def _collect(hmon, _hdc, _rect, _lparam):
+            handles.append(hmon)
+            return True
+
+        user32.EnumDisplayMonitors.argtypes = [wintypes.HDC, ctypes.c_void_p, monitor_enum_proc, wintypes.LPARAM]
+        user32.EnumDisplayMonitors(None, None, monitor_enum_proc(_collect), 0)
+        user32.GetMonitorInfoW.argtypes = [wintypes.HMONITOR, ctypes.POINTER(_MONITORINFOEXW)]
+        found: list[MonitorHandle] = []
+        for index, hmon in enumerate(handles):
+            info = _MONITORINFOEXW()
+            info.cbSize = ctypes.sizeof(info)
+            if hmon and user32.GetMonitorInfoW(hmon, ctypes.byref(info)):
+                found.append(MonitorHandle(int(hmon), index, info.szDevice, info.rcMonitor.left, info.rcMonitor.top))
+        return found
 
 
 @dataclass

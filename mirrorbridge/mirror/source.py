@@ -3,10 +3,11 @@
 Two sources: the desktop, captured as a cast captures it (ffmpeg.py: ddagrab or gdigrab, the
 same display, window and mouse pointer choices), and a test pattern (FFmpeg's testsrc: a moving
 gradient and a frame counter) that needs no screen at all. Either is scaled to fit the TV's
-screen as GET /info gives it (never up): the desktop on the graphics card or with the processor
-(capture.py, the capture chain), and encoded with ffmpeg.mirror_encoder_args: the encoder
-MirrorBridge picks for casts, with every option that makes it hold frames back turned off, and
-a keyframe every keyframe_seconds (0: only the first). FFmpeg's own queue of captured frames is
+screen as GET /info gives it (never up): the desktop on the graphics card (by Windows Graphics
+Capture when it must be scaled) or with the processor (capture.py, the capture chain), and
+encoded with ffmpeg.mirror_encoder_args: the encoder MirrorBridge picks for casts, with every
+option that makes it hold frames back turned off, and a keyframe every keyframe_seconds (0:
+only the first). FFmpeg's own queue of captured frames is
 kept short too (INPUT_QUEUE): when the encoder cannot keep up, capture waits (and the next
 picture is a newer one) instead of the frames piling up seconds late.
 
@@ -98,19 +99,28 @@ def build_command(
 ) -> list[str]:
     """FFmpeg: the source, fitted into width x height, encoded for mirroring, FLV to stdout.
 
-    The desktop goes through `chain` (capture.Chain; None is the CPU chain), the GPU one only
-    for ddagrab. `extra` is more FFmpeg options after the encoder's (Settings.mirror_encoder_extra),
+    The desktop goes through `chain` (capture.Chain; None is the CPU chain), the graphics card
+    ones only in place of ddagrab: GPU on ddagrab's frames, GFX with gfxcapture instead of it.
+    `extra` is more FFmpeg options after the encoder's (Settings.mirror_encoder_extra),
     keyframe_seconds the time between keyframes (0: only the first; the default is a keyframe
     every 2 s, for callers that do not start FFmpeg again for one, as Google Cast mirroring).
     """
     output: list[str] = []
+    kbps, rate = settings.video_bitrate_kbps, fps  # what the encoder is told
+    gpu = chain is not None and backend == "ddagrab"
     if source == TEST_PATTERN:
         video_in = ["-re", "-f", "lavfi", "-i", f"testsrc=size={width}x{height}:rate={fps}"]
         filters = ["format=yuv420p" if encoder == "libx264" else "format=nv12"]
+    elif gpu and chain.kind == capture.GFX and chain.size_out is not None:
+        # Windows Graphics Capture scales the display on the graphics card; frames as it changes
+        video_in = capture.gfx_input(capture.gfx_monitor(monitor), chain.size_out, fps, settings.show_cursor)
+        filters = capture.gfx_filters(fps)
+        output = capture.output_args(chain)
+        kbps, rate = capture.gfx_kbps(kbps, fps), capture.gfx_rate(fps)
     else:
         settings_in = dataclasses.replace(settings, framerate=fps)
         video_in, prefilters = ffmpeg._video_input(backend, settings_in, monitor, region)  # pylint: disable=protected-access
-        if chain is not None and chain.kind == capture.GPU and backend == "ddagrab":
+        if gpu and chain.kind == capture.GPU:
             # ddagrab's frames stay on the graphics card: not brought to memory (prefilters)
             filters = capture.gpu_filters(chain)
             output = capture.output_args(chain)
@@ -121,7 +131,7 @@ def build_command(
     if filters:
         cmd += ["-vf", ",".join(filters)]
     cmd += ["-an"]
-    cmd += ffmpeg.mirror_encoder_args(encoder, settings.video_bitrate_kbps, fps, keyframe_seconds=keyframe_seconds)
+    cmd += ffmpeg.mirror_encoder_args(encoder, kbps, rate, keyframe_seconds=keyframe_seconds)
     cmd += output + _extra_args(extra)
     cmd += ["-flush_packets", "1", "-flvflags", "no_duration_filesize+no_metadata", "-f", "flv", "pipe:1"]
     return cmd
@@ -158,6 +168,10 @@ class FFmpegSource:
         threading.Thread(target=self._read, name="mirrorbridge-mirror-pipe", daemon=True).start()
         self._log_thread = threading.Thread(target=self._drain_stderr, name="mirrorbridge-mirror-log", daemon=True)
         self._log_thread.start()
+
+    def running(self) -> bool:
+        """Whether FFmpeg is still running (it was started and has not ended)."""
+        return self.proc is not None and self.proc.poll() is None
 
     def errors(self, lines: int = 8) -> str:
         """The last `lines` lines FFmpeg wrote to stderr (STDERR_LINES are kept)."""

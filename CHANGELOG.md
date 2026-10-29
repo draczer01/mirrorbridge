@@ -69,11 +69,24 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   never falls back to GDI capture for that. The log has FFmpeg's last 30 lines whenever it
   stops.
 - With NVENC and Desktop Duplication, the picture stays on the graphics card: at the size the TV
-  gets it goes from the capture to the encoder untouched, and otherwise it is scaled there with
-  `scale_d3d11`, which the FFmpeg 8.1.1 inside `MirrorBridge.exe` has (an FFmpeg without it
-  scales on the processor). A picture of another size than asked for sends that display back to
-  the processor, at once and until MirrorBridge quits. Quick Sync, AMF and Media Foundation
-  scale on the processor, as before.
+  gets it goes from the capture to the encoder untouched, and otherwise Windows Graphics
+  Capture (FFmpeg's `gfxcapture`, which the FFmpeg 8.1.1 inside `MirrorBridge.exe` has) takes
+  the screen at that size, scaled on the graphics card (an FFmpeg without it scales on the
+  processor). On an RTX 4080 SUPER (driver 621.01) that made a 1440p screen into 1080p at 60 fps
+  for 0.05 of a processor core, where the processor's chain takes 1.3 cores; FFmpeg's
+  `scale_d3d11` is not used, because there it could not make its picture ("Could not create the
+  texture (80070057)"). The display is given to `gfxcapture` by its handle, since its numbering
+  is not Desktop Duplication's, and the capture is asked for 10 frames a second more than the
+  frame rate (a 200 Hz monitor gave 51 fps for 60), then kept to the frame rate without
+  repeating any. It gives a frame only when the screen changes: a screen that stays as it is
+  sends no new frames, which does not end the session while FFmpeg runs, nor warns of a slow
+  frame rate. NVENC is told the capture's top rate, with the bitrate raised to match, so that a
+  frame gets the share of bits it gets at the frame rate. A capture that ends before its first
+  picture, or a picture of another size than asked for, sends that display back to the
+  processor, at once and until MirrorBridge quits; a capture that Windows closes (the display
+  gone) is started again, as Desktop Duplication's is. The log's line for each FFmpeg says that
+  the frames come only as the screen changes and what NVENC is told. Quick Sync, AMF and Media
+  Foundation scale on the processor, as before.
 - With *Extend screen* on, *Mirror screen* (and `mirror --extend`, with `--extend-mode`) sends
   the virtual screen, as a cast does, instead of the PC's main display: the TV works as a second
   screen a fraction of a second behind, for PowerPoint's Presenter View with the notes on the
@@ -122,7 +135,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   window's button does.
 - `MirrorBridge.exe` carries FFmpeg 8.1.1 (gyan.dev's essentials build, checked against the
   size and SHA-256 in `packaging/ffmpeg_pin.json`) in place of the FFmpeg 7.1 of
-  `imageio-ffmpeg`, for `scale_d3d11`. Its NVENC needs an NVIDIA driver 570 or newer: with an
+  `imageio-ffmpeg`, for `gfxcapture` (Windows Graphics Capture, which scales the screen on the
+  graphics card). Its NVENC needs an NVIDIA driver 570 or newer: with an
   older one MirrorBridge uses the next encoder, and the log's warning has FFmpeg's line on the
   driver it needs. An FFmpeg named in the settings still goes first, and `doctor` says which
   one is used.

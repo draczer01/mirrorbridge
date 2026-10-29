@@ -2,6 +2,7 @@
 cryptography, and FFmpeg's own output (tests/test_mirror_loopback.py has whole sessions)."""
 
 import asyncio
+import dataclasses
 import json
 import logging
 import random
@@ -853,6 +854,51 @@ def test_mirror_command_on_the_graphics_card(monkeypatch):
     assert _option(gdi, "-vf").startswith("scale=w='min(1920,iw)'")
 
 
+# Humberto's main monitor (ddagrab's output 0), at 60 fps on a 1080p TV, as the session asks for it
+GFX_MAIN = ffmpeg.Monitor(0, 0, 0, 2560, 1440, True, 0, device=r"\\.\DISPLAY1")
+GFX_COMMAND = [
+    "ffmpeg.exe", "-hide_banner", "-nostats", "-loglevel", "warning", "-thread_queue_size", "2",
+    "-f", "lavfi", "-i", "gfxcapture=hmonitor=65537:width=1920:height=1080:resize_mode=scale_aspect:scale_mode=bilinear"
+    ":max_framerate=70:capture_cursor=1",
+    "-vf", "select='isnan(prev_selected_t)+gt(floor(t*60),floor(prev_selected_t*60))'",
+    "-an", "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ll", "-rc", "cbr", "-profile:v", "high",
+    "-zerolatency", "1", "-delay", "0", "-forced-idr", "1", "-b:v", "9333k", "-maxrate", "9333k", "-bufsize", "133k",
+    "-g", "2147483647", "-bf", "0",
+    "-bsf:v", "h264_metadata=colour_primaries=1:transfer_characteristics=1",
+    "-flush_packets", "1", "-flvflags", "no_duration_filesize+no_metadata", "-f", "flv", "pipe:1"]
+
+
+def test_mirror_command_with_gfxcapture(monkeypatch):
+    """A screen bigger than the TV's, with NVENC: Windows Graphics Capture scales it on the graphics
+    card, for the display found by its handle (not ddagrab's output index), up to 10 frames a second
+    more than are sent, kept to the frame rate by select; NVENC converts the RGB itself, told the
+    capture's 70 fps and as much more bitrate (the same 133 kbit a frame), and the stream says BT.709
+    primaries and transfer as at the screen's own size."""
+    monkeypatch.setattr(capture, "gfx_monitor", lambda monitor: "hmonitor=65537" if monitor is GFX_MAIN else "")
+    monkeypatch.setattr(source, "_version", lambda ff: (8, 1))
+
+    def command(settings=Settings(), keyframes=0, backend="ddagrab", monitor=GFX_MAIN, fps=60):
+        chain = capture.chain_for(capture.GFX, (monitor.width, monitor.height), (1920, 1080))
+        return build_command("ffmpeg.exe", settings, source=DESKTOP, encoder="h264_nvenc", width=1920, height=1080,
+                             fps=fps, backend=backend, monitor=monitor, chain=chain, keyframe_seconds=keyframes)
+
+    assert command() == GFX_COMMAND
+    assert not any("ddagrab" in arg or "hwdownload" in arg for arg in GFX_COMMAND)
+    assert _option(command(Settings(show_cursor=False)), "-i").endswith(":capture_cursor=0")
+    # Every 2 s (as for the other chains): the forced keyframes by time, -g only a bound at 70 fps.
+    periodic = command(keyframes=2)
+    assert _option(periodic, "-force_key_frames") == "expr:gte(t,n_forced*2)" and _option(periodic, "-g") == "140"
+    thirty = command(fps=30)
+    assert ":max_framerate=40:" in _option(thirty, "-i") and "floor(t*30)" in _option(thirty, "-vf")
+    assert (_option(thirty, "-b:v"), _option(thirty, "-bufsize")) == ("10667k", "267k")
+    # The display gone since: no option for it, so FFmpeg ends at once, saying so.
+    gone = dataclasses.replace(GFX_MAIN, device=r"\\.\DISPLAY9")
+    assert _option(command(monitor=gone), "-i").startswith("gfxcapture=width=1920:height=1080:")
+    # A gfxcapture chain is only in place of ddagrab: gdigrab gets the CPU one.
+    gdi = command(backend="gdigrab")
+    assert _option(gdi, "-vf").startswith("scale=w='min(1920,iw)'") and _option(gdi, "-b:v") == "8000k"
+
+
 def test_ffmpeg_versions_are_read_from_its_banner(monkeypatch):
     for banner, version in (("ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023", (6, 1)),
                             ("ffmpeg version 7.1-essentials_build-www.gyan.dev Copyright", (7, 1)),
@@ -948,6 +994,20 @@ def test_stage_times_do_not_warn_of_a_slow_ffmpeg_for_a_window_it_was_started_ag
     assert times.summary()["slow_windows"] == 1 and times.summary()["restarts"] == 1
     times.set_rate(1500, 30)  # the x264 FFmpeg that came after a hardware encoder's
     assert (times.fps, times.frame_budget) == (30, 1500 * 1000 // 8 // 30)
+
+
+def test_stage_times_do_not_warn_of_a_screen_that_changes_now_and_then(caplog):
+    """gfxcapture gives a frame only as the screen changes: a few a second is a still screen, not
+    a capture or an encoder that cannot keep up."""
+    caplog.set_level("INFO")
+    times = stats.StageTimes(kbps=8000, fps=60, lead_ms=100)
+    times.variable_rate = True
+    start = clock.now_ns()
+    for _ in range(4):
+        times.add(1000, keyframe=False)
+    times.log_window(start + 2 * clock.NS)
+    assert "fps (of up to 60)" in caplog.text and "cannot keep up" not in caplog.text
+    assert times.summary()["slow_windows"] == 0
 
 
 async def test_the_video_connection_closes_cleanly_once_its_buffer_went_out():

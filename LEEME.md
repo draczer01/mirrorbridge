@@ -220,10 +220,15 @@ Igual que `cast`, `mirror` parte de los ajustes de la app: sin `--monitor`, `--w
   empezar (el controlador de video rechaza ddagrab, el codificador de la GPU está ocupado),
   sigue con la captura GDI y luego con x264 (CPU), igual que al transmitir.
 * Con NVENC y Desktop Duplication la imagen no sale de la tarjeta de video: al tamaño de la TV
-  va directo de la captura al codificador, y si no, se escala ahí con `scale_d3d11`, que tiene
-  el FFmpeg 8.1.1 que viene dentro de `MirrorBridge.exe` (otro FFmpeg sin él la escala en el
-  procesador). Si la imagen sale de otro tamaño que el pedido, esa pantalla vuelve al
-  procesador hasta que se cierra MirrorBridge. Quick Sync, AMF y Media Foundation escalan en el
+  va directo de la captura al codificador, y si no, Windows Graphics Capture (el `gfxcapture`
+  de FFmpeg, que tiene el FFmpeg 8.1.1 que viene dentro de `MirrorBridge.exe`) toma la
+  pantalla ya al tamaño de la TV, escalada en la tarjeta de video; otro FFmpeg sin él la escala
+  en el procesador. Esa captura da un cuadro solo cuando la pantalla cambia, como mucho a los
+  cuadros por segundo elegidos, así que una pantalla que no cambia no manda cuadros nuevos y no
+  termina la sesión. (El `scale_d3d11` de FFmpeg no se usa: en una RTX 4080 SUPER con el
+  controlador 621.01 no pudo hacer su imagen.) Si la captura termina antes de su primera
+  imagen, o la imagen sale de otro tamaño que el pedido, esa pantalla vuelve al procesador
+  hasta que se cierra MirrorBridge. Quick Sync, AMF y Media Foundation escalan en el
   procesador.
 * Un cuadro clave (una imagen completa) se manda solo cuando hace falta: al empezar, y después
   de descartar cuadros, cuando FFmpeg vuelve a arrancar para dar uno enseguida (como mucho

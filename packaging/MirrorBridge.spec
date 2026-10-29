@@ -13,11 +13,11 @@ sys.path.insert(0, SPECPATH)
 import fetch_ffmpeg  # noqa: E402
 
 # FFmpeg: the build packaging/ffmpeg_pin.json names (gyan.dev's FFmpeg 8.1.1 essentials: ddagrab,
-# scale_d3d11 to scale on the GPU, NVENC, Quick Sync, AMF and Media Foundation), as fetch_ffmpeg.py
-# checked it into build/ffmpeg_811, and nothing else, even when MIRRORBRIDGE_FFMPEG is set. Only
-# MIRRORBRIDGE_OTHER_FFMPEG=1 (build_exe.ps1 -AllowOtherFFmpeg) brings back the old choice:
-# MIRRORBRIDGE_FFMPEG=C:\path\ffmpeg.exe (or AIRCAST_FFMPEG, its name before the rename), or else
-# the imageio-ffmpeg wheel's FFmpeg 7.1.
+# gfxcapture to capture scaled on the GPU, NVENC, Quick Sync, AMF and Media Foundation), as
+# fetch_ffmpeg.py checked it into build/ffmpeg_811, and nothing else, even when MIRRORBRIDGE_FFMPEG
+# is set. Only MIRRORBRIDGE_OTHER_FFMPEG=1 (build_exe.ps1 -AllowOtherFFmpeg) brings back the old
+# choice: MIRRORBRIDGE_FFMPEG=C:\path\ffmpeg.exe (or AIRCAST_FFMPEG, its name before the rename),
+# or else the imageio-ffmpeg wheel's FFmpeg 7.1.
 ffmpeg_src, ffmpeg_why = fetch_ffmpeg.bundled()
 print(f"FFmpeg inside MirrorBridge.exe: {ffmpeg_src} ({ffmpeg_why})")
 stage = os.path.join(ROOT, "build", "ffmpeg_stage")

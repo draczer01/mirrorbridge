@@ -273,11 +273,15 @@ included.
   graphics driver refuses ddagrab, the GPU encoder is busy), it goes on with GDI capture, then
   with x264 (CPU), as a cast does.
 * With NVENC and Desktop Duplication the picture stays on the graphics card: at the TV's size
-  it goes from the capture to the encoder untouched, and otherwise it is scaled there with
-  `scale_d3d11`, which the FFmpeg 8.1.1 inside `MirrorBridge.exe` has (another FFmpeg without
-  it scales on the processor). If the picture comes out at another size than asked for, that
-  display goes back to the processor until MirrorBridge quits. Quick Sync, AMF and Media
-  Foundation scale on the processor.
+  it goes from the capture to the encoder untouched, and otherwise Windows Graphics Capture
+  (FFmpeg's `gfxcapture`, which the FFmpeg 8.1.1 inside `MirrorBridge.exe` has) takes the
+  screen at the TV's size, scaled on the graphics card; another FFmpeg without it scales on the
+  processor. That capture gives a frame only when the screen changes, at most at the frame
+  rate, so a screen that stays as it is sends no new frames and does not end the session.
+  (FFmpeg's `scale_d3d11` is not used: on an RTX 4080 SUPER with driver 621.01 it could not
+  make its picture.) If the capture ends before its first picture, or the picture comes out at
+  another size than asked for, that display goes back to the processor until MirrorBridge
+  quits. Quick Sync, AMF and Media Foundation scale on the processor.
 * A keyframe (a complete picture) goes only when it is needed: at the start, and after frames
   were dropped, when FFmpeg is started again for a fresh one at once (at most every 2 seconds).
   A keyframe every 2 seconds made text blur every 2 seconds, because in a one-frame buffer it
@@ -307,7 +311,8 @@ included.
   just stops it.
 * Every 5 seconds the log says where the frames' time went, from FFmpeg's pipe to the network,
   as median and 95th percentile per stage, with the frame rate FFmpeg delivers (and a warning
-  when it falls short), what was waiting to go to the TV, how many frames were dropped or sent
+  when it falls short, except with Windows Graphics Capture, which gives frames only as the
+  screen changes), what was waiting to go to the TV, how many frames were dropped or sent
   late, and how often the TV asked for the time.
 
 ## How it works
@@ -497,7 +502,7 @@ command line's output.
 
 On Windows: `.\packaging\build_exe.ps1`. It installs the pinned build requirements
 (`packaging/requirements-build.txt`), gets FFmpeg 8.1.1 (gyan.dev's essentials build, which
-scales the screen on the graphics card with `scale_d3d11`), and runs PyInstaller with
+has `gfxcapture` to capture the screen scaled on the graphics card), and runs PyInstaller with
 `packaging/MirrorBridge.spec` to produce a one-file `dist\MirrorBridge.exe`.
 
 `packaging/fetch_ffmpeg.py` gets FFmpeg: it downloads the zip that `packaging/ffmpeg_pin.json`
@@ -505,7 +510,7 @@ names (109 MB, once), checks its size and SHA-256 and those of the `ffmpeg.exe` 
 takes out only `ffmpeg.exe`, to `build\ffmpeg_811\`. Where downloads are blocked, give it a
 copy of the zip: `.\packaging\build_exe.ps1 -FFmpegZip C:\path\ffmpeg-8.1.1-essentials_build.zip`.
 Before PyInstaller runs, the script runs the `ffmpeg.exe` that will go inside and stops unless
-it is 8.1.1 and has `scale_d3d11`. The spec bundles that file only: `MIRRORBRIDGE_FFMPEG`
+it is 8.1.1 and has `gfxcapture`. The spec bundles that file only: `MIRRORBRIDGE_FFMPEG`
 (or `AIRCAST_FFMPEG`, the name from before the rename) set to another `ffmpeg.exe`, or else
 the FFmpeg 7.1 of `imageio-ffmpeg`, goes inside only with
 `.\packaging\build_exe.ps1 -AllowOtherFFmpeg` (which sets `MIRRORBRIDGE_OTHER_FFMPEG=1` for the

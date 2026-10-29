@@ -4,6 +4,7 @@ decrypted and decoded by FFmpeg, the probe, and the ways a TV says no, is slow, 
 
 import asyncio
 import dataclasses
+import functools
 import logging
 import statistics
 import subprocess
@@ -16,7 +17,7 @@ import pytest
 from fake_mirror_tv import CREDENTIALS, PIN, FakeMirrorTV
 from mirrorbridge import ffmpeg
 from mirrorbridge.config import Settings
-from mirrorbridge.mirror import TEST_PATTERN, MirrorError, MirrorSession, capture, probe_mirroring, profiles
+from mirrorbridge.mirror import TEST_PATTERN, MirrorError, MirrorSession, capture, probe_mirroring, profiles, stats
 from mirrorbridge.mirror import session as mirror_session
 from mirrorbridge.mirror.clock import NS, from_ntp
 from mirrorbridge.mirror.control import USER_AGENT, ControlChannel, Target, open_event_channel
@@ -788,15 +789,20 @@ ACCESS_LOST = "[Parsed_ddagrab_0 @ 000001d2c4a0e2c0] AcquireNextFrame failed: 88
 NOT_YET = "[Parsed_ddagrab_0 @ 000001d2c4a0e2c0] Failed to enumerate DXGI output 0"
 _ENDS = ("import subprocess, sys\n"
          "if int(sys.argv[1]):\n"
-         "    subprocess.run(sys.argv[3:])\n"
+         "    subprocess.run(sys.argv[4:])\n"
          "sys.stderr.write(sys.argv[2] + '\\n')\n"
-         "sys.exit(1)\n")
+         "if sys.argv[3] == 'stay':\n"
+         "    sys.stderr.flush()\n"
+         "    sys.stdin.buffer.read(1)\n"
+         "sys.exit(0 if sys.argv[3] == 'stay' else int(sys.argv[3]))\n")
 
 
 class Screen:
     """This PC's display as ddagrab captures it, FFmpeg's 1080p test source standing in for it.
     `ends` says how each FFmpeg in turn ends: after (frames, with this line on stderr), as when
-    Windows takes the capture away (0 frames: at once); None, or none left, runs until stopped."""
+    Windows takes the capture away (0 frames: at once), with exit code 1 or a third item: another
+    exit code, or "stay" for an FFmpeg that then gives no more frames until it is stopped (a still
+    screen with gfxcapture); None, or none left, runs until stopped."""
 
     def __init__(self, monkeypatch, ends=(), size=(1920, 1080)) -> None:
         self.ends = list(ends)
@@ -810,16 +816,16 @@ class Screen:
         def command(ff, settings, *, source, backend="", width, height, chain=None, **kw):
             asked = build(ff, settings, source=source, backend=backend, width=width, height=height, chain=chain, **kw)
             self.commands.append((backend, chain.kind if chain else None, asked))
-            if chain is not None and chain.kind == capture.GPU:
+            if chain is not None and chain.kind in (capture.GPU, capture.GFX):
                 width, height = self.size
             cmd = build(ff, settings, source=source, backend="test", width=width, height=height, chain=chain, **kw)
             end = self.ends.pop(0) if self.ends else None
             if end is None:
                 return cmd
-            frames, line = end
+            frames, line, code = (*end, 1)[:3]
             if frames:
                 cmd = cmd[:-3] + ["-frames:v", str(frames)] + cmd[-3:]
-            return [sys.executable, "-c", _ENDS, str(frames), line, *cmd]
+            return [sys.executable, "-c", _ENDS, str(frames), line, str(code), *cmd]
 
         monkeypatch.setattr(mirror_session, "build_command", command)
 
@@ -916,6 +922,98 @@ async def test_a_graphics_card_picture_of_the_wrong_size_gives_way_to_the_proces
     session = MirrorSession(tv.target(), settings, seconds=0.5, remember=False)  # the next one, in the same run
     await asyncio.wait_for(session.run(), 60)
     assert session.error is None and screen.ways()[2:] == [("ddagrab", capture.CPU)]
+
+
+def _gfxcapture(tv, monkeypatch) -> None:
+    """As on Windows with NVENC and FFmpeg 8.1 (x264 encodes here, the test source stands in for
+    gfxcapture): a 1080p display on a 720p TV, which gfxcapture scales."""
+    tv.reconfigure(width=1280, height=720)
+    monkeypatch.setattr(capture, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(capture, "GPU_ENCODERS", ("libx264",))
+    monkeypatch.setattr(ffmpeg, "has_filter", lambda ff, name: name == "gfxcapture")
+    monkeypatch.setattr(capture, "gfx_monitor", lambda monitor: "hmonitor=65537")
+
+
+GFX_SETTINGS = dataclasses.replace(SETTINGS, output_height=720)
+
+
+async def test_gfxcapture_that_fails_before_its_first_frame_gives_way_to_the_processor_for_good(
+        tv, monkeypatch, caplog):
+    """gfxcapture ends FFmpeg before its first frame (here as when it cannot get a graphics card
+    device): the session goes on with ddagrab and the processor's chain, saying why with FFmpeg's
+    words, and does not try gfxcapture on that display again in this run."""
+    ff = _ffmpeg()
+    _gfxcapture(tv, monkeypatch)
+    screen = Screen(monkeypatch, ends=[(0, "[Parsed_gfxcapture_0 @ 0x1] Failed to create D3D11VA device.")],
+                    size=(1280, 720))
+    session = MirrorSession(tv.target(), GFX_SETTINGS, seconds=1, remember=False)
+    with caplog.at_level(logging.INFO, logger=mirror_session.__name__):
+        await asyncio.wait_for(session.run(), 60)
+    assert session.error is None and screen.ways() == [("ddagrab", capture.GFX), ("ddagrab", capture.CPU)]
+    assert ("Capture chain: the graphics card's, through Windows Graphics Capture (gfxcapture scales from 1920x1080 "
+            "to 1280x720)") in caplog.text
+    assert "FFmpeg 1 (start): GPU gfxcapture, 1920x1080 -> 1280x720, x264 (CPU) at up to 30 fps" in caplog.text
+    assert (r"gfxcapture with libx264 on the graphics card failed on \\.\DISPLAY1 (not tried there again until "
+            "MirrorBridge quits), trying the processor's chain. FFmpeg said:\n[Parsed_gfxcapture_0 @ 0x1] Failed to "
+            "create D3D11VA device.") in caplog.text
+    assert capture.is_broken(ff, SCREEN, capture.GFX) and not capture.is_broken(ff, SCREEN, capture.GPU)
+    assert tv.records == 1 and tv.videos[0].frames and tv.videos[0].errors == []
+    caplog.clear()
+    session = MirrorSession(tv.target(), GFX_SETTINGS, seconds=0.5, remember=False)  # the next one, in the same run
+    with caplog.at_level(logging.INFO, logger=mirror_session.__name__):
+        await asyncio.wait_for(session.run(), 60)
+    assert session.error is None and screen.ways()[2:] == [("ddagrab", capture.CPU)]
+    assert (r"Capture chain: the processor's (scaling from 1920x1080 to 1280x720: gfxcapture failed on \\.\DISPLAY1 "
+            "earlier in this run; scale_d3d11 is turned off (capture.GPU_SCALED_ENABLED))") in caplog.text
+
+
+@pytest.mark.parametrize("scaler, frames, ends", [("auto", 20, None), ("cpu", 20, "mirror_no_picture"),
+                                                  ("auto", 0, "mirror_no_picture")])
+async def test_a_still_screen_does_not_end_a_gfxcapture_session(tv, monkeypatch, caplog, scaler, frames, ends):
+    """gfxcapture gives frames only as the screen changes: once its FFmpeg gave one, no frame for
+    longer than FRAME_GAP_SECONDS is a screen that stays as it is while that FFmpeg runs, and the
+    frame rate is no warning. Not so for an FFmpeg that never gave a frame, nor for ddagrab's,
+    which gives frames whatever the screen does."""
+    _ffmpeg()
+    _gfxcapture(tv, monkeypatch)
+    screen = Screen(monkeypatch, ends=[(frames, "", "stay")], size=(1280, 720))
+    monkeypatch.setattr(mirror_session, "FRAME_GAP_SECONDS", 0.5)
+    monkeypatch.setattr(mirror_session, "FIRST_FRAME_SECONDS", 1)
+    monkeypatch.setattr(mirror_session, "StageTimes", functools.partial(stats.StageTimes, interval=1.0))
+    settings = dataclasses.replace(GFX_SETTINGS, mirror_scaler=scaler)
+    session = MirrorSession(tv.target(), settings, seconds=3, remember=False)
+    with caplog.at_level(logging.INFO):
+        if ends is None:
+            await asyncio.wait_for(session.run(), 60)
+        else:
+            with pytest.raises(MirrorError) as caught:
+                await asyncio.wait_for(session.run(), 60)
+            assert caught.value.args[0].key == ends
+    assert screen.ways() == [("ddagrab", capture.GFX if scaler == "auto" else capture.CPU)]
+    if ends is None:
+        assert session.error is None and session.report.frames_sent == frames and session.report.restarts == []
+        assert "cannot keep up" not in caplog.text and "fps (of up to 30)" in caplog.text
+
+
+async def test_gfxcapture_ending_its_video_is_a_lost_capture(tv, monkeypatch, caplog):
+    """Windows closing gfxcapture's capture (its display gone, here back at once): FFmpeg ends by
+    itself, saying nothing at -loglevel warning, and is started again as for a lost capture, with
+    the display looked up again; not "Encoder stopped unexpectedly"."""
+    _ffmpeg()
+    _gfxcapture(tv, monkeypatch)
+    screen = Screen(monkeypatch, ends=[(15, "", 0)], size=(1280, 720))
+    monkeypatch.setattr(mirror_session, "CAPTURE_RETRY_DELAYS", (0.05,) * 5)
+    session = MirrorSession(tv.target(), GFX_SETTINGS, remember=False)
+    task = asyncio.ensure_future(session.run())
+    with caplog.at_level(logging.WARNING, logger=mirror_session.__name__):
+        await _until(lambda: tv.videos and len(tv.videos[0].frames) >= 30, task)
+    await session.stop()
+    await asyncio.wait_for(task, 30)
+    assert session.error is None and screen.ways() == [("ddagrab", capture.GFX)] * 2
+    assert session.report.restarts == ["the screen capture lost, try 1"]
+    assert "the screen capture was lost (Capture item closed (FFmpeg ended by itself))" in caplog.text
+    (video,) = tv.videos
+    assert video.errors == [] and [n for n, (_, idr, _) in enumerate(video.frames) if idr] == [0, 15]
 
 
 async def test_setting_up_again_for_the_other_avcc_ending_starts_restarts_afresh(tv):
