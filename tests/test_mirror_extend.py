@@ -166,9 +166,10 @@ async def test_extend_screen_mirrors_the_virtual_screen_and_removes_it_at_the_en
     assert driver.started() == [("start", 1920, 1080, 60)]  # the Extended screen size, 4K, but 1080p at most
     assert driver.ffmpegs() == [("ddagrab", VIRTUAL)]  # that monitor, not display 1 or the window
     cmd = driver.commands[0]
-    assert _option(cmd, "-i").startswith("ddagrab=output_idx=1:framerate=25:")  # the virtual monitor's DXGI output
+    graph = _option(cmd, "-filter_complex")
+    assert graph.startswith("ddagrab=output_idx=1:framerate=25:")  # the virtual monitor's DXGI output
     # Fitted into the TV's screen; Quality > Resolution (360p) does not apply, as for a cast.
-    assert _option(cmd, "-vf").startswith("hwdownload,format=bgra,scale=w='min(1280,iw)':h='min(720,ih)'")
+    assert ",hwdownload,format=bgra,scale=w='min(1280,iw)':h='min(720,ih)'" in graph
     assert session.report.canvas == session.report.picture == (1280, 720) and tv.videos[0].frames
     order = [state for state, _ in states]
     assert order.index(State.EXTENDING) < order.index(State.CONNECTING) < order.index(State.CASTING)
