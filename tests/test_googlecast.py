@@ -48,6 +48,7 @@ def _decoded_frames(ff: str, annexb: bytes, tmp_path) -> int:
 
 async def _mirror(tv: FakeCastTV, seconds: float = 3, **kw) -> tuple[GoogleCastMirror, list]:
     states = []
+    kw.setdefault("codec", "h264")  # the frames these tests check are H.264
     session = GoogleCastMirror(CastDevice("Sala familiar", tv.host, tv.port), SETTINGS,
                                lambda state, message: states.append((state, message)), source=TEST_PATTERN,
                                seconds=seconds, **kw)
@@ -272,4 +273,6 @@ def test_codec_from_environment(monkeypatch):
     assert gc_session.choose_codec(None) == "vp8"
     assert gc_session.choose_codec("h264") == "h264"
     monkeypatch.setenv(gc_session.CODEC_ENV, "av1")
-    assert gc_session.choose_codec(None) == "h264"
+    assert gc_session.choose_codec(None) == "vp8"
+    monkeypatch.delenv(gc_session.CODEC_ENV)
+    assert gc_session.choose_codec(None) == "vp8"
