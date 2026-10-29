@@ -8,6 +8,7 @@ import random
 import socket
 import struct
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives import hashes
@@ -24,7 +25,8 @@ from mirrorbridge.mirror.errors import no_timing, refused
 from mirrorbridge.mirror.negotiation import CONTROL_FIRST, MEDIA_FIRST, PTP, Plan
 from mirrorbridge.mirror import session as mirror_session
 from mirrorbridge.mirror.session import (MirrorSession, catch_up_bytes, canvas_limit, choose_canvas, choose_fps,
-                                         keyframe_seconds, lead_override, on_arrival, send_buffer)
+                                         choose_mirror_fps, keyframes_on_demand, keyframes_text, latency_lead,
+                                         lead_override, mirror_latency, on_arrival, send_buffer)
 from mirrorbridge.mirror.source import DESKTOP, TEST_PATTERN, FrameQueue, Unit, build_command
 
 # What x264 wrote for a 640x360 test pattern (High, level 3.0), and the record the TV got for it.
@@ -418,6 +420,31 @@ def _sender(*waiting: bool, buffered: int = 0) -> MirrorSession:
     return session
 
 
+async def test_an_ffmpeg_that_ended_is_seen_to_before_a_keyframe_that_was_asked_for(monkeypatch):
+    """The end of FFmpeg's frames (None) goes to _ended, which says what next, even while a
+    keyframe is waiting to be asked for: _restart is not called for it, nor for an FFmpeg
+    that is no more."""
+    # pylint: disable=protected-access
+    session = _sender()
+    session._frames.put(None)
+    session._cipher, session._ffmpeg = object(), object()
+    session.report.established = SimpleNamespace(plan=SimpleNamespace(lead_ms=100))
+    session._keyframe_wanted, session._last_restart_ns = "frames were dropped", 0
+    calls = []
+
+    async def ended() -> bool:
+        calls.append("ended")
+        return False  # the session ends
+
+    async def restart(why, **kw) -> None:
+        calls.append(f"restart for {why}")
+
+    monkeypatch.setattr(session, "_ended", ended)
+    monkeypatch.setattr(session, "_restart", restart)
+    await asyncio.wait_for(session._pump(), 5)
+    assert calls == ["ended"]
+
+
 def test_frames_the_network_held_up_go_late_for_as_long_as_the_tv_is_given_to_catch_up():
     """_drop_reason(idr, waiting, late_ns, behind_ns, fresh) for P-frames while sending."""
     # pylint: disable=protected-access
@@ -472,6 +499,30 @@ def test_the_debug_menus_tv_wait_stays_within_what_a_profile_takes():
     assert lead_override(Settings(mirror_lead_ms=5)) == 20 and lead_override(Settings(mirror_lead_ms=5000)) == 1000
     assert lead_override(Settings(mirror_lead_ms="fast")) == 0 and lead_override(Settings(mirror_lead_ms=-1)) == 0
     assert lead_override(Settings(mirror_lead_ms=True)) == 0
+
+
+def test_the_latency_asks_the_tv_for_a_lead_of_its_own_and_the_debug_menu_overrides_it():
+    """Mirror screen settings > Latency: Low 60 ms, Normal the TV's (saved, or 100 ms), Smooth
+    200 ms; More options > Debug > TV wait, when it is set, wins."""
+    assert [latency_lead(Settings(mirror_latency=level), 150) for level in ("low", "normal", "smooth")] == [
+        (60, "Latency low"), (150, "Latency normal, the TV's own"), (200, "Latency smooth")]
+    assert latency_lead(Settings(), profiles.MirrorProfile().lead_ms) == (100, "Latency normal, the TV's own")
+    assert latency_lead(Settings(mirror_latency="smooth", mirror_lead_ms=300), 150) == (300, "Debug TV wait")
+    assert latency_lead(Settings(mirror_latency="low", mirror_lead_ms=5000), 150) == (1000, "Debug TV wait")
+    # A settings.json edited by hand: Normal.
+    assert [mirror_latency(Settings(mirror_latency=v)) for v in ("low", "smooth", "fast", "", None, 1)] == [
+        "low", "smooth", "normal", "normal", "normal", "normal"]
+    assert Settings().mirror_latency == "normal"
+
+
+def test_a_session_works_from_a_copy_of_the_settings():
+    """What the menus change while it runs is for the next session (a restart of FFmpeg takes
+    the copy, as the first one did)."""
+    settings = Settings(video_bitrate_kbps=1500, mirror_keyframes=0, mirror_latency="low")
+    session = MirrorSession(Target("TV", "1.2.3.4"), settings, profile=profiles.MirrorProfile())
+    settings.video_bitrate_kbps, settings.mirror_keyframes, settings.mirror_latency = 9000, 2, "smooth"
+    assert session.settings is not settings and session.settings == Settings(
+        video_bitrate_kbps=1500, mirror_keyframes=0, mirror_latency="low")
 
 
 def test_an_older_settings_json_loads_with_mirror_screens_new_settings(tmp_path, caplog):
@@ -537,6 +588,30 @@ def test_receiver_info_and_canvas():
     small = ReceiverInfo.parse({"displays": [{"width": 1366, "height": 768, "refreshRate": 50}]})
     assert choose_canvas(small, target) == (1366, 768) and choose_fps(60, small) == 50
     assert choose_fps(30, None) == 30
+
+
+def test_frame_rate_automatic_is_60_with_a_hardware_encoder_that_is_given_frames_fast_enough():
+    """Mirror screen settings > Frame rate: Automatic (0, or anything a hand edit left) is 60 for
+    NVENC, AMF, Quick Sync or Media Foundation with ddagrab or the test pattern, else 30; 30 and
+    60 are as chosen; never more than the TV says it takes."""
+    tv = ReceiverInfo.parse({"displays": [{"widthPixels": 1920, "heightPixels": 1080, "maxFPS": 60}]})
+    slow_tv = ReceiverInfo.parse({"displays": [{"width": 1366, "height": 768, "refreshRate": 50}]})
+
+    def fps(wanted, encoder, backend, info=tv):
+        return choose_mirror_fps(wanted, info, encoder=encoder, backend=backend)
+
+    assert fps(0, "h264_nvenc", "ddagrab") == (60, "automatic: NVIDIA NVENC with ddagrab")
+    assert fps(0, "h264_amf", TEST_PATTERN)[0] == fps(0, "h264_qsv", "ddagrab")[0] == 60
+    assert fps(0, "h264_nvenc", "ddagrab", None)[0] == 60  # a TV that says nothing
+    assert fps(0, "libx264", "ddagrab") == (30, "automatic: the CPU encoder")
+    assert fps(0, "h264_nvenc", "gdigrab") == (30, "automatic: gdigrab capture")
+    assert fps(0, "h264_nvenc", "ddagrab", slow_tv) == (50, "automatic: NVIDIA NVENC with ddagrab, the TV takes "
+                                                           "50 at most")
+    assert fps(30, "h264_nvenc", "ddagrab") == (30, "as chosen")
+    assert fps(60, "libx264", "gdigrab") == (60, "as chosen")
+    assert fps(60, "libx264", "ddagrab", slow_tv) == (50, "as chosen, the TV takes 50 at most")
+    assert [fps(v, "h264_nvenc", "ddagrab")[0] for v in (24, "60", None, True)] == [60, 60, 60, 60]  # Automatic
+    assert Settings().mirror_framerate == 0
 
 
 def test_sender_id_is_a_stable_local_mac():
@@ -628,8 +703,11 @@ def test_the_debug_menus_keyframes_setting():
     values = (0, 2, 10, 1, 5, "2", None, 10.0, True, False, -10)
     assert [ffmpeg.mirror_keyframe_seconds(v) for v in values] == [0, 2, 10, 0, 0, 0, 0, 10, 0, 0, 0]
     assert ffmpeg.MIRROR_KEYFRAME_CHOICES == (0, 10, 2) and Settings().mirror_keyframes == 0
-    # A session does not start FFmpeg again for a keyframe yet: only when needed is every 2 s meanwhile.
-    assert [keyframe_seconds(Settings(mirror_keyframes=v)) for v in (0, 10, 2, 7)] == [2, 10, 2, 2]
+    # A session starts FFmpeg again for a keyframe after a drop, but not with one every 2 s (as before).
+    assert [keyframes_on_demand(Settings(mirror_keyframes=v)) for v in (0, 10, 2, 7)] == [True, True, False, True]
+    assert [keyframes_text("libx264", Settings(mirror_keyframes=v)) for v in (0, 10, 2)] == [
+        "only when needed", "every 10 s and when needed", "every 2 s"]
+    assert keyframes_text("h264_qsv", Settings()) == "every 10 s and when needed"  # not tried without
 
 
 def test_ffmpeg_for_mirroring_takes_the_keyframes_it_is_given(monkeypatch):
@@ -815,6 +893,27 @@ def test_stage_times_count_what_ffmpeg_delivers_not_what_the_tv_takes(caplog, mo
     times.log_last()
     assert "Mirroring: 30.5 fps (of 30)" in caplog.text and "cannot keep up" not in caplog.text
     assert times.frames == 6 and times.slow_windows == 0
+
+
+def test_stage_times_do_not_warn_of_a_slow_ffmpeg_for_a_window_it_was_started_again_in(caplog):
+    """The picture stands still while another FFmpeg starts: that is not the capture or the
+    encoder failing to keep up. The window after it is counted again."""
+    caplog.set_level("INFO")
+    times = stats.StageTimes(kbps=8000, fps=60, lead_ms=100)
+    start = clock.now_ns()
+    for i in range(50):  # 25 frames a second for 2 s, of the 60 asked for
+        if i == 25:
+            times.restarted()
+        times.add(1000, keyframe=False)
+    times.log_window(start + 2 * clock.NS)
+    assert "cannot keep up" not in caplog.text and "; FFmpeg started again 1 times" in caplog.text
+    for i in range(50):
+        times.add(1000, keyframe=False)
+    times.log_window(start + 4 * clock.NS)
+    assert "of the 60 asked for: the screen capture or the encoder cannot keep up" in caplog.text
+    assert times.summary()["slow_windows"] == 1 and times.summary()["restarts"] == 1
+    times.set_rate(1500, 30)  # the x264 FFmpeg that came after a hardware encoder's
+    assert (times.fps, times.frame_budget) == (30, 1500 * 1000 // 8 // 30)
 
 
 async def test_the_video_connection_closes_cleanly_once_its_buffer_went_out():

@@ -194,7 +194,8 @@ LASTING = {  # the TV does not take this way: try it last from now on
     "tv_restricted", "tv_media_format", "tv_pairing_refused",
 }
 LOCAL = {  # this PC (FFmpeg, the capture): another way would fail the same, so none is tried
-    "encoder_stopped", "ffmpeg_exited", "ffmpeg_no_video", "mirror_no_picture", "gc_no_picture",
+    "encoder_stopped", "ffmpeg_exited", "ffmpeg_no_video", "mirror_no_picture", "mirror_capture_lost",
+    "gc_no_picture",
 }
 PASSING, LASTING_FAILURE, LOCAL_FAILURE = "passing", "lasting", "local"
 

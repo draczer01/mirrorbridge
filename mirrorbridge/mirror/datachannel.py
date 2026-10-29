@@ -55,6 +55,16 @@ class DataChannel:
         _LOGGER.info("Video connection to %s:%d open (send buffers %d KB)", address, port, buffer // 1024)
         return cls(reader, writer)
 
+    def resize(self, buffer: int) -> None:
+        """Send buffers of `buffer` bytes from now on (the session's frame rate changed)."""
+        sock = self._writer.get_extra_info("socket")
+        if sock is not None:
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, buffer)
+            except OSError as ex:
+                _LOGGER.debug("Video connection socket options: %s", ex)
+        self._writer.transport.set_write_buffer_limits(high=buffer)
+
     async def _watch(self) -> None:
         try:
             while await self._reader.read(65536):

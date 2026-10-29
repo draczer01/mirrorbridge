@@ -245,6 +245,7 @@ async def test_ffmpeg_ending_with_the_virtual_screen_is_the_screens_error(tv, dr
     else:
         assert isinstance(caught.value, MirrorError) and caught.value.args[0].key == "encoder_stopped"
     assert driver.events[-1] == "stop screen" and driver.events.count("stop screen") == 1
+    assert len(driver.ffmpegs()) == 1  # FFmpeg said nothing of a lost capture: it is not started again
 
 
 async def test_setting_up_again_for_the_other_avcc_ending_keeps_the_virtual_screen(tv, driver):

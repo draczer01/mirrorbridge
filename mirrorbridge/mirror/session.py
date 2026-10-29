@@ -8,27 +8,46 @@ behind, the way an iPhone or a Mac mirrors.
 
 It speaks to the tray and the command line as a cast does (session.CastSession): run() until
 the session ends, stop() from anywhere on the loop, and on_status(State, message) on the way,
-the messages and errors being Texts.
+the messages and errors being Texts. It works from a copy of the settings it was given: what
+is changed in the menus while it runs is for the next session.
 
-Delay comes first, but a dropped frame costs every frame after it up to the next keyframe
-(ffmpeg.MIRROR_KEYFRAME_SECONDS): that long, the picture on the TV is frozen. So a network that
-holds the video up for a moment (Wi-Fi does, for a few hundred ms now and then) is ridden out:
-the frames that waited are sent late, with the times they were taken for, and the TV catches
-up. The TV is given CATCH_UP_MS for it: frames go late as long as they have been past their
-lead for no longer than that and the video connection holds no more than about CATCH_UP_MS of
-the bitrate (catch_up_bytes). Only past that, when the TV (or the network) takes the video
-slower than it comes, are frames dropped up to the next keyframe, and the drop ends on a
-keyframe that is on time, so that the TV is back to real time. A TV that takes nothing for
-VIDEO_STALL_SECONDS ends the session. So does FFmpeg giving no picture (FIRST_FRAME_SECONDS,
-FRAME_GAP_SECONDS); setting up has START_SECONDS in all. FFmpeg ending before its first frame
-(the driver refuses ddagrab, the GPU encoder is out of sessions) does not: the session goes on
-with GDI capture, then with the CPU encoder, as a cast does.
+Delay comes first, but a dropped frame costs every frame after it up to the next keyframe:
+until then, the picture on the TV is frozen. So a network that holds the video up for a moment
+(Wi-Fi does, for a few hundred ms now and then) is ridden out: the frames that waited are sent
+late, with the times they were taken for, and the TV catches up. The TV is given CATCH_UP_MS
+for it: frames go late as long as they have been past their lead for no longer than that and
+the video connection holds no more than about CATCH_UP_MS of the bitrate (catch_up_bytes). Only
+past that, when the TV (or the network) takes the video slower than it comes, are frames
+dropped up to the next keyframe, and the drop ends on a keyframe that is on time, so that the
+TV is back to real time. A TV that takes nothing for VIDEO_STALL_SECONDS ends the session. So
+does FFmpeg giving no picture (FIRST_FRAME_SECONDS, FRAME_GAP_SECONDS); setting up has
+START_SECONDS in all.
 
-More options > Debug has test switches for the sessions after they are set (lead_override,
-keyframe_seconds, on_arrival): the TV's wait (the lead) in place of the one saved for the TV,
-which is what is saved again; a keyframe every 10 or 2 seconds; and codec packets that ask the
-TV to show each frame as it comes, not at its time (packets.codec_packet). Test this TV and
-`mirror --probe` leave them out.
+Keyframes come only when needed (ffmpeg.mirror_encoder_args): a keyframe made through the
+small buffer that keeps the delay down is a blur on text, so FFmpeg makes one when it starts
+and none after. When frames were dropped (or the TV took none for a while, FrameQueue), FFmpeg
+is started again (_restart): its first frame is a keyframe. That is at most once every
+KEYFRAME_RESTART_SECONDS, and the TV is told nothing: the frames' times go on from where they
+were (PtsMapper.restart) and the same picture settings need no new codec packet.
+
+FFmpeg is also started again when Windows took the screen capture away (a display or its driver
+changing, a UAC prompt, the lock screen: capture.capture_lost), after CAPTURE_RETRY_DELAYS,
+with the display looked up again; a capture that does not come back within
+CAPTURE_LOST_SECONDS ends the session with its own error. FFmpeg ending before its first frame
+for another reason (the driver refuses ddagrab, the GPU encoder is out of sessions) goes on
+the next way, as a cast does: the graphics card chain (capture.py, NVENC with ddagrab), then
+the processor's, then GDI capture, then the CPU encoder. A graphics card chain that makes a
+picture of the wrong size (its first SPS) gives way to the processor's for the rest of the run.
+
+Mirror screen settings: Latency (MIRROR_LATENCIES, the TV's wait for each frame, the lead:
+Normal is the one saved for the TV) and Frame rate (choose_mirror_fps: Automatic is 60 with a
+hardware encoder and a capture that keeps up, else 30, and 30 once the session falls back to
+x264). More options > Debug has test switches for the sessions after they are set (lead_override,
+keyframes_on_demand, on_arrival, Settings.mirror_scaler): the TV's wait in place of the
+Latency's, which is never saved; a keyframe every 10 or 2 seconds (every 2 s, FFmpeg is not
+started again for one); the processor's chain in place of the graphics card's; and codec
+packets that ask the TV to show each frame as it comes, not at its time
+(packets.codec_packet). Test this TV and `mirror --probe` leave them out.
 
 A TV that drops the video connection within AT_ONCE_SECONDS of the first frame of a first
 session (nothing saved for it yet) may not take the avcC ending it was sent: the session is set
@@ -36,7 +55,7 @@ up once more with the other one (h264.TRAILERS), and what works is saved.
 
 With Extend screen on, the desktop is the virtual monitor a cast would add (extended.py): it is
 added before the TV is asked, captured as any display is and fitted into the TV's screen, and
-kept for the whole session, through the retry above and FFmpeg's fallbacks, so the windows on
+kept for the whole session, through the retry above and FFmpeg's restarts, so the windows on
 it stay there. It goes when the session ends, however it ends; if it goes away first (sleep),
 the session ends with VddError("lost"), as a cast does.
 """
@@ -45,7 +64,9 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import logging
+import subprocess
 import threading
 from dataclasses import dataclass, field
 from typing import Optional
@@ -54,7 +75,7 @@ from .. import extended, ffmpeg, vdisplay
 from ..config import Settings
 from ..session import State, StatusCallback
 from ..text import Text
-from . import profiles
+from . import capture, profiles
 from .clock import NS, TIMING_PORTS, NtpResponder, PtsMapper, bind_udp, now_ns, to_ntp
 from .control import FEATURE_1080P, ControlChannel, ReceiverInfo, Target, open_event_channel
 from .datachannel import DataChannel
@@ -63,7 +84,8 @@ from .flv import CONFIG, FRAME
 from .h264 import TRAILERS, avcc_record, frame_nals, is_idr, join_avcc, parse_avcc, parse_sps, split_avcc
 from .negotiation import NTP, Established, Feedback, Negotiator
 from .packets import VideoCipher, codec_packet, video_key
-from .source import DESKTOP, TEST_PATTERN, FFmpegSource, FrameQueue, Unit, build_command, ended_text
+from .source import (DESKTOP, STDERR_LINES, TEST_PATTERN, FFmpegSource, FrameQueue, Unit, build_command,
+                     ended_text)
 from .stats import LOG_SECONDS, StageTimes
 
 _LOGGER = logging.getLogger(__name__)
@@ -82,10 +104,19 @@ FIRST_FRAME_SECONDS = 15  # from starting FFmpeg to its first frame
 FRAME_GAP_SECONDS = 10  # no frame from FFmpeg this long, once they came
 START_SECONDS = 90  # connecting, pair-verify, GET /info, SETUP, the video connection and RECORD
 TV_ENDED_SECONDS = 1.0  # after the video connection closes, for the control connection to close too
-# The TV closing the video within this of the first frame did not take it (_at_once): the second
-# keyframe at the default interval, in time, whatever interval the Debug menu sets.
-AT_ONCE_SECONDS = ffmpeg.MIRROR_KEYFRAME_SECONDS
+# The TV closing the video within this of the first frame did not take it (_at_once): in time,
+# whatever the keyframes (it was the second keyframe when there was one every 2 s).
+AT_ONCE_SECONDS = 2
 SUPERVISE_SECONDS = 0.25
+KEYFRAME_RESTART_SECONDS = 2.0  # FFmpeg started again for a keyframe at most this often
+CAPTURE_RETRY_DELAYS = (0.25, 0.5, 1.0, 2.0, 3.0)  # a lost screen capture: FFmpeg again after each
+CAPTURE_STABLE_SECONDS = 5.0  # an FFmpeg that gave frames this long: a capture lost after it is a new loss
+CAPTURE_LOST_SECONDS = 10  # from the capture lost to a frame again, at most
+# Mirror screen settings > Latency: the TV's wait for each frame (the lead), in ms; 0 is the one
+# saved for the TV (profiles.MirrorProfile.lead_ms, 100 ms unless a TV needed more).
+MIRROR_LATENCIES = {"low": 60, "normal": 0, "smooth": 200}
+FAST_FPS, SLOW_FPS = 60, 30  # Frame rate Automatic (choose_mirror_fps)
+FAST_CAPTURES = ("ddagrab", TEST_PATTERN)  # captures that keep up with a hardware encoder at FAST_FPS
 
 
 def choose_canvas(info: Optional[ReceiverInfo], target: Target,
@@ -122,8 +153,27 @@ def extend_mode(mode: str) -> str:
 
 
 def choose_fps(wanted: int, info: Optional[ReceiverInfo]) -> int:
+    """`wanted` (30 if none), or less if the TV says it takes less."""
     most = info.displays[0].max_fps if info is not None and info.displays and info.displays[0].max_fps else 60
     return max(1, min(wanted or 30, most))
+
+
+def choose_mirror_fps(wanted: object, info: Optional[ReceiverInfo], *, encoder: str,
+                      backend: str) -> tuple[int, str]:
+    """Mirror screen settings > Frame rate, and why, in words for the log: 30 or 60 as chosen;
+    Automatic (0, or anything else) 60 with a hardware encoder and a capture that keeps up with it
+    (FAST_CAPTURES: ddagrab, the test pattern), else 30 (x264, gdigrab). Never more than the TV
+    takes (choose_fps)."""
+    if wanted in (SLOW_FPS, FAST_FPS) and not isinstance(wanted, bool):
+        want, why = int(wanted), "as chosen"
+    elif encoder == "libx264":
+        want, why = SLOW_FPS, "automatic: the CPU encoder"
+    elif backend not in FAST_CAPTURES:
+        want, why = SLOW_FPS, f"automatic: {backend or 'this'} capture"
+    else:
+        want, why = FAST_FPS, f"automatic: {ffmpeg.ENCODER_LABELS.get(encoder, encoder)} with {backend}"
+    fps = choose_fps(want, info)
+    return fps, why + (f", the TV takes {fps} at most" if fps < want else "")
 
 
 def send_buffer(kbps: int, fps: int) -> int:
@@ -148,11 +198,37 @@ def lead_override(settings: Settings) -> int:
     return max(profiles.MIN_LEAD_MS, min(profiles.MAX_LEAD_MS, lead))
 
 
-def keyframe_seconds(settings: Settings) -> int:
-    """More options > Debug > Keyframes: the seconds between keyframes. A keyframe only when
-    needed (0) takes FFmpeg started again for each one, which a session does not do yet: it
-    gets one every ffmpeg.MIRROR_KEYFRAME_SECONDS meanwhile."""
-    return ffmpeg.mirror_keyframe_seconds(settings.mirror_keyframes) or ffmpeg.MIRROR_KEYFRAME_SECONDS
+def mirror_latency(settings: Settings) -> str:
+    """Mirror screen settings > Latency: "low", "normal" or "smooth" (normal for anything else)."""
+    level = settings.mirror_latency
+    return level if isinstance(level, str) and level in MIRROR_LATENCIES else "normal"
+
+
+def latency_lead(settings: Settings, saved_ms: int) -> tuple[int, str]:
+    """The lead to ask the TV for, and why, in words for the log: More options > Debug > TV wait
+    if it is set (lead_override), else the Latency's (Normal: `saved_ms`, the one saved for the TV)."""
+    debug = lead_override(settings)
+    if debug:
+        return debug, "Debug TV wait"
+    level = mirror_latency(settings)
+    if MIRROR_LATENCIES[level]:
+        return MIRROR_LATENCIES[level], f"Latency {level}"
+    return saved_ms, f"Latency {level}, the TV's own"
+
+
+def keyframes_on_demand(settings: Settings) -> bool:
+    """Whether FFmpeg is started again for a keyframe once frames were dropped: with keyframes
+    only when needed (More options > Debug > Keyframes, the default) and every 10 s. Every 2 s is
+    as before: the next one ends a drop soon enough."""
+    return ffmpeg.mirror_keyframe_seconds(settings.mirror_keyframes) != ffmpeg.MIRROR_KEYFRAME_SECONDS
+
+
+def keyframes_text(encoder: str, settings: Settings) -> str:
+    """The keyframes `encoder` makes with these settings, in words for the log."""
+    seconds = ffmpeg.mirror_keyframe_interval(encoder, ffmpeg.mirror_keyframe_seconds(settings.mirror_keyframes))
+    if not seconds:
+        return "only when needed"
+    return f"every {seconds} s" + (" and when needed" if keyframes_on_demand(settings) else "")
 
 
 def on_arrival(settings: Settings) -> bool:
@@ -172,6 +248,7 @@ class SessionReport:
     picture: Optional[tuple[int, int]] = None  # what the encoder really made (its SPS)
     fps: int = 0
     encoder: str = ""
+    keyframes: str = ""  # how often FFmpeg made one, in words (keyframes_text)
     trailer: str = ""
     data_channel: str = "not opened"  # "open", "refused (...)", "closed by the TV"
     frames_sent: int = 0
@@ -182,6 +259,7 @@ class SessionReport:
     feedback: dict = field(default_factory=dict)
     latency: dict = field(default_factory=dict)
     first_frame_ms: Optional[float] = None  # from starting FFmpeg to the first frame sent
+    restarts: list = field(default_factory=list)  # why FFmpeg was started again while the TV waited
     retried: str = ""  # why the session was set up a second time, with the other avcC ending
     error: Optional[BaseException] = None
 
@@ -204,7 +282,7 @@ class MirrorSession:
         max_canvas: tuple[int, int] = MAX_CANVAS,
     ) -> None:
         self.target = target
-        self.settings = settings
+        self.settings = dataclasses.replace(settings)  # a copy: menu changes are for the next session
         self.on_status = on_status or (lambda s, m: None)
         self.source = source
         saved = profile or profiles.load(target.identifier)
@@ -230,8 +308,13 @@ class MirrorSession:
         self._feedback: Optional[Feedback] = None
         self._ffmpeg: Optional[FFmpegSource] = None
         self._capture: tuple = ()  # FFmpeg, the display and the window's region, for each way below
-        self._sources: list[tuple[str, str]] = []  # the ways of capturing and encoding still to try
-        self._using = ("", "")  # the way FFmpeg runs now: (capture backend, encoder)
+        # The ways of capturing and encoding still to try: (capture backend, encoder, capture.GPU or CPU)
+        self._sources: list[tuple[str, str, str]] = []
+        self._using = ("", "", capture.CPU)  # the way FFmpeg runs now
+        self._chain: Optional[capture.Chain] = None  # the desktop's way to the encoder now
+        self._auto_fps = False  # Frame rate Automatic: lower for a slower way (_start_source)
+        self._lead_why = ""  # where the lead came from (latency_lead)
+        self._generation = 0  # FFmpegs this session started, for the log
         self._cipher: Optional[VideoCipher] = None
         self._frames: Optional[FrameQueue] = None
         self._stats = StageTimes()
@@ -244,6 +327,21 @@ class MirrorSession:
         self._retried = False
         self._xscreen: Optional[extended.ExtendedScreen] = None  # Extend screen's virtual monitor
         self.virtual_device = ""  # \\.\DISPLAYn of the virtual screen while there is one
+        self._reset_restarts()
+
+    def _reset_restarts(self) -> None:
+        """FFmpeg's restarts start afresh with each set-up (also the second, for the other avcC ending)."""
+        self._accepting = 0  # the FFmpeg (generation) whose frames are taken; 0 while one is restarted
+        self._gen_frames = 0  # frames from it
+        self._gen_started_ns = 0
+        self._worked: tuple = ()  # the last way (_using) that gave frames
+        self._keyframe_wanted = ""  # why a keyframe is needed ("": none is)
+        self._last_restart_ns = 0
+        self._capture_retries = 0
+        self._recovering_since = 0  # when the screen capture was lost, until a frame comes again (0: not lost)
+        self._lost = ""  # what FFmpeg said when it was lost
+        self._first_keyframe: Optional[tuple[int, str, int]] = None  # (generation, why, old one stopped) to log
+        self._size_checked = 0  # the last generation whose picture size was checked (_wrong_size)
 
     # -- helpers -----------------------------------------------------------
 
@@ -346,9 +444,11 @@ class MirrorSession:
             raise needs_fairplay(self.target.name)
         self._stopping = self._timing_probed = self._timing_quiet = self._dropped_at_once = False
         self._first_sent_ns = None
+        self._reset_restarts()
         self._set(State.STARTING, Text("checking_ffmpeg", "Checking FFmpeg and encoders"))
         ff = ffmpeg.find_ffmpeg(s.ffmpeg_path)
-        encoder = await loop.run_in_executor(None, ffmpeg.pick_encoder, ff, s.encoder, True)
+        encoder = await loop.run_in_executor(None, ffmpeg.pick_encoder, ff, s.encoder, True,
+                                             ffmpeg.mirror_keyframe_seconds(s.mirror_keyframes))
         self.report.encoder = encoder
         backend, monitor, region = TEST_PATTERN, None, None
         if self.source == DESKTOP:
@@ -362,6 +462,8 @@ class MirrorSession:
                     monitor, region = ffmpeg.window_region(s.window_title, monitors)
                     _LOGGER.info("Window %r is at %s on %s", s.window_title, region, monitor.label)
             backend = await loop.run_in_executor(None, ffmpeg.pick_capture_backend, ff, s, monitor, region)
+        self._capture = (ff, monitor, region)
+        self._using = (backend, encoder, capture.CPU)  # the first way, for the frame rate (_set_up)
 
         self._set(State.CONNECTING, self.target.name)
         try:
@@ -370,18 +472,24 @@ class MirrorSession:
             _LOGGER.info("Setting up took more than %d s", START_SECONDS)
             raise refused(None, self.report.steps, "setup") from ex
         est = self.report.established
-        assert est is not None
+        assert est is not None and self.report.canvas is not None
         self._stats = StageTimes(kbps=s.video_bitrate_kbps, fps=self.report.fps, lead_ms=est.plan.lead_ms)
         self._frames = FrameQueue(self.report.fps * QUEUE_SECONDS)
         # If the first choice dies before its first frame (driver refuses ddagrab, GPU encoder out
-        # of sessions), _pump goes on with GDI capture and then with the CPU encoder.
-        self._capture = (ff, monitor, region)
-        self._sources = [(backend, encoder)]
+        # of sessions), _pump goes on with the processor's chain, GDI capture, then the CPU encoder.
+        self._sources = [(backend, encoder, capture.CPU)]
+        if self.source == DESKTOP:
+            gpu, why = await loop.run_in_executor(None, functools.partial(
+                capture.gpu_possible, ff, encoder=encoder, backend=backend, monitor=monitor, region=region,
+                canvas=self.report.canvas, scaler=s.mirror_scaler))
+            _LOGGER.info("Capture chain: %s (%s)", "the graphics card's" if gpu else "the processor's", why)
+            if gpu:
+                self._sources.insert(0, (backend, encoder, capture.GPU))
         if backend == "ddagrab":
-            self._sources.append(("gdigrab", encoder))
+            self._sources.append(("gdigrab", encoder, capture.CPU))
         if encoder != "libx264":
-            self._sources.append((self._sources[-1][0], "libx264"))
-        self._start_source()
+            self._sources.append((self._sources[-1][0], "libx264", capture.CPU))
+        self._start_source("start")
 
     async def _virtual_screen(self) -> ffmpeg.Monitor:
         """Extend screen's virtual monitor, added as a cast adds it (extended.py), the first time;
@@ -408,24 +516,66 @@ class MirrorSession:
         if self._xscreen is not None and self._xscreen.lost:
             raise vdisplay.VddError("lost")
 
-    def _start_source(self) -> None:
-        """FFmpeg with the next way of capturing and encoding, its frames into the frame queue."""
-        loop = asyncio.get_running_loop()
-        ff, monitor, region = self._capture
-        backend, encoder = self._using = self._sources.pop(0)
-        width, height = self.report.canvas or FALLBACK_CANVAS
-        cmd = build_command(ff, self.settings, source=self.source, encoder=encoder, width=width, height=height,
-                            fps=self.report.fps, backend=backend, monitor=monitor, region=region,
-                            keyframe_seconds=keyframe_seconds(self.settings))
-        self.report.encoder = encoder
+    def _start_source(self, why: str) -> None:
+        """FFmpeg with the next way of capturing and encoding (`why`, for the log)."""
+        backend, encoder, _kind = self._using = self._sources.pop(0)
         label = ffmpeg.ENCODER_LABELS.get(encoder, encoder)
-        self._set(State.STARTING, Text("encoder_via", "{encoder} via {backend}", encoder=label,
-                                       backend="testsrc" if self.source == TEST_PATTERN else backend))
+        if self._auto_fps:  # Frame rate Automatic: 30 for x264 and gdigrab
+            fps, fps_why = choose_mirror_fps(0, self.report.info, encoder=encoder, backend=backend)
+            if fps < self.report.fps:
+                self._use_fps(fps, fps_why)
+        self.report.encoder = encoder
+        if self._first_sent_ns is None:  # the TV is still waiting for its first frame
+            self._set(State.STARTING, Text("encoder_via", "{encoder} via {backend}", encoder=label,
+                                           backend="testsrc" if self.source == TEST_PATTERN else backend))
+        self._launch(why)
+
+    def _use_fps(self, fps: int, why: str) -> None:
+        """Another frame rate for the FFmpegs from now on, and what depends on it."""
+        kbps = self.settings.video_bitrate_kbps
+        _LOGGER.info("Mirroring at %d fps from now on (%s)", fps, why)
+        self.report.fps = fps
+        self._stats.set_rate(kbps, fps)
+        if self._frames is not None:
+            self._frames.limit = max(2, fps * QUEUE_SECONDS)
+        self._send_buffer = send_buffer(kbps, fps)
+        self._catch_up = catch_up_bytes(kbps, fps)
+        if self._data is not None:
+            self._data.resize(self._send_buffer)
+
+    def _launch(self, why: str) -> None:
+        """Start FFmpeg the way _using says, its frames into the frame queue: a new generation,
+        whose frames alone are taken from now on."""
+        loop = asyncio.get_running_loop()
+        s = self.settings
+        ff, monitor, region = self._capture
+        backend, encoder, kind = self._using
+        canvas = self.report.canvas or FALLBACK_CANVAS
+        size_in = capture.capture_size(backend, monitor, region) if self.source == DESKTOP else None
+        chain = None
+        if self.source == DESKTOP:
+            chain = capture.chain_for(kind if size_in is not None else capture.CPU, size_in, canvas)
+        self._chain = chain
+        self.report.keyframes = keyframes_text(encoder, s)
+        fps = self.report.fps
+        cmd = build_command(ff, s, source=self.source, encoder=encoder, width=canvas[0], height=canvas[1], fps=fps,
+                            backend=backend, monitor=monitor, region=region, chain=chain,
+                            extra=s.mirror_encoder_extra,
+                            keyframe_seconds=ffmpeg.mirror_keyframe_seconds(s.mirror_keyframes))
+        self._generation += 1
+        gen = self._accepting = self._generation
+        self._gen_frames = 0
         frames, stats = self._frames, self._stats
         assert frames is not None
 
         def take(unit: Optional[Unit]) -> None:
+            if gen != self._accepting:  # from an FFmpeg stopped for a newer one
+                return
             if unit is not None and unit.kind == FRAME:
+                if not self._gen_frames:
+                    self._worked = self._using
+                    self._recovering_since = 0  # the capture is back
+                self._gen_frames += 1
                 stats.arrived()
             frames.put(unit)
 
@@ -435,18 +585,97 @@ class MirrorSession:
             except RuntimeError:  # the loop is closed: the session is long over
                 pass
 
+        est = self.report.established
+        size = f"{size_in[0]}x{size_in[1]}" if size_in else "testsrc" if self.source == TEST_PATTERN else "?"
+        made = chain.size_out if chain is not None and chain.size_out else canvas
+        vbv = round(s.video_bitrate_kbps * ffmpeg.MIRROR_VBV_FRAMES / max(1, fps)) * 1000 // 8
+        _LOGGER.info("FFmpeg %d (%s): %s, %s -> %s%dx%d, %s at %d fps, %d kbit/s (VBV %d bytes), keyframes %s; "
+                     "lead %d ms (%s)", gen, why, capture.chain_label(chain, backend), size,
+                     "" if chain is not None and chain.size_out else "within ", *made,
+                     ffmpeg.ENCODER_LABELS.get(encoder, encoder), fps, s.video_bitrate_kbps, vbv,
+                     self.report.keyframes, est.plan.lead_ms if est else 0, self._lead_why)
+        _LOGGER.info("FFmpeg %d: %s", gen, subprocess.list2cmdline(cmd))
         self._ffmpeg = FFmpegSource(cmd, hand_over)
+        self._gen_started_ns = now_ns()
         self._ffmpeg.start()
 
     async def _next_source(self) -> None:
         """FFmpeg ended before its first frame: the next way of capturing and encoding, on the
-        session as it is (the TV is waiting for its first frame)."""
+        session as it is (the TV is waiting for a frame)."""
         failed = self._ffmpeg
-        assert failed is not None
+        assert failed is not None and self._frames is not None
         await asyncio.get_running_loop().run_in_executor(None, self._stop_ffmpeg, failed)
-        backend, encoder = self._using
-        _LOGGER.warning("%s with %s failed, trying the next option. %s", backend, encoder, failed.errors())
-        self._start_source()
+        backend, encoder, kind = self._using
+        said = failed.errors(STDERR_LINES)
+        if kind == capture.GPU:
+            ff, monitor, _region = self._capture
+            capture.mark_broken(ff, monitor)
+            _LOGGER.warning("%s with %s on the graphics card failed on %s, trying the processor's chain. FFmpeg "
+                            "said:\n%s", backend, encoder, capture.display_key(monitor), said)
+        else:
+            _LOGGER.warning("%s with %s failed, trying the next option. FFmpeg said:\n%s", backend, encoder, said)
+        self._frames.clear()
+        self._stats.restarted()
+        self._start_source(f"after {backend} with {encoder} failed")
+
+    async def _restart(self, why: str, *, refresh: bool = False, next_source: bool = False) -> None:
+        """Stop FFmpeg and start it again (`why`, for the log), the TV's session going on: for a
+        keyframe (the first frame of an FFmpeg is one), after the screen capture was lost (with
+        the display looked up again: refresh), or the next way (next_source). The old FFmpeg is
+        gone before the new one starts, so that the two never hold the encoder or the screen
+        capture at once, and none of its frames are sent."""
+        loop = asyncio.get_running_loop()
+        assert self._frames is not None
+        old = self._ffmpeg
+        self._accepting = 0
+        self._keyframe_wanted = ""  # the new FFmpeg's first frame is a keyframe
+        self._frames.clear()
+        stopped = now_ns()
+        if old is not None:
+            await loop.run_in_executor(None, self._kill_ffmpeg, old)
+        if refresh:
+            await self._refresh_capture()
+        if self._stopping:
+            return
+        self._last_restart_ns = now_ns()
+        self._stats.restarted()
+        self.report.restarts.append(why)
+        self._first_keyframe = (self._generation + 1, why, stopped)
+        if next_source and self._sources:
+            self._start_source(why)
+        else:
+            self._launch(why)
+
+    async def _refresh_capture(self) -> None:
+        """The display again, after the screen capture was lost: it may have another size now, or
+        another output (the virtual screen's is looked up as Extend screen found it). Kept as it
+        was if it is not found."""
+        loop = asyncio.get_running_loop()
+        ff, monitor, region = self._capture
+        if self.source != DESKTOP or monitor is None:
+            return
+        found, window = monitor, region
+        try:
+            if self._xscreen is not None:
+                found = await self._xscreen.find()
+            else:
+                monitors = await loop.run_in_executor(None, ffmpeg.list_monitors)
+                found = next((m for m in monitors if (m.device.lower() == monitor.device.lower() if monitor.device
+                                                      else m.index == monitor.index)), monitor)
+                if region is not None and self.settings.window_title:
+                    found, window = ffmpeg.window_region(self.settings.window_title, monitors)
+        except (vdisplay.VddError, RuntimeError, OSError) as ex:
+            _LOGGER.info("Capturing the display as it was: %s", ex)
+            return
+        if (found, window) != (monitor, region):
+            _LOGGER.info("The display is now %s (%s)%s", found.label, found.device or found.index,
+                         f", the window at {window}" if window != region else "")
+        self._capture = (ff, found, window)
+
+    def _want_keyframe(self, why: str) -> None:
+        """A keyframe is needed (`why`, for the log): FFmpeg is started again for one (_pump)."""
+        if not self._keyframe_wanted and not self._stopping:
+            self._keyframe_wanted = why
 
     async def _set_up(self) -> None:
         """Connect and pair-verify, GET /info, SETUP, the video connection, RECORD, /feedback."""
@@ -473,12 +702,9 @@ class MirrorSession:
             _LOGGER.warning("%s", ex)
 
         plan = self.profile.plan()
-        lead = lead_override(s)
-        if lead:
-            plan.lead_ms = lead
-        _LOGGER.info("Mirroring with lead %d ms (%s), keyframe every %d s, frames shown %s", plan.lead_ms,
-                     "test value" if lead else "automatic", keyframe_seconds(s),
-                     "on arrival" if on_arrival(s) else "at their time")
+        plan.lead_ms, self._lead_why = latency_lead(s, self.profile.lead_ms)
+        _LOGGER.info("Mirroring with lead %d ms (%s), keyframes %s, frames shown %s", plan.lead_ms, self._lead_why,
+                     keyframes_text(self.report.encoder, s), "on arrival" if on_arrival(s) else "at their time")
         _LOGGER.info("Setting up mirroring to %s (%s): %s", self.target.name,
                      "saved settings" if self.saved else "first time", plan.describe())
         est = self.report.established = await negotiator.establish(plan)
@@ -490,7 +716,11 @@ class MirrorSession:
             await self._info_after_setup(est, channel)
         limit = canvas_limit(s, self.max_canvas)
         self.report.canvas = choose_canvas(self.report.info, self.target, limit)
-        self.report.fps = choose_fps(s.framerate, self.report.info)
+        backend, encoder, _kind = self._using
+        self.report.fps, fps_why = choose_mirror_fps(s.mirror_framerate, self.report.info, encoder=encoder,
+                                                     backend=backend)
+        self._auto_fps = s.mirror_framerate not in (SLOW_FPS, FAST_FPS)
+        _LOGGER.info("Mirroring into %dx%d at %d fps (%s)", *self.report.canvas, self.report.fps, fps_why)
 
         self._send_buffer = send_buffer(s.video_bitrate_kbps, self.report.fps)
         self._catch_up = catch_up_bytes(s.video_bitrate_kbps, self.report.fps)
@@ -608,8 +838,14 @@ class MirrorSession:
         self._timing_quiet = quiet
 
     def _check_frames(self, now: int) -> None:
-        """FFmpeg must give a first frame, and then keep giving them."""
+        """FFmpeg must give a first frame, and then keep giving them; a screen capture that was
+        lost must come back within CAPTURE_LOST_SECONDS (the FFmpegs started meanwhile give none)."""
         assert self._frames is not None and self._ffmpeg is not None
+        if self._recovering_since:
+            if now - self._recovering_since > CAPTURE_LOST_SECONDS * NS:
+                _LOGGER.error("The screen capture did not come back within %g s", CAPTURE_LOST_SECONDS)
+                raise self._capture_lost()
+            return
         last = self._frames.last_frame_ns
         if last is None and now - self._ffmpeg.started_ns > FIRST_FRAME_SECONDS * NS:
             raise self._no_picture(FIRST_FRAME_SECONDS)
@@ -619,12 +855,22 @@ class MirrorSession:
     def _no_picture(self, seconds: int) -> MirrorError:
         assert self._ffmpeg is not None
         errors = self._ffmpeg.errors()
+        _LOGGER.error("No picture from FFmpeg %d for %d s. FFmpeg said:\n%s", self._accepting, seconds,
+                      self._ffmpeg.errors(STDERR_LINES))
         self.report.steps["picture"] = f"none for {seconds} s"
         return MirrorError(Text(
             "mirror_no_picture", "No picture came from the screen capture or the encoder ({encoder}) for {seconds} s."
             "{errors}", encoder=ffmpeg.ENCODER_LABELS.get(self.report.encoder, self.report.encoder), seconds=seconds,
             errors=f"\n{errors}" if errors else "",
         ), step="encoder", steps=self.report.steps)
+
+    def _capture_lost(self) -> MirrorError:
+        reason = self._lost or "no picture"
+        self.report.steps["picture"] = f"capture lost ({reason})"
+        return MirrorError(Text(
+            "mirror_capture_lost", "Windows stopped the screen capture and it did not come back ({reason}). Try "
+            "Mirror screen again.", reason=reason,
+        ), step="capture", steps=self.report.steps)
 
     async def _video_closed(self, reason: str) -> str:
         """The TV closed the video connection. If it closes the control connection as well, as
@@ -675,15 +921,15 @@ class MirrorSession:
         those sent since one was on time, or this one's own `late_ns`); `fresh` whether FFmpeg
         gave it after frames were last dropped.
 
-        Dropping a frame costs the frames after it up to the next keyframe, a frozen picture for
-        up to a keyframe's interval, so a frame goes unless it cannot help: a newer keyframe is
-        already waiting, or the network has not caught up within the CATCH_UP_MS the TV is given
-        (more than about CATCH_UP_MS of the video still waiting to go, or frames past their lead
-        for longer than that). A short hold-up of the network leaves frames waiting, a little
-        late: they still go, and the TV catches up. One that stays slower than the video does
-        not keep the TV behind for good: a drop ends on a keyframe that is on time, not on one of
-        the frames that waited, already late with more behind it, or on the first keyframe FFmpeg
-        gives once the drop began (so that it never waits for one long)."""
+        Dropping a frame costs the frames after it up to the next keyframe (the first of FFmpeg
+        started again, _restart), a frozen picture until then, so a frame goes unless it cannot
+        help: a newer keyframe is already waiting, or the network has not caught up within the
+        CATCH_UP_MS the TV is given (more than about CATCH_UP_MS of the video still waiting to go,
+        or frames past their lead for longer than that). A short hold-up of the network leaves
+        frames waiting, a little late: they still go, and the TV catches up. One that stays slower
+        than the video does not keep the TV behind for good: a drop ends on a keyframe that is on
+        time, not on one of the frames that waited, already late with more behind it, or on the
+        first keyframe FFmpeg gives once the drop began (so that it never waits for one long)."""
         assert self._frames is not None and self._data is not None
         frames = self._frames
         if idr and frames.keyframe_waiting():
@@ -719,7 +965,8 @@ class MirrorSession:
     async def _pump(self) -> None:
         """FFmpeg's frames to the TV, as they come. A frame the network held up past its lead
         goes late, with its own timestamp (the TV catches up), unless _drop_reason says it
-        cannot help."""
+        cannot help. Frames dropped ask for a keyframe (keyframes_on_demand): FFmpeg is started
+        again for one, and the frames that follow are those of the new FFmpeg."""
         assert self._data is not None and self._cipher is not None and self._ffmpeg is not None
         assert self._frames is not None
         est = self.report.established
@@ -727,6 +974,7 @@ class MirrorSession:
         frames = self._frames
         lead_ns = est.plan.lead_ms * 1_000_000
         shown_on_arrival = on_arrival(self.settings)
+        on_demand = keyframes_on_demand(self.settings)
         mapper = PtsMapper()
         trailer = self.profile.trailer
         params: Optional[tuple[bytes, bytes]] = None
@@ -739,18 +987,28 @@ class MirrorSession:
         late_frames = held_ns = 0  # frames sent past their lead since the last on time, and their sends
         behind_since = 0  # when the first frame past its lead since the last on time was due (0: none is)
         dropped_at = 0  # when frames were last dropped: what FFmpeg gives after that is fresh
+
+        def restarted() -> None:
+            """Another FFmpeg: its pts start from 0 again, and it starts with a keyframe."""
+            nonlocal wait_for_idr, behind_since, late_frames, held_ns, dropped_at
+            mapper.restart()
+            wait_for_idr = True
+            behind_since = late_frames = held_ns = 0
+            dropped_at = now_ns()
+
         while True:
             unit = await frames.get()
             if unit is None:
-                if self._stopping:
+                if self._stopping or not await self._ended():
                     return
-                self._check_screen()
-                if frames.last_frame_ns is None and self._sources:  # no frame at all from this way
-                    await self._next_source()
-                    continue
-                if self._xscreen is not None and await self._xscreen.lost_within():
-                    raise vdisplay.VddError("lost")  # ddagrab lost its output before the driver said so
-                raise MirrorError(ended_text(self._ffmpeg), step="encoder")
+                restarted()
+                continue
+            if (self._keyframe_wanted and not self._stopping
+                    and now_ns() - self._last_restart_ns >= KEYFRAME_RESTART_SECONDS * NS):
+                _LOGGER.info("Starting FFmpeg again for a keyframe: %s", self._keyframe_wanted)
+                await self._restart(f"a keyframe: {self._keyframe_wanted}")
+                restarted()
+                continue
             taken = now_ns()
             trimmed = frames.take_trimmed()
             if trimmed:
@@ -761,9 +1019,16 @@ class MirrorSession:
                 dropped_at = taken
                 behind_since = late_frames = held_ns = 0
                 self._stats.drop(trimmed)
+                if on_demand and not frames.keyframe_waiting():
+                    self._want_keyframe(f"the TV took no video for a while ({trimmed} frames dropped)")
             if unit.kind == CONFIG:
                 config = parse_avcc(unit.data)
                 length_size = config.length_size
+                wrong = self._wrong_size(config.sps[0]) if config.sps else ""
+                if wrong:
+                    await self._restart(f"the graphics card's picture: {wrong}", next_source=True)
+                    restarted()
+                    continue
                 if config.sps and config.pps and (config.sps[0], config.pps[0]) != params:
                     params = (config.sps[0], config.pps[0])
                     send_codec = True
@@ -771,6 +1036,11 @@ class MirrorSession:
             if not unit.data:
                 continue
             nals, sps, pps = frame_nals(split_avcc(unit.data, length_size))
+            wrong = self._wrong_size(sps[0]) if sps else ""
+            if wrong:
+                await self._restart(f"the graphics card's picture: {wrong}", next_source=True)
+                restarted()
+                continue
             if sps and pps and (sps[0], pps[0]) != params:
                 params = (sps[0], pps[0])  # new parameter sets in the stream: a new codec packet
                 send_codec = True
@@ -785,6 +1055,8 @@ class MirrorSession:
                 if not wait_for_idr:
                     _LOGGER.info("Dropping frames up to the next keyframe: %s", why)
                     dropped_at = taken
+                    if on_demand and not frames.keyframe_waiting():
+                        self._want_keyframe(why)
                 wait_for_idr = True
                 behind_since = late_frames = held_ns = 0
                 self._stats.drop()
@@ -814,6 +1086,8 @@ class MirrorSession:
             except ConnectionError as ex:
                 raise _VideoClosed(f"closed by the TV ({ex})") from ex
             sent = now_ns()
+            if idr:
+                self._keyframe_sent(sent)
             if sent - packed > lead_ns and sent - slow_logged > LOG_SECONDS * NS:
                 slow_logged = sent
                 _LOGGER.warning("The network took %.0f ms to take a %d KB frame, more than the lead (%d ms)",
@@ -847,6 +1121,94 @@ class MirrorSession:
                     "mirror_casting", "Mirroring {what} to {device} ({width}x{height}, {fps} fps)",
                     what=what, device=self.target.name, width=picture[0], height=picture[1], fps=self.report.fps,
                 ))
+
+    def _keyframe_sent(self, sent: int) -> None:
+        """A keyframe went to the TV: none is needed any more, and the first of an FFmpeg started
+        again says how long the picture stood still."""
+        self._keyframe_wanted = ""
+        first = self._first_keyframe
+        if first is not None and first[0] == self._accepting:
+            self._first_keyframe = None
+            _LOGGER.info("FFmpeg %d (%s): its first keyframe went %.0f ms after the one before was stopped",
+                         first[0], first[1], (sent - first[2]) / 1e6)
+
+    def _wrong_size(self, sps: bytes) -> str:
+        """What is wrong with the size of the picture the graphics card chain makes, from the
+        first SPS of each of its FFmpegs ("" if nothing, or if it is not that chain): a size the
+        encoder was not asked for, or one bigger than the TV's screen, as from a rotated display.
+        That chain is not used on the display again in this run."""
+        chain = self._chain
+        if chain is None or chain.kind != capture.GPU or self._size_checked == self._accepting:
+            return ""
+        self._size_checked = self._accepting
+        made = capture.sps_size(sps)
+        if made is None:
+            return ""
+        problem = capture.size_problem(made, chain, self.report.canvas or FALLBACK_CANVAS)
+        if problem and not self._sources:  # nothing to go on with (cannot be: the processor's chain is next)
+            _LOGGER.warning("The graphics card chain: %s", problem)
+            return ""
+        if problem:
+            ff, monitor, _region = self._capture
+            capture.mark_broken(ff, monitor)
+            _LOGGER.warning("The graphics card chain on %s: %s. The processor's chain takes over, and is used for "
+                            "that display from now on", capture.display_key(monitor), problem)
+        return problem
+
+    async def _ended(self) -> bool:
+        """FFmpeg ended (its pipe did) while the session went on: True if another FFmpeg runs in
+        its place now, False if the session is stopping; else raises why the session ends.
+
+        A screen capture that was lost (capture.capture_lost, once it had worked) is started again
+        after each of CAPTURE_RETRY_DELAYS, and while it is, a ddagrab that ends before its first
+        frame counts as one more try whatever it said (a display that is still changing), never as
+        a reason to go on with GDI capture. An FFmpeg that ends before its first frame otherwise
+        gives way to the next way of capturing and encoding (_next_source)."""
+        loop = asyncio.get_running_loop()
+        self._check_screen()
+        failed = self._ffmpeg
+        assert failed is not None
+        await loop.run_in_executor(None, self._kill_ffmpeg, failed)  # reaped, and all of its stderr read
+        if self._stopping:
+            return False
+        said = failed.errors(STDERR_LINES)
+        backend, _encoder, _kind = self._using
+        count, now = self._gen_frames, now_ns()
+        ran = (now - failed.started_ns) / NS
+        lost = capture.capture_lost(said)
+        recovering = bool(self._recovering_since)
+        if (lost and (count or recovering or self._using == self._worked)) or (
+                recovering and not count and backend == "ddagrab"):
+            if count and now - self._gen_started_ns > CAPTURE_STABLE_SECONDS * NS:
+                self._capture_retries = 0  # it had come back for a while: this is another loss
+            if not recovering:  # what it said first is what the session says if the capture does not come back
+                self._recovering_since, self._lost = now, lost or ""
+            tries = len(CAPTURE_RETRY_DELAYS)
+            if self._capture_retries >= tries:
+                _LOGGER.error("FFmpeg %d stopped after %d frames (%.1f s, exit code %s): the screen capture did not "
+                              "come back after %d tries. FFmpeg said:\n%s", self._accepting, count, ran,
+                              failed.returncode, tries, said)
+                raise self._capture_lost()
+            delay = CAPTURE_RETRY_DELAYS[self._capture_retries]
+            self._capture_retries += 1
+            _LOGGER.warning("FFmpeg %d stopped after %d frames (%.1f s, exit code %s): %s. Starting it again in "
+                            "%.2f s (try %d of %d). FFmpeg said:\n%s", self._accepting, count, ran, failed.returncode,
+                            f"the screen capture was lost ({lost})" if lost else "the screen capture is not back yet",
+                            delay, self._capture_retries, tries, said)
+            await asyncio.sleep(delay)
+            if self._stopping:
+                return False
+            self._check_screen()
+            await self._restart(f"the screen capture lost, try {self._capture_retries}", refresh=True)
+            return True
+        if not count and self._sources:  # this way gives nothing: the next one
+            await self._next_source()
+            return True
+        if self._xscreen is not None and await self._xscreen.lost_within():
+            raise vdisplay.VddError("lost")  # ddagrab lost its output before the driver said so
+        _LOGGER.error("FFmpeg %d stopped after %d frames (%.1f s, exit code %s). FFmpeg said:\n%s", self._accepting,
+                      count, ran, failed.returncode, said)
+        raise MirrorError(ended_text(failed), step="encoder")
 
     async def _release(self) -> None:
         """Stop what the session started and tear it down on the TV. Each part is taken before
@@ -895,6 +1257,14 @@ class MirrorSession:
         except Exception:  # pylint: disable=broad-except
             _LOGGER.debug("Stopping FFmpeg failed", exc_info=True)
 
+    @staticmethod
+    def _kill_ffmpeg(source: FFmpegSource) -> None:
+        """End an FFmpeg at once (another starts in its place), or reap one that ended."""
+        try:
+            source.stop(kill=True)
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.debug("Stopping FFmpeg failed", exc_info=True)
+
     async def _cleanup(self) -> None:
         loop = asyncio.get_running_loop()
         try:
@@ -905,8 +1275,11 @@ class MirrorSession:
                 await self._xscreen.stop()
                 self._xscreen = None
                 self.virtual_device = ""
-        _LOGGER.info("Mirroring ended: %d frames sent (%d late), %d dropped; the TV asked for the time %d times; "
-                     "/feedback answers %s; steps %s", self._stats.frames, self._stats.late, self._stats.dropped,
+        restarts = self.report.restarts
+        _LOGGER.info("Mirroring ended: %d frames sent (%d late), %d dropped; FFmpeg started again %d times%s; the TV "
+                     "asked for the time %d times; /feedback answers %s; steps %s", self._stats.frames,
+                     self._stats.late, self._stats.dropped, len(restarts),
+                     f" ({'; '.join(restarts[:10])}{'...' if len(restarts) > 10 else ''})" if restarts else "",
                      self.report.ntp_requests, self.report.feedback or "none", self.report.steps)
         est = self.report.established
         # Remembered only once the TV has taken frames and the time: what was asked for works.

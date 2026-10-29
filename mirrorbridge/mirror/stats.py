@@ -17,10 +17,12 @@ each as median (p50) and 95th percentile (p95), in ms. The fixed delay of captur
 themselves is not in any of them: it cannot be seen from here. Also: the frame rate FFmpeg
 delivers (whether sent or dropped) against the one asked for, with a warning when it falls short, the
 bitrate, the most bytes the video connection held unsent, keyframes, dropped frames, frames sent
-late and how often the TV asked for the time. The TV shows a frame its lead (latencyMs) after it
-was taken, so an age that comes near the lead means frames arrive too late to be shown smoothly;
-"late" counts the frames sent past their lead (a network that held the video up for a moment,
-ridden out instead of dropping frames up to the next keyframe).
+late, how often the TV asked for the time and how often FFmpeg was started again (for a
+keyframe, a lost screen capture or another way of capturing: the picture stands still while it
+starts, so a window with one gives no warning about the frame rate). The TV shows a frame its
+lead (latencyMs) after it was taken, so an age that comes near the lead means frames arrive too
+late to be shown smoothly; "late" counts the frames sent past their lead (a network that held
+the video up for a moment, ridden out instead of dropping frames up to the next keyframe).
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ LOG_SECONDS = 5.0
 KEEP = 20000  # frames kept for the session's summary (about 5 minutes at 60 fps)
 BIG_KEYFRAME_FRAMES = 8  # a keyframe this many average frames big arrives as one burst
 SLOW_FPS = 0.9  # FFmpeg delivering less than this share of the frame rate asked for: a warning
+RESTART_GRACE_SECONDS = 1.0  # nor in a window that began this soon after FFmpeg was started again
 
 
 def percentile(values: list[float], fraction: float) -> float:
@@ -64,6 +67,8 @@ class StageTimes:
         self.dropped = 0
         self.late = 0  # frames sent past their lead
         self.slow_windows = 0  # windows in which FFmpeg delivered too few frames
+        self.restarts = 0  # FFmpegs started after the first
+        self._restarted_ns: Optional[int] = None  # when the last of them was
         self._window: dict[str, list[float]] = {stage: [] for stage in STAGES}
         self._all: dict[str, deque] = {stage: deque(maxlen=KEEP) for stage in STAGES}
         self._window_frames = 0
@@ -74,6 +79,16 @@ class StageTimes:
         self._window_start = now_ns()
         self._last: Optional[int] = None  # when the last frame came, was sent or was dropped
         self._ntp_requests: Optional[int] = None
+
+    def set_rate(self, kbps: int, fps: int) -> None:
+        """The bitrate and frame rate asked for from now on (another FFmpeg)."""
+        self.fps = fps
+        self.frame_budget = kbps * 1000 // 8 // fps if kbps and fps else 0
+
+    def restarted(self) -> None:
+        """FFmpeg was started again: the picture stood still while it started."""
+        self.restarts += 1
+        self._restarted_ns = now_ns()
 
     def _frame_seen(self) -> None:
         now = now_ns()
@@ -132,13 +147,16 @@ class StageTimes:
             self._ntp_requests = ntp_requests
         _LOGGER.info(
             "Mirroring: %.1f fps (of %d), %.1f Mbit/s; ms p50/p95: %s (after capture and encoding); lead %d ms; "
-            "up to %d KB waiting to go; keyframes %d (largest %d KB%s); dropped %d, late %d%s",
+            "up to %d KB waiting to go; keyframes %d (largest %d KB%s); dropped %d, late %d%s%s",
             delivered, self.fps, self._window_bytes * 8 / seconds / 1e6, ", ".join(parts) or "no frames",
             self.lead_ms, self._window_buffered // 1024, self.keyframes, self.largest_keyframe // 1024,
             f", {self.big_keyframes} over {BIG_KEYFRAME_FRAMES} frames' share of the bitrate" if self.big_keyframes
             else "", self.dropped, self.late, timing,
+            f"; FFmpeg started again {self.restarts} times" if self.restarts else "",
         )
-        if self.fps and seconds >= 1 and delivered < SLOW_FPS * self.fps:
+        restarted = (self._restarted_ns is not None
+                     and self._restarted_ns >= self._window_start - int(RESTART_GRACE_SECONDS * NS))
+        if self.fps and seconds >= 1 and delivered < SLOW_FPS * self.fps and not restarted:
             self.slow_windows += 1
             behind = self._window["behind"]
             _LOGGER.warning(
@@ -165,5 +183,6 @@ class StageTimes:
         out: dict = {stage: (round(percentile(list(values), 0.5), 2), round(percentile(list(values), 0.95), 2))
                      for stage, values in self._all.items() if values}
         out.update(frames=self.frames, bytes=self.bytes, keyframes=self.keyframes, dropped=self.dropped,
-                   late=self.late, largest_keyframe=self.largest_keyframe, slow_windows=self.slow_windows)
+                   late=self.late, largest_keyframe=self.largest_keyframe, slow_windows=self.slow_windows,
+                   restarts=self.restarts)
         return out

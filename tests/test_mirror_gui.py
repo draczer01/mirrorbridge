@@ -22,6 +22,7 @@ from mirrorbridge.config import Settings
 from mirrorbridge.gui import i18n
 from mirrorbridge.mirror import MirrorSession, profiles
 from mirrorbridge.mirror.negotiation import MEDIA_FIRST
+from mirrorbridge.mirror.session import AT_ONCE_SECONDS
 from mirrorbridge.session import State
 from mirrorbridge.vdisplay import DriverStatus, VddError
 
@@ -360,8 +361,8 @@ def test_a_tv_that_ends_mirroring_says_so(controller, tv):
     controller.notify.connect(lambda *note: notes.append(note))
     controller.start_mirror()
     _until(lambda: controller.cast_state == State.CASTING, 30)
-    _until(lambda: sum(1 for frame in tv.videos[0].frames if frame[1]) >= 2, 15)  # past the second keyframe
-    time.sleep(0.5)  # and well past AT_ONCE_SECONDS, which the second keyframe at 2 s only just reaches
+    _until(lambda: tv.videos and tv.videos[0].frames, 15)
+    time.sleep(AT_ONCE_SECONDS + 0.5)  # well past it: a TV that took the picture
     controller.runner.loop.call_soon_threadsafe(tv.end_mirroring)
     _until(lambda: controller.session_future is None, 30)
     assert notes[-1] == ("Screen mirroring stopped", "The TV ended screen mirroring", False)

@@ -9,13 +9,14 @@ import statistics
 import subprocess
 import sys
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
 from fake_mirror_tv import CREDENTIALS, PIN, FakeMirrorTV
 from mirrorbridge import ffmpeg
 from mirrorbridge.config import Settings
-from mirrorbridge.mirror import TEST_PATTERN, MirrorError, MirrorSession, probe_mirroring, profiles
+from mirrorbridge.mirror import TEST_PATTERN, MirrorError, MirrorSession, capture, probe_mirroring, profiles
 from mirrorbridge.mirror import session as mirror_session
 from mirrorbridge.mirror.clock import NS, from_ntp
 from mirrorbridge.mirror.control import USER_AGENT, ControlChannel, Target, open_event_channel
@@ -435,7 +436,8 @@ async def test_the_debug_switches_reach_the_tv_and_a_test_lead_is_not_saved(tv, 
     session = MirrorSession(tv.target(), settings, source=TEST_PATTERN, seconds=2.5)
     with caplog.at_level(logging.INFO, logger=mirror_session.__name__):
         await asyncio.wait_for(session.run(), 60)
-    assert "Mirroring with lead 300 ms (test value), keyframe every 10 s, frames shown on arrival" in caplog.text
+    assert ("Mirroring with lead 300 ms (Debug TV wait), keyframes every 10 s and when needed, frames shown on "
+            "arrival") in caplog.text
     assert tv.video_streams[0]["latencyMs"] == 300 and tv.setups[0]["streams"][0]["latencyMax"] == 300 * 44100 // 1000
     assert session.report.established.plan.lead_ms == 300
     assert session._stats.lead_ms == 300  # pylint: disable=protected-access
@@ -549,11 +551,54 @@ async def test_frames_the_tv_cannot_take_in_time_are_dropped_up_to_a_keyframe(tv
     ff = _ffmpeg()
     # As if the network never took the video in time: every P-frame finds too much still waiting.
     monkeypatch.setattr(mirror_session, "catch_up_bytes", lambda kbps, fps: -1)
-    session = MirrorSession(tv.target(), SETTINGS, source=TEST_PATTERN, seconds=2.5, remember=False)
+    settings = dataclasses.replace(SETTINGS, mirror_keyframes=2)  # FFmpeg's own keyframes, every 2 s
+    session = MirrorSession(tv.target(), settings, source=TEST_PATTERN, seconds=2.5, remember=False)
     await asyncio.wait_for(session.run(), 60)
     (video,) = tv.videos
     assert session.report.latency["dropped"] > 40 and len(video.frames) >= 2
     assert all(idr for _, idr, _ in video.frames)  # only keyframes got through, each a fresh start
+    assert _decode(ff, bytes(video.annexb), tmp_path)[0] == len(video.frames)
+
+
+async def test_a_drop_starts_ffmpeg_again_for_a_keyframe(tv, monkeypatch, tmp_path, caplog):
+    """Keyframes only when needed (the default): frames dropped ask for one, and FFmpeg is started
+    again for it, no more often than every KEYFRAME_RESTART_SECONDS; the TV's times go on."""
+    ff = _ffmpeg()
+    monkeypatch.setattr(mirror_session, "catch_up_bytes", lambda kbps, fps: -1)  # every P-frame is dropped
+    session = MirrorSession(tv.target(), SETTINGS, source=TEST_PATTERN, seconds=3, remember=False)
+    with caplog.at_level(logging.INFO, logger=mirror_session.__name__):
+        await asyncio.wait_for(session.run(), 60)
+    (video,) = tv.videos
+    restarts = session.report.restarts
+    assert 1 <= len(restarts) <= 3 / mirror_session.KEYFRAME_RESTART_SECONDS + 1
+    assert all(why.startswith("a keyframe: ") and "still waiting for the network" in why for why in restarts)
+    # Only keyframes got through: the first, and that of each FFmpeg started again (but maybe the last).
+    assert len(restarts) <= len(video.frames) <= len(restarts) + 1 and all(idr for _, idr, _ in video.frames)
+    assert video.errors == [] and len(video.codec_packets) == 1  # the same picture: no new codec packet
+    assert _decode(ff, bytes(video.annexb), tmp_path)[0] == len(video.frames)
+    assert "its first keyframe went" in caplog.text
+
+
+@SMALL_BUFFERS
+async def test_a_tv_that_takes_no_video_for_a_while_gets_one_keyframe(tv, tmp_path, caplog, monkeypatch):
+    """The TV reads none of the video for 2.5 s: the frame queue makes way for newer frames
+    (FrameQueue), and the frames after them wait for a keyframe. FFmpeg is started again once
+    for it, and only once: then the TV goes on with that FFmpeg's frames, at their times."""
+    ff = _ffmpeg()
+    _noisy_pattern(monkeypatch)
+    tv.reconfigure(pause_after=20, pause_seconds=2.5, video_buffer=4096)
+    settings = dataclasses.replace(SETTINGS, video_bitrate_kbps=4000)
+    session = MirrorSession(tv.target(), settings, source=TEST_PATTERN, seconds=6, remember=False)
+    with caplog.at_level(logging.INFO, logger=mirror_session.__name__):
+        await asyncio.wait_for(session.run(), 60)
+    (video,) = tv.videos
+    assert video.errors == [] and video.paused_at == 20 and session.report.latency["dropped"] > 0
+    assert "The TV took no video for a while" in caplog.text
+    (why,) = session.report.restarts
+    assert why.startswith("a keyframe: the TV took no video for a while")
+    assert session._keyframe_wanted == ""  # pylint: disable=protected-access
+    idrs = [n for n, (_, idr, _) in enumerate(video.frames) if idr]
+    assert idrs[0] == 0 and len(idrs) == 2 and idrs[1] > 20 and len(video.frames) > idrs[1] + 30
     assert _decode(ff, bytes(video.annexb), tmp_path)[0] == len(video.frames)
 
 
@@ -566,7 +611,7 @@ async def test_a_network_that_holds_the_video_up_for_a_moment_is_ridden_out(tv, 
     ff = _ffmpeg()
     _noisy_pattern(monkeypatch)
     tv.reconfigure(pause_after=15, pause_seconds=0.6, video_buffer=4096)
-    settings = dataclasses.replace(SETTINGS, video_bitrate_kbps=4000)
+    settings = dataclasses.replace(SETTINGS, video_bitrate_kbps=4000, mirror_keyframes=2)
     session = MirrorSession(tv.target(), settings, source=TEST_PATTERN, seconds=3, remember=False)
     with caplog.at_level(logging.INFO, logger=mirror_session.__name__):
         await asyncio.wait_for(session.run(), 60)
@@ -611,15 +656,20 @@ async def test_a_network_that_holds_the_video_up_for_longer_than_the_tv_is_given
 
 
 @SMALL_BUFFERS
-async def test_a_network_slower_than_the_video_does_not_leave_the_tv_behind(tv, tmp_path, caplog, monkeypatch):
+@pytest.mark.parametrize("keyframes", [2, 0])
+async def test_a_network_slower_than_the_video_does_not_leave_the_tv_behind(tv, tmp_path, caplog, monkeypatch,
+                                                                            keyframes):
     """The TV reads about three quarters of the bitrate (about 2.4 Mbit/s of noise at 4 Mbit/s):
     the frames fall behind a little more every second. Once they have been past their lead for
-    CATCH_UP_MS, frames are dropped up to a keyframe that is on time; none waits until it alone
-    is a whole CATCH_UP_MS late, so none comes to the TV that late."""
+    CATCH_UP_MS, frames are dropped up to a keyframe; none waits until it alone is a whole
+    CATCH_UP_MS late, so none comes to the TV that late. With a keyframe every 2 s, the drop ends
+    on one that is on time. With keyframes only when needed, FFmpeg is started again for one at
+    once, which can still find the network behind (by a few hundred ms here): the TV is back to
+    real time once it caught up."""
     ff = _ffmpeg()
     _noisy_pattern(monkeypatch)
     tv.reconfigure(read_kbps=1800, video_buffer=4096)
-    settings = dataclasses.replace(SETTINGS, video_bitrate_kbps=4000)
+    settings = dataclasses.replace(SETTINGS, video_bitrate_kbps=4000, mirror_keyframes=keyframes)
     session = MirrorSession(tv.target(), settings, source=TEST_PATTERN, seconds=7, remember=False)
     with caplog.at_level(logging.INFO, logger=mirror_session.__name__):
         await asyncio.wait_for(session.run(), 60)
@@ -630,7 +680,11 @@ async def test_a_network_slower_than_the_video_does_not_leave_the_tv_behind(tv, 
     past = [arrived - at for at, arrived in zip(shown, video.arrived)]
     assert max(past) < mirror_session.CATCH_UP_MS * NS // 1000
     gaps = [n for n in range(1, len(shown)) if shown[n] - shown[n - 1] > 200 * NS // 1000]
-    assert gaps and all(video.frames[n][1] for n in gaps) and past[gaps[0]] <= 0
+    assert gaps and all(video.frames[n][1] for n in gaps)
+    if keyframes:
+        assert past[gaps[0]] <= 0 and session.report.restarts == []
+    else:  # each drop ended on the keyframe of an FFmpeg started for it, never two within KEYFRAME_RESTART_SECONDS
+        assert len(gaps) <= len(session.report.restarts) <= 7 / mirror_session.KEYFRAME_RESTART_SECONDS + 1
     assert _decode(ff, bytes(video.annexb), tmp_path)[0] == len(video.frames)
 
 
@@ -678,8 +732,10 @@ async def test_a_gpu_encoder_that_will_not_start_gives_way_to_x264(tv, monkeypat
     CPU encoder. (NVENC is made to fail here: on a PC with an NVIDIA GPU it would start.)"""
     _ffmpeg()
     real_build_command = mirror_session.build_command
+    rates = []
 
     def nvenc_fails(ff, settings, **kw):
+        rates.append((kw["encoder"], kw["fps"]))
         if kw["encoder"] == "h264_nvenc":
             return [sys.executable, "-c", "import sys; sys.exit(1)"]
         return real_build_command(ff, settings, **kw)
@@ -697,6 +753,12 @@ async def test_a_gpu_encoder_that_will_not_start_gives_way_to_x264(tv, monkeypat
     assert session.report.encoder == "libx264" and session.report.frames_sent > 0
     assert tv.records == 1 and tv.teardowns == 1  # one session, set up once
     assert "test with h264_nvenc failed, trying the next option" in caplog.text
+    # Frame rate Automatic: 60 with the graphics card's encoder, 30 with x264, and what goes with it.
+    # pylint: disable=protected-access
+    assert rates == [("h264_nvenc", 60), ("libx264", 30)] and session.report.fps == session._stats.fps == 30
+    assert session._frames.limit == 30 * mirror_session.QUEUE_SECONDS
+    assert session._send_buffer == mirror_session.send_buffer(SETTINGS.video_bitrate_kbps, 30)
+    assert session._catch_up == mirror_session.catch_up_bytes(SETTINGS.video_bitrate_kbps, 30)
 
 
 async def test_when_every_way_of_encoding_fails_the_session_says_so(tv, monkeypatch):
@@ -715,6 +777,182 @@ async def test_when_every_way_of_encoding_fails_the_session_says_so(tv, monkeypa
     assert commands == [(TEST_PATTERN, "h264_nvenc"), (TEST_PATTERN, "libx264")]
     assert caught.value.args[0].key == "encoder_stopped"
     assert session.state == State.FAILED and tv.records == 1 and tv.teardowns == 1
+
+
+# -- FFmpeg started again: the screen capture lost, the graphics card's picture ------------------------------
+
+SCREEN = ffmpeg.Monitor(0, 0, 0, 1920, 1080, True, 0, device=r"\\.\DISPLAY1")
+# As ddagrab ends FFmpeg (vsrc_ddagrab.c): Windows took the capture away (DXGI_ERROR_ACCESS_LOST), and
+# a display that is not there yet when FFmpeg starts again
+ACCESS_LOST = "[Parsed_ddagrab_0 @ 000001d2c4a0e2c0] AcquireNextFrame failed: 887a0026"
+NOT_YET = "[Parsed_ddagrab_0 @ 000001d2c4a0e2c0] Failed to enumerate DXGI output 0"
+_ENDS = ("import subprocess, sys\n"
+         "if int(sys.argv[1]):\n"
+         "    subprocess.run(sys.argv[3:])\n"
+         "sys.stderr.write(sys.argv[2] + '\\n')\n"
+         "sys.exit(1)\n")
+
+
+class Screen:
+    """This PC's display as ddagrab captures it, FFmpeg's 1080p test source standing in for it.
+    `ends` says how each FFmpeg in turn ends: after (frames, with this line on stderr), as when
+    Windows takes the capture away (0 frames: at once); None, or none left, runs until stopped."""
+
+    def __init__(self, monkeypatch, ends=(), size=(1920, 1080)) -> None:
+        self.ends = list(ends)
+        self.commands: list = []  # (backend, chain kind, the command the session asked for)
+        self.size = size  # what the stand-in makes for the graphics card chain
+        monkeypatch.setattr(ffmpeg, "list_monitors", lambda: [SCREEN])
+        monkeypatch.setattr(ffmpeg, "pick_capture_backend", lambda ff, settings, monitor=None, region=None: "ddagrab")
+        monkeypatch.setattr(capture, "BROKEN", set())
+        build = mirror_session.build_command
+
+        def command(ff, settings, *, source, backend="", width, height, chain=None, **kw):
+            asked = build(ff, settings, source=source, backend=backend, width=width, height=height, chain=chain, **kw)
+            self.commands.append((backend, chain.kind if chain else None, asked))
+            if chain is not None and chain.kind == capture.GPU:
+                width, height = self.size
+            cmd = build(ff, settings, source=source, backend="test", width=width, height=height, chain=chain, **kw)
+            end = self.ends.pop(0) if self.ends else None
+            if end is None:
+                return cmd
+            frames, line = end
+            if frames:
+                cmd = cmd[:-3] + ["-frames:v", str(frames)] + cmd[-3:]
+            return [sys.executable, "-c", _ENDS, str(frames), line, *cmd]
+
+        monkeypatch.setattr(mirror_session, "build_command", command)
+
+    def ways(self) -> list:
+        return [(backend, kind) for backend, kind, _ in self.commands]
+
+
+async def _until(condition, task, seconds: float = 30) -> None:
+    async def wait() -> None:
+        while not condition():
+            assert not task.done(), task.exception() if task.done() and not task.cancelled() else ""
+            await asyncio.sleep(0.05)
+
+    await asyncio.wait_for(wait(), seconds)
+
+
+@pytest.mark.parametrize("then", [NOT_YET, "[Parsed_ddagrab_0 @ 0000] Something FFmpeg 9 says about DXGI"])
+async def test_a_lost_screen_capture_is_started_again_with_the_settings_it_began_with(tv, monkeypatch, tmp_path,
+                                                                                     then):
+    """ddagrab says Windows took the capture away (a display driver changing, a UAC prompt) after
+    15 frames; the next FFmpeg ends before its first frame, as while the display still changes
+    (whatever it says: never GDI capture, which is next); the one after that runs. The TV gets
+    the frames of the first and the last, on one timeline, and a change in the menus meanwhile
+    is for the next session."""
+    ff = _ffmpeg()
+    screen = Screen(monkeypatch, ends=[(15, ACCESS_LOST), (0, then)])
+    monkeypatch.setattr(mirror_session, "CAPTURE_RETRY_DELAYS", (0.05,) * 5)
+    settings = dataclasses.replace(SETTINGS)
+    states = []
+
+    def status(state, message) -> None:
+        states.append(state)
+        if state == State.CASTING:  # the menus, while it runs
+            settings.video_bitrate_kbps, settings.mirror_keyframes, settings.mirror_scaler = 9000, 2, "cpu"
+
+    session = MirrorSession(tv.target(), settings, status, remember=False)
+    task = asyncio.ensure_future(session.run())
+    await _until(lambda: tv.videos and len(tv.videos[0].frames) >= 45, task)
+    await session.stop()
+    await asyncio.wait_for(task, 30)
+    assert session.error is None and states.count(State.CASTING) == 1 and tv.records == 1
+    assert screen.ways() == [("ddagrab", capture.CPU)] * 3  # gdigrab came next, and was never needed
+    assert screen.commands[0][2] == screen.commands[2][2] and "1500k" in screen.commands[2][2]
+    assert session.report.restarts == ["the screen capture lost, try 1", "the screen capture lost, try 2"]
+    (video,) = tv.videos
+    assert video.errors == [] and [n for n, (_, idr, _) in enumerate(video.frames) if idr] == [0, 15]
+    assert _decode(ff, bytes(video.annexb), tmp_path) == (len(video.frames), "640x360")
+
+
+@pytest.mark.parametrize("ends", ["tries", "time"])
+async def test_a_screen_capture_that_does_not_come_back_ends_the_session_with_its_own_error(tv, monkeypatch, ends):
+    """After CAPTURE_RETRY_DELAYS, or CAPTURE_LOST_SECONDS from the loss, whichever comes first
+    (here while the session waits 30 s to start the third); not "No picture for 10 s"
+    (FRAME_GAP_SECONDS), which waits meanwhile."""
+    _ffmpeg()
+    screen = Screen(monkeypatch, ends=[(10, ACCESS_LOST)] + [(0, NOT_YET)] * 5)
+    monkeypatch.setattr(mirror_session, "CAPTURE_RETRY_DELAYS", (0.02,) * 5 if ends == "tries" else (0.02, 30.0))
+    monkeypatch.setattr(mirror_session, "CAPTURE_LOST_SECONDS", 30 if ends == "tries" else 1.5)
+    monkeypatch.setattr(mirror_session, "FRAME_GAP_SECONDS", 0.5)
+    session = MirrorSession(tv.target(), SETTINGS, remember=False)
+    with pytest.raises(MirrorError) as caught:
+        await asyncio.wait_for(session.run(), 60)
+    assert caught.value.args[0].key == "mirror_capture_lost" and caught.value.step == "capture"
+    assert str(caught.value) == ("Windows stopped the screen capture and it did not come back (AcquireNextFrame "
+                                 "failed: 887a0026). Try Mirror screen again.")
+    assert screen.ways() == [("ddagrab", capture.CPU)] * (6 if ends == "tries" else 2)
+    assert session.state == State.FAILED and tv.teardowns == 1
+
+
+async def test_a_graphics_card_picture_of_the_wrong_size_gives_way_to_the_processor_for_good(
+        tv, monkeypatch, tmp_path, caplog):
+    """The graphics card chain at the display's own size (what Windows says it is) makes a bigger
+    picture, as a rotated display or a size in other units would: none of it goes to the TV, the
+    processor's chain takes over at once, and is the only one tried on that display afterwards."""
+    ff = _ffmpeg()
+    tv.reconfigure(width=1280, height=720)
+    screen = Screen(monkeypatch, size=(1920, 1080))
+    monkeypatch.setattr(ffmpeg, "list_monitors", lambda: [dataclasses.replace(SCREEN, width=1280, height=720)])
+    # As on Windows with NVENC (x264 encodes here), at the screen's own size: no scaling needed.
+    monkeypatch.setattr(capture, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(capture, "GPU_ENCODERS", ("libx264",))
+    settings = dataclasses.replace(SETTINGS, output_height=720)
+    session = MirrorSession(tv.target(), settings, seconds=1.5, remember=False)
+    with caplog.at_level(logging.INFO, logger=mirror_session.__name__):
+        await asyncio.wait_for(session.run(), 60)
+    assert session.error is None and screen.ways() == [("ddagrab", capture.GPU), ("ddagrab", capture.CPU)]
+    assert session.report.restarts == [
+        "the graphics card's picture: the encoder made 1920x1080, not the 1280x720 asked for"]
+    assert capture.is_broken(ff, dataclasses.replace(SCREEN, width=1280, height=720))
+    (video,) = tv.videos
+    assert video.errors == [] and [packet[1:3] for packet in video.codec_packets] == [(1280.0, 720.0)]
+    assert _decode(ff, bytes(video.annexb), tmp_path) == (len(video.frames), "1280x720")
+    assert "Capture chain: the graphics card's (1280x720 needs no scaling)" in caplog.text
+    session = MirrorSession(tv.target(), settings, seconds=0.5, remember=False)  # the next one, in the same run
+    await asyncio.wait_for(session.run(), 60)
+    assert session.error is None and screen.ways()[2:] == [("ddagrab", capture.CPU)]
+
+
+async def test_setting_up_again_for_the_other_avcc_ending_starts_restarts_afresh(tv):
+    """What the first attempt left (a keyframe asked for, a capture being got back, its tries) is
+    not the second's: it would start FFmpeg again at once, or end at once."""
+    _ffmpeg()
+    tv.reconfigure(want_trailer=bytes.fromhex("fdf8f800"))
+
+    def status(state, message) -> None:
+        if getattr(message, "key", "") == "mirror_retry_trailer":
+            # pylint: disable=protected-access
+            session._keyframe_wanted, session._last_restart_ns = "frames were dropped", 0
+            session._recovering_since, session._capture_retries, session._lost = 1, 5, ACCESS_LOST
+
+    session = MirrorSession(tv.target(), SETTINGS, status, source=TEST_PATTERN, seconds=1.5)
+    await asyncio.wait_for(session.run(), 60)
+    assert session.error is None and session.report.retried and session.report.restarts == []
+    first, second = tv.videos
+    assert first.closed_by_us and len(second.frames) >= 30 and second.errors == []
+    assert [n for n, (_, idr, _) in enumerate(second.frames) if idr] == [0]
+
+
+@pytest.mark.parametrize("latency, debug, lead", [("low", 0, 60), ("normal", 0, 150), ("smooth", 0, 200),
+                                                  ("smooth", 300, 300)])
+async def test_the_latency_asks_the_tv_for_its_lead_and_saves_none(tv, latency, debug, lead):
+    """Mirror screen settings > Latency: Low 60 ms, Normal the TV's own (150 ms saved here), Smooth
+    200 ms; More options > Debug > TV wait wins. What is saved stays the TV's own."""
+    _ffmpeg()
+    profiles.save("fake-tv", profiles.MirrorProfile(MEDIA_FIRST, lead_ms=150))
+    settings = dataclasses.replace(SETTINGS, mirror_latency=latency, mirror_lead_ms=debug)
+    session = MirrorSession(tv.target(), settings, source=TEST_PATTERN, seconds=1)
+    await asyncio.wait_for(session.run(), 60)
+    assert tv.video_streams[0]["latencyMs"] == lead == session._stats.lead_ms  # pylint: disable=protected-access
+    (video,) = tv.videos
+    ahead = [from_ntp(stamp) - arrived for (stamp, _, _), arrived in zip(video.frames, video.arrived)]
+    assert max(ahead) <= lead * NS // 1000 and statistics.median(ahead) > (lead - 60) * NS // 1000
+    assert profiles.load("fake-tv").lead_ms == 150
 
 
 async def test_setting_up_has_a_time_limit(tv, monkeypatch):
@@ -763,13 +1001,18 @@ async def test_probe_finds_how_tcl_mirrors_and_saves_it(tv):
 
 async def test_probe_leaves_the_debug_switches_out(tv):
     _ffmpeg()
-    settings = dataclasses.replace(SETTINGS, mirror_lead_ms=300, mirror_keyframes=10, mirror_on_arrival=True)
+    """The TV's own lead, keyframes every 2 s, and the chain and encoder options as they come: Test
+    this TV says what the TV does, not what a Debug menu or settings.json experiment does to it."""
+    settings = dataclasses.replace(SETTINGS, mirror_lead_ms=300, mirror_keyframes=10, mirror_on_arrival=True,
+                                   mirror_latency="low", mirror_scaler="cpu", mirror_encoder_extra="-bogus_option 1")
     result = await asyncio.wait_for(probe_mirroring(tv.target(), settings, seconds=2.5, variants=()), 60)
     assert result.worked and {stream["latencyMs"] for stream in tv.video_streams} == {100}
     video = tv.videos[-1]
     assert video.codec_subtypes == [b"\x16\x01"]
     assert [n for n, (_, idr, _) in enumerate(video.frames) if idr][:2] == [0, 60]  # every 2 s
     assert result.profile.lead_ms == profiles.load("fake-tv").lead_ms == 100
+    (check,) = result.streams
+    assert check.report.restarts == [] and "at 30 fps with libx264, keyframes every 2 s;" in check.line()
 
 
 async def test_probe_tries_the_other_avcc_ending_when_the_tv_drops_the_video(tv):

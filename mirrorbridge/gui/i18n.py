@@ -524,6 +524,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "No llegó ninguna imagen de la captura de pantalla ni del codificador ({encoder}) durante {seconds} s."
               "{errors}",
     },
+    "mirror_capture_lost": {
+        "en": "Windows stopped the screen capture and it did not come back ({reason}). Try {menu_mirror} again.",
+        "es": "Windows detuvo la captura de pantalla y no volvió ({reason}). Vuelve a usar {menu_mirror}.",
+    },
     "mirror_no_frames": {
         "en": "No video went to {device}: FFmpeg made no frame in {seconds} s.",
         "es": "No se mandó video a {device}: FFmpeg no hizo ningún fotograma en {seconds} s.",

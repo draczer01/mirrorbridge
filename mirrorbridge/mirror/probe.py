@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from .. import ffmpeg
 from ..airplay_patch import format_steps
 from ..config import Settings
 from ..session import State
@@ -111,7 +112,8 @@ class StreamCheck:
             return f"{head}: {self.note}"
         parts = [f"video connection {report.data_channel}"]
         if report.picture:
-            parts.append(f"{report.picture[0]}x{report.picture[1]} at {report.fps} fps with {report.encoder}")
+            parts.append(f"{report.picture[0]}x{report.picture[1]} at {report.fps} fps with {report.encoder}, "
+                         f"keyframes {report.keyframes}")
         parts.append(f"{report.frames_sent} frames sent")
         if report.data_closed_after is not None:
             parts.append(f"the TV closed the video connection after {report.data_closed_after} frames")
@@ -215,10 +217,15 @@ class _Probe:
                  variants: Iterable[str], save: bool, progress: Callable[[str], None],
                  on_pattern: Callable[[], None], deadline: Optional[float]) -> None:
         self.target = target
-        # Without the Debug menu's test switches: what the probe finds and saves is the TV's own.
+        # Without the Debug menu's test switches, the Latency or options typed into settings.json:
+        # what the probe finds and saves is the TV's own. With a keyframe every 2 s, as the probe
+        # always sent: none of its few seconds goes on FFmpeg started again for one.
         defaults = Settings()
         self.settings = dataclasses.replace(settings, mirror_lead_ms=defaults.mirror_lead_ms,
-                                            mirror_keyframes=defaults.mirror_keyframes,
+                                            mirror_latency=defaults.mirror_latency,
+                                            mirror_keyframes=ffmpeg.MIRROR_KEYFRAME_SECONDS,
+                                            mirror_scaler=defaults.mirror_scaler,
+                                            mirror_encoder_extra=defaults.mirror_encoder_extra,
                                             mirror_on_arrival=defaults.mirror_on_arrival)
         self.seconds = seconds
         self.send_test_pattern = send_test_pattern
