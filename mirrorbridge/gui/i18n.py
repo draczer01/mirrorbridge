@@ -187,6 +187,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "mirror_started": {"en": "Mirroring to {device}", "es": "Duplicando la pantalla en {device}"},
     "mirror_stopped": {"en": "Screen mirroring stopped", "es": "Duplicación de pantalla detenida"},
     "mirror_failed": {"en": "Screen mirroring failed", "es": "La duplicación de pantalla falló"},
+    "mirror_sound_note": {"en": "Screen mirroring sound", "es": "Sonido de la duplicación de pantalla"},
     "pair_title": {"en": "Pair with {device}", "es": "Emparejar con {device}"},
     "pair_prompt": {
         "en": "Enter the 4-digit PIN shown on your TV:",

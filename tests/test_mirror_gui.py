@@ -550,6 +550,36 @@ def test_quit_stops_mirroring(controller, tv):
     controller.runner.thread.join(5)
 
 
+@pytest.mark.parametrize("language, title, message", [
+    ("en", "Screen mirroring sound", "No sound: Windows has no sound output to record. Turn on speakers or "
+                                     "headphones in Sound settings."),
+    ("es", "Sonido de la duplicación de pantalla", "Sin sonido: Windows no tiene una salida de sonido que grabar. "
+                                                   "Activa los altavoces o los auriculares en Configuración de "
+                                                   "sonido."),
+])
+def test_what_mirror_screen_says_of_the_sound_is_one_notification(controller, tv, monkeypatch, language, title,
+                                                                   message):
+    """A session's notice of the sound (here: it is turned on with MIRRORBRIDGE_MIRROR_SOUND=1, and
+    Windows has no output to record) reaches the person once, in the app's language."""
+    from mirrorbridge.mirror import session as mirror_session
+
+    _ffmpeg()
+    monkeypatch.setenv("MIRRORBRIDGE_MIRROR_SOUND", "1")
+    monkeypatch.setattr(mirror_session.system_audio, "loopback_available", lambda: (False, "no speakers"))
+    controller.settings.capture_audio = True
+    controller.set_language(language)
+    _choose(controller, _device(tv.port))
+    notes = []
+    controller.notify.connect(lambda *note: notes.append(note))
+    controller.start_mirror()
+    _until(lambda: controller.cast_state == State.CASTING, 30)
+    _until(lambda: tv.videos and len(tv.videos[0].frames) >= 5, 15)
+    controller.stop_cast()
+    _until(lambda: controller.session_future is None, 30)
+    assert [note for note in notes if note[0] == title] == [(title, message, False)]
+    assert len(notes) == 3 and all(audio.datagrams == 0 for audio in tv.audios)  # with started and stopped
+
+
 # -- with Extend screen ---------------------------------------------------------------------------------
 
 

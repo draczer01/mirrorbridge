@@ -6,9 +6,11 @@ import asyncio
 import dataclasses
 import hashlib
 import json
+import logging
 import math
 import plistlib
 import random
+import re
 import struct
 import subprocess
 import sys
@@ -542,12 +544,14 @@ def test_sound_knobs_describe_names_every_variable():
 class _FakeSoundcard(types.ModuleType):
     """soundcard as LoopbackFeeder uses it: the default speaker changes after `switch_after`
     records, record number `empty_at` comes back empty and number `fail_at` raises (a device
-    unplugged)."""
+    unplugged). With `pace`, the records come at that many frames a second, as a device's do."""
 
-    def __init__(self, switch_after: int = 20, empty_at: int = 10, fail_at: int = 30) -> None:
+    def __init__(self, switch_after: int = 20, empty_at: int = 10, fail_at: int = 30, pace: float = 0) -> None:
         super().__init__("soundcard")
         self.records = 0
         self.switch_after, self.empty_at, self.fail_at = switch_after, empty_at, fail_at
+        self.pace = pace
+        self.started: float = 0.0
         self.opened: list[tuple[str, dict]] = []
         self.closed = 0
 
@@ -573,7 +577,11 @@ class _FakeSoundcard(types.ModuleType):
                 card.records += 1
                 if card.records == card.fail_at:
                     raise RuntimeError("the device was unplugged")
-                time.sleep(0.001)
+                if card.pace:  # each record when its frames are all there, from the first on
+                    card.started = card.started or time.perf_counter()
+                    time.sleep(max(0.0, card.started + card.records * numframes / card.pace - time.perf_counter()))
+                else:
+                    time.sleep(0.001)
                 if card.records == card.empty_at:
                     return np.zeros((0, 2), dtype=np.float32)
                 return np.full((numframes, 2), card.records / 1000, dtype=np.float32)
@@ -1272,3 +1280,162 @@ def test_the_saved_profile_keeps_what_is_known_of_the_sound(tmp_path):
     assert profiles.MirrorProfile.from_dict({"sound_note": 5}).sound_note == ""
     # What an older MirrorBridge wrote, without them, loads with nothing known.
     assert profiles.MirrorProfile.from_dict({"ordering": "media-first"}).sound == ""
+
+
+# -- the command line ---------------------------------------------------------------------------------
+
+
+def _cli_sessions(monkeypatch) -> list:
+    """The mirror command's sessions, as it makes them (each logs a DEBUG line and gives a notice),
+    for the fake TCL it is told it chose."""
+    from fake_mirror_tv import CREDENTIALS
+    from pyatv.conf import AppleTV, ManualService
+    from pyatv.const import Protocol
+
+    from mirrorbridge import cli, mirror
+    from mirrorbridge.devices import Device
+    from mirrorbridge.text import Text
+
+    made = []
+
+    class Session:
+        def __init__(self, target, settings, on_status, **kw) -> None:
+            self.target, self.settings, self.kw = target, settings, kw
+            made.append(self)
+
+        async def run(self) -> None:
+            logging.getLogger("mirrorbridge.mirror.session").debug("A line for the log file")
+            self.kw["on_notice"](Text("mirror_sound_not_taken", "This TV does not take the PC's sound with Mirror "
+                                      "screen; for a video with sound, use Play a video file."))
+
+    async def choose(_manager, _args):
+        conf = AppleTV("127.0.0.1", "TCL 55QM7L")
+        conf.add_service(ManualService("fake-tv", Protocol.AirPlay, 7000, {"features": "0x7F8AD0,0x38BCF46"},
+                                       credentials=CREDENTIALS))
+        return Device(conf)
+
+    async def paired(_manager, _device, force=False):
+        return None
+
+    monkeypatch.setattr(mirror, "MirrorSession", Session)
+    monkeypatch.setattr(cli, "_choose", choose)
+    monkeypatch.setattr(cli, "_pair_if_needed", paired)
+    return made
+
+
+def test_the_mirror_commands_sound_options_are_for_one_run(tmp_path, monkeypatch, capsys):
+    from mirrorbridge import cli
+    from mirrorbridge.config import Settings
+
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("MIRRORBRIDGE_MIRROR_SOUND_SHAPE", "apple")
+    Settings().save()
+    saved = Settings.load()
+    made = _cli_sessions(monkeypatch)
+    root = logging.getLogger()
+    level, handlers = root.level, list(root.handlers)
+    log = tmp_path / "step1.log"
+    assert cli.main(["mirror", "-d", "TCL", "--sound", "--beep", "--sound-delay", "40", "--no-audio",
+                     "--keep-pc-sound", "--log", str(log)]) == 0
+    (session,) = made
+    assert session.kw["sound"] is True and session.kw["source"] == "desktop"
+    assert session.kw["sound_knobs"] == sound.SoundKnobs(tone=True, delay_ms=40.0, shape="apple")
+    assert not session.settings.capture_audio and not session.settings.mute_pc_audio
+    assert Settings.load() == saved  # for this run only
+    assert ('[note] This TV does not take the PC\'s sound with Mirror screen; for a video with sound, use cast -d '
+            '"TCL 55QM7L" --file VIDEO.') in capsys.readouterr().out
+    # --log: every DEBUG line in the file, and nothing of it left behind.
+    text = log.read_text(encoding="utf-8")
+    assert "DEBUG   mirrorbridge.mirror.session: A line for the log file" in text
+    assert f"DEBUG   mirrorbridge.cli: MirrorBridge {cli.__version__}: mirror -d TCL --sound --beep" in text
+    assert root.level == level and root.handlers == handlers
+    assert cli.main(["mirror", "-d", "TCL", "--log", str(log)]) == 0
+    assert log.read_text(encoding="utf-8").startswith(text)  # added to
+    # Without them, the sound as the settings and the switches say.
+    made.clear()
+    assert cli.main(["mirror", "-d", "TCL", "--test-pattern"]) == 0
+    (session,) = made
+    assert session.kw["sound"] is None and session.kw["sound_knobs"] == sound.SoundKnobs(shape="apple")
+    assert session.settings.capture_audio and session.settings.mute_pc_audio and session.kw["source"] == "test"
+    with pytest.raises(SystemExit):
+        cli.main(["mirror", "-d", "TCL", "--log", str(tmp_path / "no folder" / "step1.log")])
+
+
+@pytest.mark.parametrize("value", ["600", "-500.5", "nan", "soon"])
+def test_the_sound_delay_is_from_minus_500_to_500_ms(value, capsys):
+    from mirrorbridge import cli
+
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["mirror", "--sound-delay", value])
+    assert "--sound-delay" in capsys.readouterr().err
+    assert cli.build_parser().parse_args(["mirror", "--sound-delay", "-500"]).sound_delay == -500.0
+
+
+def test_the_sound_options_are_in_the_help(capsys):
+    from mirrorbridge import cli
+
+    for command in ("mirror", "doctor"):
+        with pytest.raises(SystemExit):
+            cli.build_parser().parse_args([command, "--help"])
+    out = " ".join(capsys.readouterr().out.split())
+    for option in ("--sound send this PC's sound with the picture", "--beep", "--sound-delay MS", "--no-audio",
+                   "--keep-pc-sound", "--sound-trial", "--log PATH", "--sound check only this PC's sound"):
+        assert option in out
+
+
+@pytest.mark.parametrize("rate, code", [(44100, 0), (48000, 1)])  # 48000: the frames do not come at 44.1 kHz
+def test_doctor_sound_records_as_a_session_would_and_says_how_it_went(monkeypatch, capsys, rate, code):
+    from mirrorbridge import cli
+
+    card = _FakeSoundcard(switch_after=10**9, empty_at=10**9, fail_at=10**9, pace=rate)
+    monkeypatch.setitem(sys.modules, "soundcard", card)
+    monkeypatch.setattr(cli, "SOUND_CHECK_SECONDS", 2)
+    asked = []
+
+    async def prompt(text, secret=False, choices=None):
+        asked.append(text)
+        return ""
+
+    class Speakers:
+        calls: list = []
+
+        def __init__(self) -> None:
+            self.error = ""
+
+        def mute(self) -> bool:
+            Speakers.calls.append("mute")
+            return True
+
+        def restore(self) -> None:
+            Speakers.calls.append("restore")
+
+    monkeypatch.setattr(cli, "_prompt", prompt)
+    monkeypatch.setattr(cli.speakers, "MutedSpeakers", Speakers)
+    assert cli.main(["doctor", "--sound"]) == code
+    out = capsys.readouterr().out
+    assert asked == ["Play some sound on this PC (music or a video), then press Enter "]
+    assert card.opened[0] == ("{speaker-A}", dict(samplerate=44100, channels=2, blocksize=4410))
+    assert "Speaker:   Speakers A\n" in out and "Level:     peak " in out
+    blocks, frames, measured = (int(x) for x in re.search(r"Blocks:    (\d+), (\d+) frames, (\d+) frames/s "
+                                                          r"\(44100 asked\)", out).groups())
+    assert frames == 352 * blocks and measured == pytest.approx(rate, rel=0.005)
+    assert re.search(r"Arrival:   [\d.]+ ms late \(median\), [\d.]+ ms \(99%\)", out)
+    assert "Line:      error " in out and "Mute:      muted, and on again 0.5 s later" in out
+    assert Speakers.calls == ["mute", "restore"]
+    assert ("Result:    OK" in out) == (code == 0)
+
+
+def test_doctor_sounds_figures_are_the_lines():
+    from mirrorbridge import cli
+
+    exact = [(352, 7 * NS + (k + 1) * 352 * NS // R, k == 0) for k in range(500)]
+    figures = cli._line_figures(exact)  # pylint: disable=protected-access
+    assert figures["rate"] == pytest.approx(R, rel=1e-6) and figures["frames"] == 500 * 352
+    assert figures["opened"] == 1 and figures["late_p99"] == 0 and figures["error_max"] == 0
+    assert (figures["inserted"], figures["deleted"], figures["filled_ms"], figures["kept_ms"]) == (0, 0, 0, 0)
+    # A card 1% fast: the line takes samples out to stay on time.
+    fast = [(n, 7 * NS + (arrived - 7 * NS) * 100 // 101, fresh) for n, arrived, fresh in exact]
+    figures = cli._line_figures(fast)  # pylint: disable=protected-access
+    assert figures["rate"] == pytest.approx(R * 1.01, rel=1e-4) and figures["deleted"] > 0
+    assert cli._line_figures([])["rate"] == 0  # pylint: disable=protected-access

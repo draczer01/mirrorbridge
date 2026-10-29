@@ -8,6 +8,7 @@ import dataclasses
 import itertools
 import logging
 import os
+import re
 import statistics
 import threading
 import time
@@ -816,3 +817,88 @@ async def test_a_tv_that_closes_the_session_when_the_sound_starts_is_mirrored_wi
     else:
         assert run.last == (State.STOPPED, "The TV ended screen mirroring")
     assert profiles.load("fake-tv").sound == profiles.SOUND_OFF
+
+
+# -- mirror --sound-trial ------------------------------------------------------------------------------
+
+
+def _command_line(tv, monkeypatch, answers: list[str]) -> list[str]:
+    """The mirror command with the fake TV for its device, and `answers` for its questions, in
+    turn. Returns the questions it asked."""
+    from fake_mirror_tv import CREDENTIALS
+    from pyatv.conf import AppleTV, ManualService
+    from pyatv.const import Protocol
+
+    from mirrorbridge import cli
+    from mirrorbridge.devices import Device
+
+    _ffmpeg()
+    SETTINGS.save()
+    conf = AppleTV("127.0.0.1", tv.profile.name)
+    conf.add_service(ManualService("fake-tv", Protocol.AirPlay, tv.port, {"features": "0x7F8AD0,0x38BCF46",
+                                                                          "srcvers": "377.40.00"},
+                                   credentials=CREDENTIALS))
+    device = Device(conf)
+    asked: list[str] = []
+    left = list(answers)
+
+    async def choose(_manager, _args):
+        return device
+
+    async def prompt(text, secret=False, choices=None):
+        asked.append(text)
+        return left.pop(0)
+
+    monkeypatch.setattr(cli, "_choose", choose)
+    monkeypatch.setattr(cli, "_prompt", prompt)
+    return asked
+
+
+HEARD = "Did you hear one beep a second? [y/n/q] "
+
+
+@pytest.mark.parametrize("answers, questions, tries, code", [
+    (["y"], 1, 1, 0),  # heard the default way: kept for the TV
+    (["n", "y"], 2, 2, 0),  # heard with VOLUME=-20: not kept, since a session does not send that
+    (["maybe", "q"], 2, 1, 1),  # asked again, then stopped
+])
+async def test_the_sound_trial_tries_each_way_until_the_tv_beeps(tv, monkeypatch, caplog, capsys, answers,
+                                                                 questions, tries, code):
+    from mirrorbridge import cli
+
+    caplog.set_level(logging.INFO, "mirrorbridge")
+    asked = _command_line(tv, monkeypatch, answers)
+    args = cli.build_parser().parse_args(["mirror", "-d", "TCL", "--sound-trial", "--seconds", "1.5"])
+    assert await cli.cmd_mirror(args) == code
+    assert asked == [HEARD] * questions
+    streams = [audio for audio in tv.audios if audio.datagrams]
+    assert len(streams) == tries and all(audio.packets and audio.errors == [] for audio in streams)
+    assert [(int(number), name) for number, name in re.findall(r"Sound trial (\d+) \(([^;]+); ", caplog.text)] == [
+        (1, "default"), (2, "VOLUME=-20")][:tries]
+    assert "MIRRORBRIDGE_MIRROR_SOUND_TONE=1" in caplog.text and "; sent: " in caplog.text
+    assert ("SET_PARAMETER volume -20 dB" in caplog.text) == (tries == 2)
+    out = capsys.readouterr().out
+    saved = profiles.load("fake-tv")  # the trial's sessions save nothing of their own
+    if answers == ["y"]:
+        assert "TCL 55QM7L beeped with try 1 (default)." in out and "Kept for TCL 55QM7L" in out
+        assert saved.sound == profiles.SOUND_HEARD and saved.ordering == MEDIA_FIRST
+    else:
+        assert saved is None
+    assert ("Sound trial stopped." in out) == (code == 1)
+
+
+async def test_the_sound_trial_has_the_tv_turned_down_before_raw_pcm(tv, monkeypatch, caplog):
+    from mirrorbridge import cli
+
+    caplog.set_level(logging.INFO, "mirrorbridge")
+    monkeypatch.setattr(cli, "SOUND_TRIAL", [("default", {}), ("CODEC=pcm", {"codec": "pcm"}),
+                                             ("CODEC=pcmle", {"codec": "pcmle"})])
+    asked = _command_line(tv, monkeypatch, ["n", "", "n", "n"])
+    args = cli.build_parser().parse_args(["mirror", "-d", "TCL", "--sound-trial", "--seconds", "1"])
+    assert await cli.cmd_mirror(args) == 1
+    assert asked == [HEARD, "Turn the TV volume down to about 10 now (raw PCM in the wrong byte order is loud "
+                            "noise), then press Enter ", HEARD, HEARD]
+    first, pcm, pcmle = [audio for audio in tv.audios if audio.datagrams]
+    assert (first.stream["ct"], pcm.stream["ct"], pcmle.stream["ct"]) == (2, 1, 1)
+    assert pcm.packets and pcm.errors == [] and pcmle.packets and pcmle.errors == []
+    assert profiles.load("fake-tv") is None
