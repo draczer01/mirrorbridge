@@ -48,7 +48,8 @@ def _device(service) -> Optional[CastDevice]:
     if service.address is None or not service.port:
         return None
     props = {str(k).lower(): str(v) for k, v in dict(service.properties).items()}
-    name = props.get("fn") or service.name
+    # Without fn= (a friendly name), the instance name is an id such as "1001B026D756D451".
+    name = props.get("fn") or props.get("md") or "Google Cast device"
     return CastDevice(name=name, host=str(service.address), port=service.port, identifier=props.get("id", ""),
                       model=props.get("md", ""), properties=props)
 

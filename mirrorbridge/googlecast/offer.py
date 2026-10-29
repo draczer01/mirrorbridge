@@ -6,7 +6,9 @@ frame rate it will send; the receiver answers with the UDP port to send to, whic
 it takes (sendIndexes) and its own SSRCs for their RTCP, and limits it wants kept
 (constraints). These are the fields Chrome's mirroring sends
 (components/mirroring/service/session.cc), with Chrome's payload types: 96 for video,
-whatever the codec, because some Android TV receivers take nothing else.
+whatever the codec, and 127 for audio, because some Android TV receivers take nothing else.
+The audio (Opus, 48 kHz stereo, a frame every 10 ms) uses the video's AES key and IV mask,
+as Chrome's does.
 """
 
 from __future__ import annotations
@@ -16,10 +18,15 @@ import random
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .rtp import VIDEO_CLOCK
+from .rtp import AUDIO_CLOCK, VIDEO_CLOCK
 
 VIDEO_PAYLOAD_TYPE = 96
 VIDEO_SSRC = range(500001, 1000001)  # Chrome's range for video SSRCs
+AUDIO_PAYLOAD_TYPE = 127
+AUDIO_SSRC = range(1, 500001)
+VIDEO_INDEX, AUDIO_INDEX = 0, 1
+AUDIO_CHANNELS = 2
+AUDIO_BPS = 60 * 100 + AUDIO_CLOCK * AUDIO_CHANNELS  # Chrome's "auto" for 100 frames a second: 102 kbps
 
 
 @dataclass
@@ -33,11 +40,15 @@ class VideoOffer:
     key: bytes = field(default_factory=lambda: os.urandom(16))
     iv_mask: bytes = field(default_factory=lambda: os.urandom(16))
     codec: str = "h264"
+    audio: bool = False
+    audio_ssrc: int = field(default_factory=lambda: random.choice(AUDIO_SSRC))
+    audio_bps: int = AUDIO_BPS
+    audio_delay_ms: Optional[int] = None  # the sound's targetDelay, if not the picture's
 
     def message(self) -> dict:
         """The OFFER (seqNum is added when it is sent)."""
         stream = {
-            "index": 0,
+            "index": VIDEO_INDEX,
             "type": "video_source",
             "codecName": self.codec,
             "rtpProfile": "cast",
@@ -53,8 +64,26 @@ class VideoOffer:
             "maxBitRate": self.kbps * 1000,
             "resolutions": [{"width": self.width, "height": self.height}],
         }
+        streams = [stream]
+        if self.audio:
+            streams.append({
+                "index": AUDIO_INDEX,
+                "type": "audio_source",
+                "codecName": "opus",
+                "rtpProfile": "cast",
+                "rtpPayloadType": AUDIO_PAYLOAD_TYPE,
+                "ssrc": self.audio_ssrc,
+                "targetDelay": self.audio_delay_ms or self.delay_ms,
+                "aesKey": self.key.hex(),
+                "aesIvMask": self.iv_mask.hex(),
+                "timeBase": f"1/{AUDIO_CLOCK}",
+                "receiverRtcpEventLog": True,
+                "bitRate": self.audio_bps,
+                "sampleRate": AUDIO_CLOCK,
+                "channels": AUDIO_CHANNELS,
+            })
         return {"type": "OFFER", "offer": {"castMode": "mirroring", "receiverGetStatus": True,
-                                           "supportedStreams": [stream]}}
+                                           "supportedStreams": streams}}
 
 
 @dataclass
@@ -67,6 +96,8 @@ class Answer:
     max_kbps: Optional[int] = None
     max_delay_ms: Optional[int] = None
     display: Optional[tuple[int, int]] = None
+    audio_receiver_ssrc: Optional[int] = None  # None: the receiver took no audio
+    audio_max_bps: Optional[int] = None
     raw: dict = field(default_factory=dict)
 
 
@@ -89,7 +120,7 @@ def _number(value) -> Optional[float]:
     return None
 
 
-def parse_answer(message: dict, index: int = 0) -> Answer:
+def parse_answer(message: dict, index: int = VIDEO_INDEX, audio_index: int = AUDIO_INDEX) -> Answer:
     if message.get("type") != "ANSWER":
         raise AnswerError(f"the receiver answered {message.get('type')!r}, not ANSWER")
     if message.get("result") not in (None, "ok"):
@@ -106,6 +137,11 @@ def parse_answer(message: dict, index: int = 0) -> Answer:
     if not isinstance(port, int) or not 0 < port < 65536:
         raise AnswerError(f"the ANSWER names no UDP port ({port!r})")
     out = Answer(udp_port=port, receiver_ssrc=int(ssrcs[indexes.index(index)]), raw=answer)
+    if audio_index in indexes:
+        out.audio_receiver_ssrc = int(ssrcs[indexes.index(audio_index)])
+    audio = (answer.get("constraints") or {}).get("audio") or {}
+    if isinstance(audio.get("maxBitRate"), int) and audio["maxBitRate"] > 0:
+        out.audio_max_bps = audio["maxBitRate"]
     video = (answer.get("constraints") or {}).get("video") or {}
     dims = video.get("maxDimensions") or {}
     if isinstance(dims.get("width"), int) and isinstance(dims.get("height"), int):

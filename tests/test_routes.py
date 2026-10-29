@@ -131,8 +131,8 @@ def test_the_big_button_tries_the_next_way_when_one_fails(controller):
     _settle()
     assert controller.started == [routes.AIRPLAY_MIRROR, routes.CAST_MIRROR]  # nothing said, the next way
     controller._route_worked()  # pylint: disable=protected-access  # the picture reached the TV
-    assert controller.routes.last_worked(tv) == routes.CAST_MIRROR
-    assert controller.plan()[0] == routes.CAST_MIRROR  # first, the next time
+    assert controller.routes.last_worked(tv) == ""  # Google Cast's CASTING is no proof of a picture
+    assert controller.plan()[0] == routes.CAST_MIRROR  # but the TV refused AirPlay: first, the next time
     assert controller.primary_action() == "mirror"
     assert controller.device_line(controller.selected_screen) == "Ready"
 
@@ -167,3 +167,81 @@ def test_a_tv_only_google_cast_found_can_be_chosen(controller):
     assert controller.selected_screen.name == "Chromecast" and controller.selected_device is None
     controller.start_primary()
     assert controller.started == [routes.CAST_MIRROR]
+
+
+def test_google_cast_reaching_the_tv_is_not_proof_of_a_picture(history):
+    """On the TCL, Google Cast mirroring reached CASTING with the TV black: it is counted, but it
+    does not become the way to try first."""
+    tv = routes.Screen(airplay=_device(), cast=_cast())
+    history.worked(tv.identifier, routes.CAST_MIRROR)
+    assert history.last_worked(tv.identifier) == ""
+    assert routes.plan(tv, history)[0] == routes.AIRPLAY_MIRROR
+
+
+def test_nothing_on_the_tv_tries_the_next_way(controller, monkeypatch):
+    controller.devices, controller.casts = [_device()], [_cast()]
+    controller.settings.last_device_id = controller.devices[0].identifier
+    tv = controller.selected_screen.identifier
+    assert not controller.can_try_another_way()  # nothing running
+    controller.start_primary()
+    controller._route_worked()  # pylint: disable=protected-access
+    monkeypatch.setattr(type(controller), "is_active", property(lambda self: True))
+    assert controller.can_try_another_way()
+
+    controller.try_another_way()  # the person sees nothing on the TV
+    assert controller.routes.last(tv, routes.AIRPLAY_MIRROR) == "failed"
+    assert controller._go_on()  # pylint: disable=protected-access  # once the session has stopped
+    _settle()
+    assert controller.started == [routes.AIRPLAY_MIRROR, routes.CAST_MIRROR]
+    assert controller.plan()[-1] == routes.AIRPLAY_MIRROR  # last for this TV from now on
+
+    controller.try_another_way()
+    controller.stop_cast()  # Stop wins: nothing else starts
+    assert not controller._go_on()  # pylint: disable=protected-access
+
+
+def test_a_receiver_named_by_its_serial_number_gets_a_readable_name():
+    box = routes.Screen(cast=CastDevice(name="1001B026D756D451", host="192.168.1.2", identifier="x", model="IZZI BOX"))
+    assert box.name == "IZZI BOX (192.168.1.2)"
+    assert routes.Screen(cast=CastDevice(name="1001B026D756D451", host="192.168.1.2")).name == "Google Cast (192.168.1.2)"
+    assert routes.Screen(cast=_cast()).name == "TCL 55QM7L"
+
+
+def test_google_cast_is_confirmed_by_the_frames_the_tv_showed(controller, monkeypatch):
+    from types import SimpleNamespace
+
+    controller.devices, controller.casts = [_device()], [_cast()]
+    controller.settings.last_device_id = controller.devices[0].identifier
+    tv = controller.selected_screen.identifier
+    controller.routes.failed(tv, routes.AIRPLAY_MIRROR, "refused")  # Google Cast goes first
+    running = []
+    monkeypatch.setattr(type(controller), "is_active", property(lambda self: bool(running)))
+
+    controller.start_primary()
+    running.append(True)
+    assert controller.started == [routes.CAST_MIRROR]
+    controller.session = SimpleNamespace(frames_shown=120, frames_reported=True, codec="vp8")
+    controller._route_worked()  # pylint: disable=protected-access
+    assert controller.routes.last_worked(tv) == ""  # not yet: the TV has not said
+    for unsure in (SimpleNamespace(frames_shown=0, frames_reported=False, codec="vp8"),  # no event log
+                   SimpleNamespace(frames_shown=120, frames_reported=True, codec="h264")):  # H.264 counts black frames
+        saved, controller.session = controller.session, unsure
+        controller._check_shown(unsure, controller._attempt)  # pylint: disable=protected-access
+        assert controller.routes.last_worked(tv) == "" and controller.routes.last(tv, routes.CAST_MIRROR) != "failed"
+        controller.session = saved
+    controller._check_shown(controller.session, controller._attempt)  # pylint: disable=protected-access
+    assert controller.routes.last_worked(tv) == routes.CAST_MIRROR
+
+    # A black TV: none shown, so the next way starts
+    controller.session = SimpleNamespace(frames_shown=0, frames_reported=True, codec="vp8", stop=lambda: None)
+    monkeypatch.setattr(controller.runner, "submit", lambda *a, **k: None)
+    running.clear()
+    controller.start_primary()
+    running.append(True)
+    controller._route_worked()  # pylint: disable=protected-access
+    controller._check_shown(controller.session, controller._attempt)  # pylint: disable=protected-access
+    assert controller.routes.last(tv, routes.CAST_MIRROR) == "failed" and controller.routes.last_worked(tv) == ""
+    assert controller._go_on()  # pylint: disable=protected-access  # once the session has stopped
+    _settle()
+    assert controller.started[-1] == routes.AIRPLAY_CAST
+    controller.session = None

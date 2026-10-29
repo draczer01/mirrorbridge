@@ -2,8 +2,8 @@
 TV with Chromecast built-in, as Chrome mirrors a tab, a fraction of a second behind.
 
     pick the encoder -> TLS to port 8009 -> LAUNCH the mirroring receiver (APP_ID)
-    -> connect to it -> OFFER (H.264, the AES key, the delay) -> ANSWER (the UDP port)
-    -> FFmpeg -> each frame Annex B, encrypted, in RTP packets -> lost packets again -> STOP
+    -> connect to it -> OFFER (VP8 or H.264, Opus, the AES key, the delay) -> ANSWER (the
+    UDP port) -> FFmpeg -> each frame encrypted, in RTP packets -> lost packets again -> STOP
 
 It speaks to the tray and the command line as the other sessions do (session.CastSession,
 mirror.MirrorSession): run() until the session ends, stop() from anywhere on the loop, and
@@ -16,6 +16,12 @@ next keyframe, which it can show without the ones before it, so it is back to re
 FFmpeg is started as for AirPlay mirroring (mirror.source), with the same fallbacks when it
 ends before its first frame: GDI capture, then the CPU encoder. With Extend screen on, the
 virtual screen is what is sent, as for AirPlay mirroring.
+
+The sound (googlecast.audio) is a second stream on the same socket, from a second FFmpeg:
+the PC's audio, or a beep with the test pattern. A PC without system audio capture, or a
+receiver that takes no audio, gets the picture alone, and so does a session whose sound
+FFmpeg ends: the picture goes on. While the TV gets the PC's sound, the PC's own speakers
+are muted (settings.mute_pc_audio, speakers.MutedSpeakers), and put back at the end.
 """
 
 from __future__ import annotations
@@ -27,7 +33,9 @@ import os
 import threading
 from typing import Optional
 
+from .. import audio as system_audio
 from .. import extended, ffmpeg, vdisplay
+from ..speakers import MutedSpeakers
 from ..config import Settings
 from ..mirror.clock import NS, now_ns
 from ..mirror.flv import CONFIG, FRAME
@@ -38,14 +46,17 @@ from ..session import State, StatusCallback
 from ..text import Text
 from .channel import NS_RECEIVER, NS_WEBRTC, CastChannel, ChannelError
 from .discovery import CastDevice
-from .offer import VIDEO_PAYLOAD_TYPE, AnswerError, VideoOffer, parse_answer
-from .rtp import FrameCipher, Packetizer
-from .sender import VideoSender
+from .audio import AudioTimer, OpusSource, choose_lead, has_opus, opus_command, opus_samples
+from .offer import AUDIO_BPS, AUDIO_PAYLOAD_TYPE, VIDEO_PAYLOAD_TYPE, AnswerError, VideoOffer, parse_answer
+from .rtp import AUDIO_CLOCK, VIDEO_CLOCK, FrameCipher, Packetizer
+from .sender import CastSocket, Clock, StreamSender
+from .vp8 import ENCODER as VP8_ENCODER
+from .vp8 import IvfSource, vp8_command
 
 _LOGGER = logging.getLogger(__name__)
 
 APP_ID = "0F5096E8"  # Chrome's audio and video mirroring receiver
-DEFAULT_DELAY_MS = 200  # Chrome asks for 400; a LAN gets lost packets again well within 200
+DEFAULT_DELAY_MS = 400  # as Chrome asks; the TCL closed the connection after 2 s at 200
 MIN_DELAY_MS, MAX_DELAY_MS = 50, 2000
 CATCH_UP_MS = 500  # how far past its delay the receiver may fall before frames are dropped
 QUEUE_SECONDS = 2
@@ -58,7 +69,15 @@ RTCP_SECONDS = 10  # from the first frame (or the last RTCP) until the receiver 
 STATS_SECONDS = 5
 SUPERVISE_SECONDS = 0.25
 STOP_SECONDS = 3
+AUDIO_QUEUE = 100  # Opus frames (a second) waiting to be sent, at most
 DELAY_ENV = "MIRRORBRIDGE_CAST_DELAY_MS"  # a test value for the delay, from a .bat
+CODEC_ENV = "MIRRORBRIDGE_CAST_CODEC"  # h264 or vp8, from a .bat
+AUDIO_DELAY_ENV = "MIRRORBRIDGE_CAST_AUDIO_DELAY_MS"  # a test value for the sound's own delay
+# The sound's own targetDelay. The TCL shows the picture at once whatever its delay, but plays
+# the sound at its delay plus about 0.4 s of its own: 100 ms brings it nearest the picture.
+AUDIO_DELAY_MS = 100
+H264, VP8 = "h264", "vp8"
+CODECS = (H264, VP8)
 
 
 class CastMirrorError(Exception):
@@ -74,6 +93,13 @@ def choose_delay(wanted: Optional[int]) -> int:
         except ValueError:
             wanted = 0
     return max(MIN_DELAY_MS, min(MAX_DELAY_MS, wanted or DEFAULT_DELAY_MS))
+
+
+def choose_codec(wanted: Optional[str]) -> str:
+    """The codec to send: `wanted`, the test value in CODEC_ENV, or VP8: the TCL's receiver takes
+    H.264, says it decodes and shows every frame, and leaves the screen black."""
+    wanted = (wanted or os.environ.get(CODEC_ENV, "") or VP8).strip().lower()
+    return wanted if wanted in CODECS else VP8
 
 
 def find_app(status: dict) -> Optional[dict]:
@@ -92,6 +118,8 @@ class GoogleCastMirror:
         source: str = DESKTOP,
         seconds: Optional[float] = None,
         delay_ms: Optional[int] = None,
+        codec: Optional[str] = None,
+        audio: Optional[bool] = None,
         max_canvas: tuple[int, int] = MAX_CANVAS,
     ) -> None:
         self.device = device
@@ -100,7 +128,10 @@ class GoogleCastMirror:
         self.source = source
         self.seconds = seconds
         self.delay_ms = choose_delay(delay_ms)
+        self.codec = choose_codec(codec)
         self.max_canvas = max_canvas
+        self.audio = settings.capture_audio if audio is None else audio  # wanted
+        self.sound = False  # being sent
         self.state = State.IDLE
         self.error: Optional[Exception] = None
         self.finished = threading.Event()
@@ -116,7 +147,15 @@ class GoogleCastMirror:
         self._channel: Optional[CastChannel] = None
         self._app: Optional[dict] = None
         self._app_gone = False
-        self._sender: Optional[VideoSender] = None
+        self._sender: Optional[StreamSender] = None
+        self._audio_sender: Optional[StreamSender] = None
+        self._socket: Optional[CastSocket] = None
+        self._audio_bps = AUDIO_BPS
+        self._audio_ffmpeg: Optional[OpusSource] = None
+        self._feeder: Optional[system_audio.LoopbackFeeder] = None
+        self._audio_task: Optional[asyncio.Task] = None
+        self._timer: Optional[AudioTimer] = None
+        self._speakers = MutedSpeakers()
         self._ffmpeg: Optional[FFmpegSource] = None
         self._frames: Optional[FrameQueue] = None
         self._capture: tuple = ()
@@ -127,7 +166,24 @@ class GoogleCastMirror:
         self._length_size = 4
         self._first_sent_ns: Optional[int] = None
         self._dropped = 0
+        self._shown = 0
+        self._reported = False
         self._xscreen: Optional[extended.ExtendedScreen] = None
+
+    @property
+    def frames_shown(self) -> int:
+        """Frames the receiver's own event log says it showed: with VP8, the proof the picture is
+        on the TV (frames sent, even acknowledged, can still leave it black). With H.264 the TCL
+        reports every frame shown on a black screen."""
+        sender = self._sender
+        return sender.stats.played if sender is not None else self._shown
+
+    @property
+    def frames_reported(self) -> bool:
+        """Whether the receiver sends an event log at all: without one, frames_shown stays 0
+        even with the picture on the TV."""
+        sender = self._sender
+        return sender.stats.logs > 0 if sender is not None else self._reported
 
     def _set(self, state: State, message: str = "") -> None:
         self.state = state
@@ -179,7 +235,10 @@ class GoogleCastMirror:
         s = self.settings
         self._set(State.STARTING, Text("checking_ffmpeg", "Checking FFmpeg and encoders"))
         ff = ffmpeg.find_ffmpeg(s.ffmpeg_path)
-        encoder = await loop.run_in_executor(None, ffmpeg.pick_encoder, ff, s.encoder, True)
+        if self.codec == VP8:
+            encoder = VP8_ENCODER
+        else:
+            encoder = await loop.run_in_executor(None, ffmpeg.pick_encoder, ff, s.encoder, True)
         backend, monitor, region = TEST_PATTERN, None, None
         if self.source == DESKTOP:
             if extended.wanted(s):
@@ -191,6 +250,8 @@ class GoogleCastMirror:
                 if s.window_title and s.capture_backend != "test":
                     monitor, region = ffmpeg.window_region(s.window_title, monitors)
             backend = await loop.run_in_executor(None, ffmpeg.pick_capture_backend, ff, s, monitor, region)
+        if self.audio:
+            self.audio = await loop.run_in_executor(None, self._audio_possible, ff)
 
         self._set(State.CONNECTING, self.device.name)
         await self._set_up()
@@ -199,9 +260,29 @@ class GoogleCastMirror:
         self._sources = [(backend, encoder)]
         if backend == "ddagrab":
             self._sources.append(("gdigrab", encoder))
-        if encoder != "libx264":
+        if encoder not in ("libx264", VP8_ENCODER):
             self._sources.append((self._sources[-1][0], "libx264"))
         self._start_source()
+        if self._audio_sender is not None:
+            self._start_audio()
+
+    def _audio_delay(self) -> int:
+        try:
+            wanted = int(os.environ.get(AUDIO_DELAY_ENV, "") or 0)
+        except ValueError:
+            wanted = 0
+        return max(MIN_DELAY_MS, min(MAX_DELAY_MS, self.delay_ms, wanted or AUDIO_DELAY_MS))
+
+    def _audio_possible(self, ff: str) -> bool:
+        if not has_opus(ff):
+            _LOGGER.warning("This FFmpeg has no Opus encoder; mirroring without sound")
+            return False
+        if self.source == DESKTOP:
+            ok, info = system_audio.loopback_available()
+            if not ok:
+                _LOGGER.warning("%s - mirroring without sound", info)
+                return False
+        return True
 
     async def _virtual_screen(self) -> ffmpeg.Monitor:
         self._set(State.EXTENDING)
@@ -246,7 +327,8 @@ class GoogleCastMirror:
 
         width, height = canvas_limit(s, self.max_canvas)
         offer = VideoOffer(width=width, height=height, fps=max(1, min(60, s.framerate or 30)),
-                           kbps=s.video_bitrate_kbps, delay_ms=self.delay_ms)
+                           kbps=s.video_bitrate_kbps, delay_ms=self.delay_ms, codec=self.codec, audio=self.audio,
+                           audio_delay_ms=self._audio_delay())
         try:
             reply = await channel.request(NS_WEBRTC, offer.message(), app["transportId"], timeout=ANSWER_SECONDS,
                                           key="seqNum")
@@ -266,14 +348,26 @@ class GoogleCastMirror:
         if answer.max_kbps and answer.max_kbps < s.video_bitrate_kbps:
             _LOGGER.info("The receiver takes at most %d kbps", answer.max_kbps)
             self.settings = s = dataclasses.replace(s, video_bitrate_kbps=max(300, answer.max_kbps))
-        _LOGGER.info("Sending %dx%d at %d fps, %d kbps, shown %d ms after capture", width, height, self.fps,
-                     s.video_bitrate_kbps, self.delay_ms)
+        _LOGGER.info("Sending %s %dx%d at %d fps, %d kbps, shown %d ms after capture", self.codec, width, height,
+                     self.fps, s.video_bitrate_kbps, self.delay_ms)
 
-        sender = VideoSender(FrameCipher(offer.key, offer.iv_mask), Packetizer(offer.ssrc, VIDEO_PAYLOAD_TYPE),
-                             answer.receiver_ssrc)
+        clock, cipher = Clock(), FrameCipher(offer.key, offer.iv_mask)
+        sender = StreamSender(cipher, Packetizer(offer.ssrc, VIDEO_PAYLOAD_TYPE), answer.receiver_ssrc, clock,
+                              VIDEO_CLOCK)
+        streams = [sender]
+        if self.audio and answer.audio_receiver_ssrc is None:
+            _LOGGER.info("%s took no sound; mirroring the picture alone", self.device.name)
+        elif self.audio:
+            self._audio_bps = min(AUDIO_BPS, answer.audio_max_bps or AUDIO_BPS)
+            self._audio_sender = StreamSender(cipher, Packetizer(offer.audio_ssrc, AUDIO_PAYLOAD_TYPE),
+                                              answer.audio_receiver_ssrc, clock, AUDIO_CLOCK)
+            streams.append(self._audio_sender)
+            _LOGGER.info("Sending Opus at %d kbps, shown %d ms after capture, taken as recorded %d ms before it "
+                         "comes", self._audio_bps // 1000, offer.audio_delay_ms or self.delay_ms, choose_lead(None))
+        sock = CastSocket(streams)
         loop = asyncio.get_running_loop()
-        await loop.create_datagram_endpoint(lambda: sender, remote_addr=(self.device.host, answer.udp_port))
-        self._sender = sender
+        await loop.create_datagram_endpoint(lambda: sock, remote_addr=(self.device.host, answer.udp_port))
+        self._socket, self._sender = sock, sender
 
     def _on_message(self, namespace: str, source: str, payload: dict) -> None:
         kind = payload.get("type")
@@ -295,8 +389,11 @@ class GoogleCastMirror:
         ff, monitor, region = self._capture
         backend, encoder = self._using = self._sources.pop(0)
         width, height = self.canvas
-        cmd = build_command(ff, self.settings, source=self.source, encoder=encoder, width=width, height=height,
-                            fps=self.fps, backend=backend, monitor=monitor, region=region)
+        cmd = build_command(ff, self.settings, source=self.source, encoder="libx264" if encoder == VP8_ENCODER
+                            else encoder, width=width, height=height, fps=self.fps, backend=backend, monitor=monitor,
+                            region=region)
+        if encoder == VP8_ENCODER:
+            cmd = vp8_command(cmd, self.settings.video_bitrate_kbps, self.fps, self.settings.mirror_keyframe_seconds)
         self.encoder = encoder
         self._set(State.STARTING, Text("encoder_via", "{encoder} via {backend}",
                                        encoder=ffmpeg.ENCODER_LABELS.get(encoder, encoder),
@@ -310,12 +407,55 @@ class GoogleCastMirror:
             except RuntimeError:
                 pass
 
-        self._ffmpeg = FFmpegSource(cmd, hand_over)
+        self._ffmpeg = (IvfSource if encoder == VP8_ENCODER else FFmpegSource)(cmd, hand_over)
         self._ffmpeg.start()
 
     @staticmethod
     def _stop_ffmpeg(source: FFmpegSource) -> None:
         source.stop()
+
+    def _start_audio(self) -> None:
+        loop = asyncio.get_running_loop()
+        port = system_audio.free_port() if self.source == DESKTOP else None
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def hand_over(unit: Optional[Unit]) -> None:  # from FFmpeg's pipe thread
+            def put() -> None:
+                if unit is None or queue.qsize() < AUDIO_QUEUE:
+                    queue.put_nowait(unit)
+            try:
+                loop.call_soon_threadsafe(put)
+            except RuntimeError:
+                pass
+
+        self._audio_ffmpeg = OpusSource(opus_command(self._capture[0], self._audio_bps, port), hand_over)
+        self._audio_ffmpeg.start()
+        if port is not None:
+            self._feeder = system_audio.LoopbackFeeder(port)
+            self._feeder.start()
+        self._audio_task = asyncio.ensure_future(self._pump_audio(queue))
+
+    async def _pump_audio(self, queue: asyncio.Queue) -> None:
+        """The Opus frames to the receiver, from the first video frame on, until FFmpeg ends."""
+        sender = self._audio_sender
+        assert sender is not None
+        timer = self._timer = AudioTimer(sender.clock)
+        while True:
+            unit = await queue.get()
+            if unit is None:
+                source = self._audio_ffmpeg
+                _LOGGER.warning("The sound stopped; the picture goes on. %s", source.errors() if source else "")
+                self.sound = False
+                self._speakers.restore()
+                return
+            if self._first_sent_ns is None:
+                continue
+            rtp_time = timer.stamp(unit.arrived_ns, opus_samples(unit.data))
+            if rtp_time is not None:
+                sender.send_frame(unit.data, True, unit.arrived_ns, rtp_time=rtp_time)
+                if not self.sound and self.source == DESKTOP and self.settings.mute_pc_audio:
+                    self._speakers.mute()  # the TV has the sound: no echo from the PC
+                self.sound = True
 
     # -- sending ---------------------------------------------------------------
 
@@ -342,9 +482,12 @@ class GoogleCastMirror:
                 continue
             if unit.kind != FRAME:
                 continue
-            nals, sps, pps = frame_nals(split_avcc(unit.data, self._length_size))
-            self._sps, self._pps = sps or self._sps, pps or self._pps
-            keyframe = unit.keyframe or is_idr(nals)
+            if self.codec == VP8:
+                nals, keyframe = [], unit.keyframe
+            else:
+                nals, sps, pps = frame_nals(split_avcc(unit.data, self._length_size))
+                self._sps, self._pps = sps or self._sps, pps or self._pps
+                keyframe = unit.keyframe or is_idr(nals)
             if frames.take_trimmed():
                 waiting_keyframe = True
             if not keyframe and self._behind(sender, unit.arrived_ns):
@@ -352,10 +495,10 @@ class GoogleCastMirror:
             if waiting_keyframe and not keyframe:
                 self._dropped += 1
                 continue
-            if keyframe and not self._sps:
+            if keyframe and not self._sps and self.codec == H264:
                 continue  # no parameter sets yet: nothing the receiver could decode
             waiting_keyframe = False
-            data = to_annexb((self._sps + self._pps if keyframe else []) + nals)
+            data = unit.data if self.codec == VP8 else to_annexb((self._sps + self._pps if keyframe else []) + nals)
             sender.send_frame(data, keyframe, unit.arrived_ns)
             if self._first_sent_ns is None:
                 self._first_sent_ns = now_ns()
@@ -367,7 +510,7 @@ class GoogleCastMirror:
                         pass
                 self._set(State.CASTING, self.device.name)
 
-    def _behind(self, sender: VideoSender, now: int) -> bool:
+    def _behind(self, sender: StreamSender, now: int) -> bool:
         """The receiver has fallen more than CATCH_UP_MS past its delay (once it says anything)."""
         oldest = sender.oldest_unacked_ns()
         if oldest is None or not sender.stats.feedbacks:
@@ -435,21 +578,40 @@ class GoogleCastMirror:
             return
         st = sender.stats
         _LOGGER.info("Cast: %d frames (%d keyframes, %d dropped), %.1f MB, %d packets sent again, %d waiting for "
-                     "the TV, %d lost by its count, %d keyframe requests, TV delay %d ms",
+                     "the TV, %d lost by its count, %d keyframe requests, TV delay %d ms; the TV decoded %d and "
+                     "showed %d (%d late, last with %s ms to spare)",
                      st.frames, st.keyframes, self._dropped, st.bytes / 1e6, st.resent, max(0, sender.in_flight()),
-                     st.lost_reported, st.plis, st.target_delay_ms)
+                     st.lost_reported, st.plis, st.target_delay_ms, st.decoded, st.played, st.played_late,
+                     st.spare_ms)
+        audio = self._audio_sender
+        if audio is not None:
+            st, timer = audio.stats, self._timer
+            _LOGGER.info("Cast sound: %d frames, %.2f MB, %d packets sent again, %d waiting for the TV; the TV "
+                         "played %d (%d late, last with %s ms to spare); count restarted %d times, %d frames left out",
+                         st.frames, st.bytes / 1e6, st.resent, max(0, audio.in_flight()), st.played, st.played_late,
+                         st.spare_ms, timer.restarts if timer else 0, timer.skipped if timer else 0)
 
     # -- the end -----------------------------------------------------------------
 
     async def _cleanup(self) -> None:
         loop = asyncio.get_running_loop()
-        source, self._ffmpeg = self._ffmpeg, None
-        if source is not None:
-            await loop.run_in_executor(None, self._stop_ffmpeg, source)
+        if self._audio_task is not None:
+            self._audio_task.cancel()
+        if self._feeder is not None:
+            self._feeder.stop()
+        for source in (self._ffmpeg, self._audio_ffmpeg):
+            if source is not None:
+                await loop.run_in_executor(None, self._stop_ffmpeg, source)
+        self._ffmpeg = self._audio_ffmpeg = None
         if self._sender is not None:
             self._log_stats()
-            self._sender.close()
-            self._sender = None
+            self._shown = self._sender.stats.played
+            self._reported = self._sender.stats.logs > 0
+        if self._socket is not None:
+            self._socket.close()
+        self._socket = self._sender = self._audio_sender = None
+        self.sound = False
+        self._speakers.restore()
         channel, self._channel = self._channel, None
         if channel is not None:
             if self._app is not None and not channel.closed.is_set() and not self._app_gone:
