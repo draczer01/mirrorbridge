@@ -42,6 +42,10 @@ CAST = b"CAST"
 CST2 = b"CST2"
 ALL_PACKETS = 0xFFFF  # a loss field: every packet of the frame
 LAST_PACKET = 0xFFFE  # a loss field: the frame's last packet
+RECEIVER_LOG = 2  # APP subtype of the receiver's event log
+# Event types of the receiver's log (rtcp_utility.cc), old per-media codes and the unified ones
+DECODED_EVENTS = {3, 6, 13}
+PLAYOUT_EVENTS = {2, 7, 12}
 
 
 def is_rtcp(packet: bytes) -> bool:
@@ -130,6 +134,8 @@ class Rtcp:
     feedback: Optional[CastFeedback] = None
     pli: bool = False
     report: Optional[dict] = None  # fraction lost, cumulative lost, jitter, last SR, delay since it
+    decoded: int = 0  # frames the receiver's event log says it decoded
+    played: list[int] = field(default_factory=list)  # ...and showed: ms to spare (negative: late)
     kinds: list[int] = field(default_factory=list)
 
 
@@ -179,8 +185,29 @@ def parse_rtcp(packet: bytes) -> Rtcp:
             out.feedback = _cast_feedback(body[8:]) or out.feedback
         elif kind == PT_PSFB and count == 1:
             out.pli = True
+        elif kind == PT_APP and count == RECEIVER_LOG and body[4:8] == CAST:
+            _receiver_log(body[8:], out)
         pos += size
     return out
+
+
+def _receiver_log(body: bytes, out: Rtcp) -> None:
+    """The receiver's event log: per frame, its RTP time, a time base and events of 4 bytes
+    (a delay or packet id, then 4 bits of type and 12 of time)."""
+    pos = 0
+    while pos + 8 <= len(body):
+        events = 1 + body[pos + 4]
+        pos += 8
+        for _ in range(events):
+            if pos + 4 > len(body):
+                return
+            delay, kind = struct.unpack_from(">hH", body, pos)
+            pos += 4
+            kind >>= 12
+            if kind in DECODED_EVENTS:
+                out.decoded += 1
+            elif kind in PLAYOUT_EVENTS:
+                out.played.append(delay)
 
 
 def expand(truncated: int, near: int) -> int:

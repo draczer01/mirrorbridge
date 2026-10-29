@@ -27,7 +27,7 @@ from cryptography.x509.oid import NameOID
 
 from mirrorbridge.googlecast.channel import (NS_CONNECTION, NS_HEARTBEAT, NS_RECEIVER, NS_WEBRTC, PLATFORM,
                                              decode_message, encode_message)
-from mirrorbridge.googlecast.rtp import ALL_PACKETS, CAST, PT_PSFB, PT_RR, PT_SR, FrameCipher, expand
+from mirrorbridge.googlecast.rtp import ALL_PACKETS, CAST, PT_APP, PT_PSFB, PT_RR, PT_SR, FrameCipher, expand
 from mirrorbridge.googlecast.session import APP_ID
 
 TRANSPORT = "web-5"
@@ -60,6 +60,7 @@ class _Video(asyncio.DatagramProtocol):
         self.seen: set[tuple[int, int]] = set()
         self.count = 0
         self.newest = -1
+        self.logged = -1
 
     def connection_made(self, transport) -> None:
         self.transport = transport
@@ -124,7 +125,16 @@ class _Video(asyncio.DatagramProtocol):
         body += b"\x00" * (-len(body) % 4)
         report = struct.pack(">BBHI", 0x80, PT_RR, 1, RECEIVER_SSRC)
         psfb = struct.pack(">BBH", 0x80 | 15, PT_PSFB, len(body) // 4) + body
-        self.transport.sendto(report + psfb, self.sender_addr)
+        app = b""
+        if tv.show_log and tv.acked > self.logged:
+            # The receiver's event log: the frames completed since the last one, decoded and shown
+            # with 50 ms to spare.
+            items = b"".join(struct.pack(">IIhHhH", frame_id * 3000, 1 << 24, 0, 13 << 12, 50, 12 << 12)
+                             for frame_id in range(self.logged + 1, tv.acked + 1))
+            self.logged = tv.acked
+            app_body = struct.pack(">I4s", RECEIVER_SSRC, CAST) + items
+            app = struct.pack(">BBH", 0x80 | 2, PT_APP, len(app_body) // 4) + app_body
+        self.transport.sendto(report + psfb + app, self.sender_addr)
 
 
 class FakeCastTV:
@@ -149,6 +159,7 @@ class FakeCastTV:
         self.resent_got = 0
         self.stopped = False
         self.silent = False  # send no RTCP at all
+        self.show_log = True  # send the receiver's event log (frames decoded and shown)
         self._server = None
         self._video = None
         self._video_transport = None
