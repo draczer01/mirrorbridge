@@ -7,9 +7,16 @@ screen as GET /info gives it (never up): the desktop on the graphics card (by Wi
 Capture when it must be scaled) or with the processor (capture.py, the capture chain), and
 encoded with ffmpeg.mirror_encoder_args: the encoder MirrorBridge picks for casts, with every
 option that makes it hold frames back turned off, and a keyframe every keyframe_seconds (0:
-only the first). FFmpeg's own queue of captured frames is
-kept short too (INPUT_QUEUE): when the encoder cannot keep up, capture waits (and the next
-picture is a newer one) instead of the frames piling up seconds late.
+only the first). Captured frames do not wait in FFmpeg either: ddagrab and gfxcapture run in
+the filter graph itself (-filter_complex, in_graph), so a frame is captured only when the filters
+are ready for it (and at most 2 wait for the encoder). A chain slower than the frame rate then
+gives fewer frames, each fresh, instead of as many late ones: as an input (-f lavfi -i), FFmpeg 7
+and later hold up to 10 frames between their input thread and the filters (8 packets, 2 frames),
+whatever -thread_queue_size says (only the muxer's queue takes it now). On Humberto's PC, with a
+full-screen video playing, the processor's chain made 54 of 60 fps, and as an input its frames
+came out 60 to 170 ms old, past the lead, so that frames were dropped and FFmpeg started again
+for a keyframe every 2 to 3 s. Inputs that are not filters (gdigrab; the test pattern, paced by
+-re) keep -thread_queue_size (INPUT_QUEUE), for an FFmpeg before 7.
 
 A thread of its own reads the pipe in large reads and hands each complete frame, with the time
 its last byte arrived, to the asyncio loop, where they wait in a FrameQueue.
@@ -44,7 +51,7 @@ SOURCES = (DESKTOP, TEST_PATTERN)
 READ_SIZE = 1 << 20
 STOP_SECONDS = 5
 STDERR_LINES = 30  # of FFmpeg's stderr, kept for errors() and the log
-INPUT_QUEUE = 2  # captured frames FFmpeg may hold before encoding them (its own default is 8)
+INPUT_QUEUE = 2  # frames an FFmpeg before 7 may hold of an input that is not a filter (its default is 8)
 
 
 @dataclass
@@ -138,14 +145,27 @@ def build_command(
         else:
             filters = capture.cpu_filters(prefilters, width, height, encoder, bt709=bt709)
     video_in = _paced(video_in, ff)
-    cmd = [ff, "-hide_banner", "-nostats", "-loglevel", "warning", "-thread_queue_size", str(INPUT_QUEUE), *video_in]
-    if filters:
-        cmd += ["-vf", ",".join(filters)]
+    cmd = [ff, "-hide_banner", "-nostats", "-loglevel", "warning"]
+    graph_source = in_graph(video_in)
+    if graph_source:
+        cmd += ["-filter_complex", ",".join([graph_source, *filters])]
+    else:
+        cmd += ["-thread_queue_size", str(INPUT_QUEUE), *video_in]
+        if filters:
+            cmd += ["-vf", ",".join(filters)]
     cmd += ["-an"]
     cmd += ffmpeg.mirror_encoder_args(encoder, kbps, rate, vbv_frames=vbv, keyframe_seconds=keyframe_seconds)
     cmd += output + _extra_args(extra)
     cmd += ["-flush_packets", "1", "-flvflags", "no_duration_filesize+no_metadata", "-f", "flv", "pipe:1"]
     return cmd
+
+
+def in_graph(video_in: list[str]) -> str:
+    """The source filter of an input that is only a lavfi filter (ddagrab, gfxcapture), to run in
+    the filter graph instead; "" for any other input (gdigrab, or one paced by -re)."""
+    if len(video_in) == 4 and video_in[:3] == ["-f", "lavfi", "-i"]:
+        return video_in[3]
+    return ""
 
 
 def _extra_args(extra: object) -> list[str]:
