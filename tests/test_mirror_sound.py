@@ -5,7 +5,9 @@ shairport-sync opens a packet (cryptography's ChaCha20-Poly1305) and pyatv's own
 import asyncio
 import dataclasses
 import hashlib
+import json
 import math
+import plistlib
 import random
 import struct
 import subprocess
@@ -976,3 +978,292 @@ async def test_the_tone_through_the_line_and_the_sender_is_heard_at_whole_second
         heard = audio.heard_ns(onset)
         assert abs(heard - (second * NS + gap * NS // R)) < 100_000  # the fade-in's 3 silent samples: 68 us
         assert abs(audio.heard_ns(onset, rule="D") - heard - 11025 * NS / R) <= 1
+
+
+# -- the type-96 SETUP, the TV's answer, /info and the saved verdict -----------------------------------------
+
+
+class _StubChannel:
+    """A control connection that answers each request with the next plist of `answers`."""
+
+    local_ip, remote_ip = "192.168.1.10", "192.168.1.20"
+    closed = out_of_step = False
+
+    def __init__(self, answers=(), headers=None) -> None:
+        self.answers = list(answers)
+        self.headers = headers or {}
+        self.requests = []
+
+    @staticmethod
+    def derive(salt, write, read):
+        return bytes(range(32)), bytes(range(32, 64))
+
+    async def request(self, method, uri, *, body=None, headers=None, content_type=None, timeout=10):
+        from pyatv.support.http import HttpResponse
+
+        self.requests.append((method, uri, body, content_type))
+        answer = self.answers.pop(0) if self.answers else {}
+        data = plistlib.dumps(answer, fmt=plistlib.FMT_BINARY) if answer else b""
+        return HttpResponse("RTSP", "1.0", 200, "OK", self.headers, data)
+
+
+class _SealedOtherwise:
+    """An AudioCipher whose key goes into the session's fields, not the stream's (as FairPlay's
+    would): what the seam must carry."""
+
+    name, overhead = "a test cipher", 0
+    made = []
+
+    def __init__(self, channel) -> None:
+        self.channel = channel
+        _SealedOtherwise.made.append(self)
+
+    def stream_fields(self):
+        return {}
+
+    def session_fields(self):
+        return {"ekey": bytes(72), "eiv": bytes(16)}
+
+    def seal(self, index, header, payload):
+        return payload
+
+
+def _negotiator(offer=None, answers=(), headers=None):
+    from mirrorbridge.mirror.control import Target
+    from mirrorbridge.mirror.negotiation import Negotiator
+
+    negotiator = Negotiator(Target("TV", "192.168.1.20"), timing_port=7880, audio_port=7881, audio=offer)
+    negotiator.channel = _StubChannel(answers, headers)
+    return negotiator
+
+
+def _todays_audio_stream(stream_id: int, lead_ms: int = 100) -> dict:
+    """The type-96 dict as it was before it carried sound, but for its random shk."""
+    return {"audioFormat": 0x40000, "audioMode": "default", "controlPort": 7881, "ct": 2,
+            "latencyMax": lead_ms * 44100 // 1000, "latencyMin": 0, "spf": 352, "sr": 44100,
+            "streamConnectionID": stream_id, "type": 96, "usingScreen": True}
+
+
+@pytest.mark.parametrize("lead", [100, 60, 200, 300])
+def test_the_audio_stream_is_as_it_was_by_default(lead):
+    from mirrorbridge.mirror.negotiation import AudioOffer, Plan
+
+    for offer in (None, AudioOffer(ap.ALAC_44100, "screen", ap.ms_to_samples(lead))):  # sound off; on, default knobs
+        stream = _negotiator(offer)._audio_stream(77, Plan(lead_ms=lead), ap.ChaChaShk(bytes(range(32))))
+        assert stream.pop("shk") == bytes(range(32)) and stream == _todays_audio_stream(77, lead)
+
+
+@pytest.mark.parametrize("changes,latencies,keys", [
+    ({"shape": "minmax"}, (4410, 4410), {"usingScreen": True}),
+    ({"shape": "apple"}, (3750, 3750), {"usingScreen": True}),
+    ({"shape": "media"}, (11025, 88200), {"isMedia": True, "supportsDynamicStreamID": False}),
+    ({"lat_min": 1, "lat_max": 6615}, (1, 6615), {"usingScreen": True}),
+    ({"shape": "apple", "lat_max": 9000}, (3750, 9000), {"usingScreen": True}),
+    ({"is_media": True}, (0, 4410), {"usingScreen": True, "isMedia": True}),
+    ({"redundant": 2}, (0, 4410), {"usingScreen": True, "redundantAudio": 2}),
+    ({"gap": 6174}, (0, 6174), {"usingScreen": True}),
+    ({"gap": 2205, "shape": "minmax"}, (2205, 2205), {"usingScreen": True}),
+])
+def test_the_audio_stream_takes_the_shapes_and_the_overrides(changes, latencies, keys):
+    from mirrorbridge.mirror.negotiation import AudioOffer, Plan
+
+    stream = _negotiator(AudioOffer(**changes))._audio_stream(77, Plan(), ap.ChaChaShk(bytes(32)))
+    assert (stream["latencyMin"], stream["latencyMax"]) == latencies
+    rest = {key: value for key, value in stream.items() if key not in _todays_audio_stream(77) and key != "shk"}
+    assert rest == {key: value for key, value in keys.items() if key != "usingScreen"}
+    assert ("usingScreen" in stream) == ("usingScreen" in keys)
+
+
+def test_the_audio_stream_names_the_format_and_the_ciphers_key():
+    from mirrorbridge.mirror.negotiation import AudioOffer, Plan
+
+    stream = _negotiator(AudioOffer(ap.PCM_44100))._audio_stream(77, Plan(), ap.ChaChaShk(bytes(32)))
+    assert (stream["ct"], stream["audioFormat"], stream["spf"], stream["sr"]) == (1, 0x800, 352, 44100)
+    stream = _negotiator(AudioOffer(ap.ALAC_44100_SIZED))._audio_stream(77, Plan(), _SealedOtherwise(None))
+    assert (stream["ct"], stream["audioFormat"]) == (2, 0x40000) and "shk" not in stream
+
+
+def _answers(ordering: str, audio: dict, video_port: int = 7100) -> list[dict]:
+    session = {"eventPort": 7010, "timingPort": 7011}
+    video = {"type": 110, "dataPort": video_port, "streamID": 2}
+    if ordering == "control-first":
+        return [session, {"streams": [audio]}, {"streams": [video]}]
+    return [{**session, "streams": [audio]}, {"streams": [video]}]
+
+
+@pytest.mark.parametrize("ordering", ["control-first", "media-first"])
+@pytest.mark.parametrize("answer,ports,note", [
+    ({"type": 96, "dataPort": 6001, "controlPort": 6002, "streamID": 1}, (6001, 6002), ""),
+    ({"dataPort": 6001, "controlPort": 6002, "streamID": 1}, (6001, 6002), ""),  # untyped
+    ({"type": 96, "streamID": 1}, None, "the TV named no port for the sound"),
+    ({"type": 96, "dataPort": 6001, "streamID": 1}, None, "the TV named no control port for the sound"),
+    ({"type": 96, "dataPort": True, "controlPort": 6002}, None, "the TV named no port for the sound"),
+])
+async def test_the_tvs_answer_to_the_audio_stream(ordering, answer, ports, note, caplog):
+    from mirrorbridge.mirror.negotiation import AudioOffer, Plan
+
+    offer = AudioOffer(ap.PCM_44100, "minmax", 4410, redundant=1)
+    negotiator = _negotiator(offer, _answers(ordering, answer))
+    with caplog.at_level("INFO", logger="mirrorbridge.mirror.negotiation"):
+        est = await negotiator._attempt(Plan(ordering=ordering))  # pylint: disable=protected-access
+    assert est.data_port == 7100 and est.audio_note == note
+    assert f"Sound: the TV answered the audio stream with {dict(sorted(answer.items()))}" in caplog.messages
+    if ports is None:
+        assert est.audio is None
+        return
+    sent = next(s for _, _, body, _ in negotiator.channel.requests for s in body.get("streams", []) if s["type"] == 96)
+    setup = est.audio
+    assert (setup.data_port, setup.control_port) == ports and setup.answer == answer
+    assert setup.stream_id == sent["streamConnectionID"] and setup.cipher.stream_fields() == {"shk": sent["shk"]}
+    assert (setup.format, setup.gap, setup.lat_min, setup.lat_max, setup.redundant) == (ap.PCM_44100, 4410, 4410,
+                                                                                         4410, 1)
+
+
+async def test_the_audio_answer_found_elsewhere_or_not_at_all():
+    from mirrorbridge.mirror.negotiation import AudioOffer, Plan, audio_answer
+
+    typed = {"type": 96, "dataPort": 6001, "controlPort": 6002}
+    # Typed 96 in another answer than the audio SETUP's: taken. Untyped elsewhere: not.
+    assert audio_answer([{"streams": [typed]}, {}, {}], 1) == (typed, (6001, 6002), "")
+    assert audio_answer([{"streams": [{"dataPort": 1, "controlPort": 2}]}, {}, {}], 1) == (
+        None, None, "the TV did not answer the audio stream")
+    assert audio_answer([{"streams": [{"type": 110, "dataPort": 1}]}], 0)[2] == "the TV did not answer the audio stream"
+    # MIRRORBRIDGE_MIRROR_SOUND_PORTS stands in for what the TV named, or did not.
+    assert audio_answer([{"streams": [{"type": 96}]}], 0, (5001, 5002)) == ({"type": 96}, (5001, 5002), "")
+    assert audio_answer([{}], 0, (5001, 5002)) == ({}, (5001, 5002), "")
+    negotiator = _negotiator(AudioOffer(ports=(5001, 5002)), _answers("media-first", {"type": 96}))
+    est = await negotiator._attempt(Plan(ordering="media-first"))  # pylint: disable=protected-access
+    assert (est.audio.data_port, est.audio.control_port) == (5001, 5002)
+    negotiator = _negotiator(None, [{"eventPort": 7010}, {"streams": [{"type": 110, "dataPort": 7100}]}])
+    est = await negotiator._attempt(Plan(audio=False))  # pylint: disable=protected-access
+    assert est.audio is None and est.audio_note == "no audio stream in this TV's plan"
+
+
+@pytest.mark.parametrize("ordering", ["control-first", "media-first"])
+async def test_each_attempt_gets_a_cipher_of_its_own_whose_fields_go_where_it_says(ordering):
+    """The seam FairPlay's cipher would use: made for each attempt with the channel, its session
+    fields in the first SETUP body, its stream fields (none) in the type-96 dict."""
+    from mirrorbridge.mirror.negotiation import AudioOffer, Plan
+
+    _SealedOtherwise.made.clear()
+    answer = {"type": 96, "dataPort": 6001, "controlPort": 6002}
+    negotiator = _negotiator(AudioOffer(cipher_factory=_SealedOtherwise), _answers(ordering, answer) * 2)
+    first = await negotiator._attempt(Plan(ordering=ordering))  # pylint: disable=protected-access
+    second = await negotiator._attempt(Plan(ordering=ordering))  # pylint: disable=protected-access
+    assert [cipher.channel for cipher in _SealedOtherwise.made] == [negotiator.channel] * 2
+    assert first.audio.cipher is _SealedOtherwise.made[0] and second.audio.cipher is _SealedOtherwise.made[1]
+    bodies = [body for _, _, body, _ in negotiator.channel.requests]
+    count = len(bodies) // 2
+    for at in (0, count):
+        assert bodies[at]["ekey"] == bytes(72) and bodies[at]["eiv"] == bytes(16) and "sessionUUID" in bodies[at]
+        assert not any("ekey" in body for body in bodies[at + 1:at + count])
+    audio = [s for body in bodies for s in body.get("streams", []) if s["type"] == 96]
+    assert len(audio) == 2 and not any("shk" in s for s in audio)
+    # ChaChaShk: a new key each time, and nothing in the session's fields.
+    negotiator = _negotiator(None, _answers(ordering, answer) * 2)
+    keys = [(await negotiator._attempt(Plan(ordering=ordering))).audio.cipher.key  # pylint: disable=protected-access
+            for _ in range(2)]
+    assert keys[0] != keys[1] and all(len(key) == 32 for key in keys)
+    assert not any(key in body for _, _, body, _ in negotiator.channel.requests for key in ("ekey", "eiv"))
+
+
+async def test_the_setup_log_leaves_every_key_out(caplog):
+    from mirrorbridge.mirror.negotiation import AudioOffer, Plan
+
+    secrets = []
+
+    class Keyed(_SealedOtherwise):
+        def __init__(self, channel):
+            super().__init__(channel)
+            self.key = bytes(range(100, 132))
+            secrets.extend([self.key, b"\x11" * 72, b"\x22" * 16])
+
+        def stream_fields(self):
+            return {"shk": self.key}
+
+        def session_fields(self):
+            return {"ekey": b"\x11" * 72, "eiv": b"\x22" * 16}
+
+    for ordering in ("media-first", "control-first"):
+        negotiator = _negotiator(AudioOffer(cipher_factory=Keyed), _answers(ordering, {"type": 96}))
+        with caplog.at_level("DEBUG", logger="mirrorbridge.mirror.negotiation"):
+            await negotiator._attempt(Plan(ordering=ordering))  # pylint: disable=protected-access
+    secrets.extend(negotiator.channel.derive("", "", ""))
+    assert "<32 bytes>" in caplog.text and "<72 bytes>" in caplog.text and "<16 bytes>" in caplog.text
+    for secret in secrets:
+        for shown in (repr(secret), secret.hex(), repr(secret[:16])):
+            assert shown not in caplog.text
+
+
+async def test_record_keeps_its_answer_and_says_the_tvs_audio_latency(caplog):
+    from mirrorbridge.mirror.negotiation import Established, Plan
+
+    est = Established(Plan(), "UUID", "rtsp://tv/1", "rtsp://tv/2", 2, 7100)
+    negotiator = _negotiator(headers={"CSeq": "4", "Audio-Latency": "11025"})
+    with caplog.at_level("DEBUG", logger="mirrorbridge.mirror.negotiation"):
+        await negotiator.record(est)
+    assert est.record_headers == {"CSeq": "4", "Audio-Latency": "11025"}
+    assert "RECORD answered 200; Audio-Latency: 11025" in caplog.messages
+    caplog.clear()
+    negotiator = _negotiator(headers={"CSeq": "4"})
+    with caplog.at_level("INFO", logger="mirrorbridge.mirror.negotiation"):
+        await negotiator.record(est)
+    assert "RECORD answered 200" in caplog.messages and est.record_headers == {"CSeq": "4"}
+
+
+async def test_set_volume_sends_owntones_parameter():
+    from mirrorbridge.mirror.negotiation import Established, Plan
+
+    est = Established(Plan(), "UUID", "rtsp://tv/1", "rtsp://tv/2", 2, 7100)
+    negotiator = _negotiator()
+    assert await negotiator.set_volume(est, -20) == 200
+    assert negotiator.channel.requests == [("SET_PARAMETER", "rtsp://tv/1", b"volume: -20.000000\r\n",
+                                            "text/parameters")]
+    assert negotiator.steps["volume"] == 200
+
+
+def test_get_info_keeps_what_says_how_the_tv_takes_the_sound():
+    from mirrorbridge.mirror.control import ReceiverInfo
+
+    info = ReceiverInfo.parse({
+        "supportedFormats": {"screenStream": 21235712, "audioStream": 21235712},
+        "audioLatencies": [{"inputLatencyMicros": 0, "outputLatencyMicros": 400000, "type": 100}],
+        "initialVolume": -20, "volumeControlType": 4,
+    })
+    assert (info.screen_formats, info.audio_formats, info.initial_volume, info.volume_control_type) == (
+        0x1440800, 0x1440800, -20.0, 4)
+    assert info.audio_latencies == [{"inputLatencyMicros": 0, "outputLatencyMicros": 400000, "type": 100}]
+    summary = info.summary()
+    assert ("screenStream formats: 0x1440800; audioStream formats: 0x1440800; audioLatencies: "
+            "[{'inputLatencyMicros': 0, 'outputLatencyMicros': 400000, 'type': 100}]; initialVolume: -20; "
+            "volumeControlType: 4; eventPort: none") in summary
+    bare = ReceiverInfo.parse({"supportedFormats": {"screenStream": 0x1C0000}, "initialVolume": True,
+                               "audioLatencies": "none", "volumeControlType": "4"})
+    assert (bare.audio_formats, bare.audio_latencies, bare.initial_volume, bare.volume_control_type) == (
+        None, None, None, None)
+    assert "audioStream" not in bare.summary() and "initialVolume" not in bare.summary()
+
+
+def test_the_saved_profile_keeps_what_is_known_of_the_sound(tmp_path):
+    from mirrorbridge.mirror import profiles
+
+    path = tmp_path / "mirroring.json"
+    assert profiles.MirrorProfile().sound == "" and profiles.MirrorProfile().sound_note == ""
+    assert profiles.set_sound("tcl", "heard", path=path) is None and not path.exists()  # nothing saved for it yet
+    profiles.save("tcl", profiles.MirrorProfile("media-first", lead_ms=150), name="TCL", info="displays: 1920x1080",
+                  path=path)
+    assert profiles.set_sound("tcl", "off", "2026-10-29: closed the session when the sound started", path) == path
+    saved = profiles.load("tcl", path)
+    assert (saved.ordering, saved.lead_ms, saved.sound, saved.sound_note) == (
+        "media-first", 150, "off", "2026-10-29: closed the session when the sound started")
+    data = json.loads(path.read_text())
+    assert data["tcl"]["name"] == "TCL" and data["tcl"]["info"] == "displays: 1920x1080"
+    profiles.set_sound("tcl", "heard", path=path)
+    assert (profiles.load("tcl", path).sound, profiles.load("tcl", path).sound_note) == ("heard", "")
+    with pytest.raises(ValueError):
+        profiles.set_sound("tcl", "loud", path=path)
+    for odd in ("loud", None, 3):
+        assert profiles.MirrorProfile.from_dict({"sound": odd, "sound_note": 5}).sound == ""
+    assert profiles.MirrorProfile.from_dict({"sound_note": 5}).sound_note == ""
+    # What an older MirrorBridge wrote, without them, loads with nothing known.
+    assert profiles.MirrorProfile.from_dict({"ordering": "media-first"}).sound == ""
