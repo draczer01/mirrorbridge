@@ -44,7 +44,10 @@ jobs:
       - run: pip install -r packaging/requirements-build.txt pytest pytest-asyncio
       - run: pip install --no-deps -e .
       - name: Unit tests that run on Windows
-        run: pytest -q tests/test_ffmpeg.py tests/test_hls_server.py tests/test_patch.py tests/test_vdisplay.py tests/test_migration.py tests/test_session.py tests/test_devices.py tests/test_release.py tests/test_i18n.py tests/test_probe.py tests/test_mirror.py tests/test_mirror_loopback.py tests/test_mirror_gui.py tests/test_mirror_extend.py tests/test_latency_meter.py tests/test_googlecast.py
+        run: pytest -q tests/test_ffmpeg.py tests/test_hls_server.py tests/test_patch.py tests/test_vdisplay.py tests/test_migration.py tests/test_session.py tests/test_devices.py tests/test_release.py tests/test_i18n.py tests/test_probe.py tests/test_mirror.py tests/test_mirror_loopback.py tests/test_mirror_gui.py tests/test_mirror_extend.py tests/test_latency_meter.py tests/test_googlecast.py tests/test_capture.py
+      # The FFmpeg inside the exe (packaging/ffmpeg_pin.json), checked by size and SHA-256.
+      - name: Fetch the pinned FFmpeg
+        run: python -I packaging/fetch_ffmpeg.py
       - run: .\packaging\build_exe.ps1
       - name: Smoke test the exe
         env:
@@ -60,14 +63,22 @@ jobs:
           if ($doctor -notmatch "Encoders:") { throw "MirrorBridge.exe doctor did not get as far as the encoders" }
       - name: Third-party notices
         run: python packaging/third_party_notices.py --out build/notices
+      # fetch_ffmpeg.py --source downloads ffmpeg-<version>.tar.xz and its .asc from ffmpeg.org and stops
+      # unless the signature is good and by FFmpeg's release key (packaging/ffmpeg-devel.asc, fingerprint
+      # FCF986EA15E6E293A5644F10B4322F04D67658D8 in the pin, as https://ffmpeg.org/download.html lists it),
+      # and unless the tarball matches source_sha256 once the pin has one.
       - name: Fetch FFmpeg's source (its GPL asks for it next to the binary)
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           $ffmpeg = python packaging/third_party_notices.py --ffmpeg-version
-          if ($ffmpeg -notmatch '^\d+\.\d+(\.\d+)?$') { throw "Could not tell which FFmpeg release is inside MirrorBridge.exe ('$ffmpeg')" }
-          $file = "build/ffmpeg-source/ffmpeg-$ffmpeg.tar.xz"
-          New-Item -ItemType Directory -Force -Path build/ffmpeg-source | Out-Null
-          Invoke-WebRequest -Uri "https://ffmpeg.org/releases/ffmpeg-$ffmpeg.tar.xz" -OutFile $file -MaximumRetryCount 3 -RetryIntervalSec 15
+          $pin = Get-Content -Raw packaging/ffmpeg_pin.json | ConvertFrom-Json
+          if ($ffmpeg -ne $pin.version) { throw "MirrorBridge.exe has FFmpeg '$ffmpeg', not the pinned $($pin.version)" }
+          $file = python -I packaging/fetch_ffmpeg.py --source build/ffmpeg-source
+          $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLower()
+          Write-Host "$file has a good signature by FFmpeg's release key; SHA-256 $sha256"
+          if (-not $pin.source_sha256) {
+            Write-Host "::warning title=FFmpeg source not pinned::Put source_sha256 $sha256 in packaging/ffmpeg_pin.json (checked here against FFmpeg's signature only)"
+          }
           Add-Content -Path $env:GITHUB_ENV -Value "FFMPEG_SOURCE=$file"
       - name: Package
         run: |

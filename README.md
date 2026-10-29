@@ -461,13 +461,29 @@ time limit, Stop, the skip for a TV that needs FairPlay, and the command line's 
 ## Building MirrorBridge.exe
 
 On Windows: `.\packaging\build_exe.ps1`. It installs the pinned build requirements
-(`packaging/requirements-build.txt`), takes FFmpeg 7.1 from `imageio-ffmpeg`, and runs
-PyInstaller with `packaging/MirrorBridge.spec` to produce a one-file
-`dist\MirrorBridge.exe`. To bundle another FFmpeg build instead, set `MIRRORBRIDGE_FFMPEG`
-to its `ffmpeg.exe` (`AIRCAST_FFMPEG`, the name from before the rename, still works).
+(`packaging/requirements-build.txt`), gets FFmpeg 8.1.1 (gyan.dev's essentials build, which
+scales the screen on the graphics card with `scale_d3d11`), and runs PyInstaller with
+`packaging/MirrorBridge.spec` to produce a one-file `dist\MirrorBridge.exe`.
+
+`packaging/fetch_ffmpeg.py` gets FFmpeg: it downloads the zip that `packaging/ffmpeg_pin.json`
+names (109 MB, once), checks its size and SHA-256 and those of the `ffmpeg.exe` inside, and
+takes out only `ffmpeg.exe`, to `build\ffmpeg_811\`. Where downloads are blocked, give it a
+copy of the zip: `.\packaging\build_exe.ps1 -FFmpegZip C:\path\ffmpeg-8.1.1-essentials_build.zip`.
+Before PyInstaller runs, the script runs the `ffmpeg.exe` that will go inside and stops unless
+it is 8.1.1 and has `scale_d3d11`. The spec bundles that file only: `MIRRORBRIDGE_FFMPEG`
+(or `AIRCAST_FFMPEG`, the name from before the rename) set to another `ffmpeg.exe`, or else
+the FFmpeg 7.1 of `imageio-ffmpeg`, goes inside only with
+`.\packaging\build_exe.ps1 -AllowOtherFFmpeg` (which sets `MIRRORBRIDGE_OTHER_FFMPEG=1` for the
+build), and then the checks only warn.
 
 On Linux the same exe can be built under Wine with a Windows Python:
-`WINPY=/path/to/windows-python ./packaging/build_exe_wine.sh`.
+`WINPY=/path/to/windows-python ./packaging/build_exe_wine.sh` (it fetches FFmpeg with the
+Linux Python first; `FFMPEG_ZIP=/path/to/the.zip` takes a copy already there).
+
+A release (`.github/workflows/release.yml`) also publishes FFmpeg's source, `ffmpeg-8.1.1.tar.xz`,
+which FFmpeg's GPL asks for: `fetch_ffmpeg.py --source` downloads it with its signature from
+ffmpeg.org and stops unless the signature is FFmpeg's release key's
+(`packaging/ffmpeg-devel.asc`, fingerprint `FCF986EA15E6E293A5644F10B4322F04D67658D8`).
 
 CI (`.github/workflows/ci.yml`) runs the tests on Linux and builds the exe on Windows.
 
