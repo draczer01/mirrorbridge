@@ -17,9 +17,12 @@ A refusal of the first shape (400, 405, 406, 415, 455, 501) is followed once by 
 on a fresh pair-verify: a TV may close the connection right after saying no.
 
 PTP timing (timingPeerInfo) can be asked for too, to learn whether the TV would give a PTP clock.
-MirrorBridge has no PTP timeline yet, and some TVs advertise PTP but answer without a
-timingPeerInfo.ClockID, so a PTP session is always torn down and set up again over NTP, once,
-on a fresh pair-verify.
+Some TVs advertise PTP but answer without a timingPeerInfo.ClockID, so unless MirrorBridge runs
+its own PTP clock (ptp_clock_id, the experiment of ptp.py), a PTP session is torn down and set
+up again over NTP, once, on a fresh pair-verify. With our clock running, an answer without a
+ClockID is kept: the TV's clock follows ours once SETPEERS has named the two of us
+(set_peers()), and ptp_fallback() goes over to NTP if it does not. A later SETUP of such a
+session that the TV refuses gets NTP in the same way.
 
 Each answer is handed to `on_reply` as it comes, so that the TV's timing port is probed and its
 event channel opened at once, not only once every SETUP is done (a TV may wait for them before
@@ -35,6 +38,7 @@ import asyncio
 import dataclasses
 import logging
 import os
+import plistlib
 import secrets
 import uuid
 from dataclasses import dataclass, field
@@ -60,9 +64,33 @@ SHAPE_REFUSED = frozenset({400, 405, 406, 415, 455, 501})
 SETUP_SECONDS = 30  # some TVs take 20 s to answer a SETUP
 RECORD_SECONDS = 15
 TEARDOWN_SECONDS = 3
-FEEDBACK_INTERVAL = 2.0
+try:  # experiment: MIRRORBRIDGE_FEEDBACK_S, to tell a hitch every 2 s apart from POST /feedback
+    FEEDBACK_INTERVAL = min(30.0, max(0.5, float(os.environ["MIRRORBRIDGE_FEEDBACK_S"])))
+except (KeyError, ValueError):
+    FEEDBACK_INTERVAL = 2.0
 FEEDBACK_SECONDS = 5
 DEFAULT_LEAD_MS = 100  # how long after capture the TV shows a frame (75 is enough on a cable)
+
+
+def audio_from_env(audio: bool) -> bool:
+    """MIRRORBRIDGE_NO_AUDIO=1, for an experiment: SETUP without the audio (type 96) stream."""
+    return False if os.environ.get("MIRRORBRIDGE_NO_AUDIO") == "1" else audio
+
+
+def timing_from_env(timing: str) -> str:
+    """MIRRORBRIDGE_TIMING=ptp (or ntp), for an experiment, or `timing` when unset."""
+    value = os.environ.get("MIRRORBRIDGE_TIMING", "").strip().lower()
+    return value if value in (NTP, PTP) else timing
+
+
+def lead_from_env(lead_ms: int) -> int:
+    """MIRRORBRIDGE_LEAD_MS, for an experiment on Wi-Fi (20-1000 ms), or `lead_ms` when unset."""
+    try:
+        return min(1000, max(20, int(os.environ["MIRRORBRIDGE_LEAD_MS"])))
+    except (KeyError, ValueError):
+        return lead_ms
+
+PEER_LIST_CHANGED = "/peer-list-changed"  # SETPEERS's Content-Type (SETPEERSX is for feature bit 52)
 
 # Who is sending (and SOURCE_VERSION, in control.py, as in the User-Agent).
 SENDER_MODEL = "Windows"
@@ -108,6 +136,8 @@ class Established:
     skip_record: bool = False
     ptp_clock_id: Optional[int] = None  # what a PTP SETUP answered, if one was tried
     ptp_answered: bool = False
+    timeline_id: int = 0  # [40:48] of each frame: 0 under NTP, our ClockID under PTP
+    ptp_addresses: list[str] = field(default_factory=list)  # the TV's timingPeerInfo.Addresses, under PTP
     fallbacks: list[str] = field(default_factory=list)
     replies: list[dict] = field(default_factory=list)
 
@@ -121,12 +151,14 @@ class _ShapeRefused(Exception):
 
 class _PtpTried(Exception):
     """The TV answered a PTP SETUP (with or without a ClockID); the session was torn down.
-    `ordering` is the one it answered in."""
+    `ordering` is the one it answered in. `why`: a session kept with our clock failed at a
+    later step (what the TV said)."""
 
-    def __init__(self, clock_id: Optional[int], ordering: str) -> None:
-        super().__init__(f"ClockID {clock_id}")
+    def __init__(self, clock_id: Optional[int], ordering: str, why: str = "") -> None:
+        super().__init__(why or f"ClockID {clock_id}")
         self.clock_id = clock_id
         self.ordering = ordering
+        self.why = why
 
 
 def _stream_id() -> int:
@@ -175,6 +207,11 @@ class Negotiator:
         self.steps: dict = steps if steps is not None else {}
         self.channel: Optional[ControlChannel] = None
         self.on_reply: Optional[Callable[[dict], None]] = None  # each accepted SETUP's answer
+        # A session whose answers went to on_reply is gone, and one is set up again (NTP after PTP).
+        self.on_restart: Optional[Callable[[], None]] = None
+        # Our PTP ClockID while our own PTP clock runs (ptp.py): a PTP SETUP is then kept, not
+        # only tried. None: a PTP SETUP only finds out what the TV answers (the probe).
+        self.ptp_clock_id: Optional[int] = None
 
     async def connect(self) -> ControlChannel:
         """A new control connection with a fresh pair-verify."""
@@ -198,7 +235,9 @@ class Negotiator:
         try:
             return await self._set_up(plan)
         except _PtpTried as tried:
-            if tried.clock_id is None:
+            if tried.why:
+                note = f"PTP timing did not work ({tried.why}): NTP on a fresh pair-verify"
+            elif tried.clock_id is None:
                 note = "PTP SETUP answered without timingPeerInfo.ClockID: NTP on a fresh pair-verify"
             else:
                 note = f"PTP SETUP answered with ClockID {tried.clock_id:#x}, which MirrorBridge cannot use yet: NTP"
@@ -207,13 +246,31 @@ class Negotiator:
                 raise MirrorError(Text(
                     "mirror_no_ptp", "The TV wants PTP timing, which MirrorBridge does not have yet."
                 ), step="setup", steps=self.steps) from tried
-            await self.connect()
-            # The ordering the TV answered PTP in, so that it is not refused first again.
-            est = await self._set_up(dataclasses.replace(plan, timing=NTP, ordering=tried.ordering))
-            est.fallbacks.insert(0, note)
-            est.ptp_answered = True
-            est.ptp_clock_id = tried.clock_id
-            return est
+            return await self._ntp_instead(plan, tried.ordering, note, tried.clock_id)
+
+    async def ptp_fallback(self, est: Established, why: str) -> Established:
+        """The TV took a PTP session but its clock did not follow ours (`why`): TEARDOWN, then
+        NTP on a fresh pair-verify, in the ordering it took."""
+        await self.teardown(est.uri)
+        note = f"PTP timing did not work ({why}): NTP on a fresh pair-verify"
+        _LOGGER.info("%s", note)
+        ntp = await self._ntp_instead(est.plan, est.plan.ordering, note, None)
+        ntp.fallbacks = est.fallbacks + ntp.fallbacks
+        return ntp
+
+    async def _ntp_instead(self, plan: Plan, ordering: str, note: str, clock_id: Optional[int]) -> Established:
+        if self.on_restart is not None:
+            try:
+                self.on_restart()
+            except Exception:  # pylint: disable=broad-except
+                _LOGGER.exception("Restart callback failed")
+        await self.connect()
+        # The ordering the TV answered PTP in, so that it is not refused first again.
+        est = await self._set_up(dataclasses.replace(plan, timing=NTP, ordering=ordering))
+        est.fallbacks.insert(0, note)
+        est.ptp_answered = True
+        est.ptp_clock_id = clock_id
+        return est
 
     async def _set_up(self, plan: Plan) -> Established:
         orderings = [plan.ordering]
@@ -251,7 +308,14 @@ class Negotiator:
             "sourceVersion": SOURCE_VERSION,
             "timingProtocol": "PTP" if plan.timing == PTP else "NTP",
         }
-        if plan.timing == PTP:
+        if plan.timing == PTP and self.ptp_clock_id is not None:
+            # Our own grandmaster clock, as OwnTone describes its own (no ClockPorts, so no
+            # port matching to override).
+            peer = {"Addresses": [self.channel.local_ip], "ClockID": self.ptp_clock_id, "DeviceType": 0,
+                    "ID": self.clock_peer_id, "SupportsClockPortMatchingOverride": False}
+            fields["timingPeerInfo"] = peer
+            fields["timingPeerList"] = [peer]
+        elif plan.timing == PTP:
             # This PC as a PTP clock peer, as a sender that has one describes itself.
             peer = {"Addresses": [self.channel.local_ip], "DeviceType": 0, "ID": self.clock_peer_id,
                     "SupportsClockPortMatchingOverride": True}
@@ -326,12 +390,20 @@ class Negotiator:
         else:
             body = {**session, "streams": [audio or video]}
         replies.append(await self._setup(first_step, uri, body, first=True))
+        addresses: list[str] = []
+        kept = False  # a PTP session with our clock, which a refusal from here on turns into NTP
         try:
             if plan.timing == PTP:
                 clock = _clock_id(replies[0])
                 self.steps["ptp clock"] = f"{clock:#x}" if clock is not None else "none"
-                await self.teardown(uri)
-                raise _PtpTried(clock, plan.ordering)
+                if self.ptp_clock_id is None or clock is not None:
+                    await self.teardown(uri)
+                    raise _PtpTried(clock, plan.ordering)
+                kept = plan.fallback
+                peer = replies[0].get("timingPeerInfo")
+                _LOGGER.info("PTP SETUP answered without a ClockID, kept: the TV's timingPeerInfo is %s", peer)
+                if isinstance(peer, dict) and isinstance(peer.get("Addresses"), list):
+                    addresses = [str(address) for address in peer["Addresses"]]
             self._answered(replies[-1])
             if audio and plan.ordering == CONTROL_FIRST:
                 replies.append(await self._setup("setup audio", uri, {"streams": [audio]}))
@@ -353,8 +425,18 @@ class Negotiator:
                 ), step="setup video", steps=self.steps)
         except _PtpTried:
             raise
-        except BaseException:
+        except BaseException as ex:
             await self.teardown(uri)
+            if kept and isinstance(ex, MirrorError):
+                # Under PTP, which a TV may not get on with (its stream setups may wait for a
+                # clock that only starts with SETPEERS): NTP, as when its clock does not follow.
+                if ex.code is not None:
+                    why = f"{ex.step} answered {ex.code}"
+                elif self.steps.get("data port") == "none":
+                    why = "the SETUPs named no port for the video"
+                else:
+                    why = f"{ex.step}: {self.steps.get(ex.step, 'no answer')}"
+                raise _PtpTried(None, plan.ordering, why) from ex
             raise
         timing_port = _first(replies, "timingPort")
         return Established(
@@ -362,6 +444,7 @@ class Negotiator:
             event_port=_first(replies, "eventPort"),
             receiver_timing_port=int(timing_port) if isinstance(timing_port, int) else None,
             skip_record=bool(_first(replies, "skipRecord")), replies=replies,
+            timeline_id=(self.ptp_clock_id or 0) if plan.timing == PTP else 0, ptp_addresses=addresses,
         )
 
     def _answered(self, reply: dict) -> None:
@@ -370,6 +453,21 @@ class Negotiator:
                 self.on_reply(reply)
             except Exception:  # pylint: disable=broad-except
                 _LOGGER.exception("SETUP answer callback failed")
+
+    async def set_peers(self, est: Established, peers: list[str]) -> Any:
+        """SETPEERS: the session's clock peers (the TV's address and ours), a binary-plist array,
+        which starts the TV's PTP clock. The TV's answer: 200 when it took them."""
+        assert self.channel is not None
+        body = plistlib.dumps(peers, fmt=plistlib.FMT_BINARY)  # pylint: disable=no-member
+        try:
+            resp = await self.channel.request("SETPEERS", est.uri, body=body, content_type=PEER_LIST_CHANGED,
+                                              timeout=RECORD_SECONDS)
+            answer: Any = resp.code
+        except (NoAnswer, ChannelClosed) as ex:
+            answer = answer_of(ex)
+        self.steps["setpeers"] = answer
+        _LOGGER.info("SETPEERS %s: %s", peers, answer)
+        return answer
 
     async def record(self, est: Established) -> None:
         """RECORD: the session starts (unless the TV said it starts without)."""

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import struct
 import time
 from collections import deque
@@ -79,6 +80,13 @@ def ntp_request(sent_ns: int) -> bytes:
     return struct.pack(">BBHIQQQ", 0x80, NTP_REQUEST, 7, 0, 0, 0, to_ntp(sent_ns, True))
 
 
+def _ntp_stop_ns() -> Optional[int]:
+    try:
+        return int(float(os.environ["MIRRORBRIDGE_NTP_STOP_S"]) * NS)
+    except (KeyError, ValueError):
+        return None
+
+
 class NtpResponder(asyncio.DatagramProtocol):
     """Answers the TV's timing requests and counts them, so a silent TV can be told apart."""
 
@@ -87,6 +95,10 @@ class NtpResponder(asyncio.DatagramProtocol):
         self.requests = 0
         self.first_request_ns: Optional[int] = None
         self.last_request_ns: Optional[int] = None
+        self._first_tv_minus_ours: Optional[int] = None
+        # Experiment: MIRRORBRIDGE_NTP_STOP_S stops answering that long after the first request.
+        self.stop_after_ns: Optional[int] = _ntp_stop_ns()
+        self.stopped_answering = False
         self.peers: set[str] = set()
         self.arrived = asyncio.Event()
 
@@ -100,15 +112,30 @@ class NtpResponder(asyncio.DatagramProtocol):
 
     def datagram_received(self, data: bytes, addr) -> None:
         received = now_ns()
-        reply = ntp_reply(data, received)
-        if reply is None:
+        if ntp_reply(data, received) is None:
             if len(data) >= 2 and data[1] == NTP_REPLY:
                 return  # an answer to one of our own probes (probe_receiver)
             _LOGGER.debug("Ignoring a %d-byte packet on the timing port from %s", len(data), addr[0])
             return
-        if self.transport is not None:
-            self.transport.sendto(reply, addr)
+        sent = now_ns()  # the answer's transmit time: when it really leaves
+        silent = (self.stop_after_ns is not None and self.first_request_ns is not None
+                  and received - self.first_request_ns >= self.stop_after_ns)
+        if silent and not self.stopped_answering:
+            self.stopped_answering = True
+            _LOGGER.info("Not answering the TV's time requests any more (MIRRORBRIDGE_NTP_STOP_S test switch)")
+        if self.transport is not None and not silent:
+            self.transport.sendto(ntp_reply(data, received, sent), addr)
         self.requests += 1
+        # Experiment: the TV's own transmit time against our receive time, from the first request
+        # of the session. Its spread shows how much the TV's view of our clock can jitter.
+        tv_minus_ours = from_ntp(struct.unpack(">Q", data[24:32])[0]) - received
+        if self._first_tv_minus_ours is None:
+            self._first_tv_minus_ours = tv_minus_ours
+        _LOGGER.debug("NTP request %d, %s; tv_sent - our_received %+.2f ms vs the first; %s", self.requests,
+                      f"{(received - self.last_request_ns) / 1e6:.0f} ms after the last"
+                      if self.last_request_ns is not None else "the first",
+                      (tv_minus_ours - self._first_tv_minus_ours) / 1e6,
+                      "not answered (test switch)" if silent else f"answered {(sent - received) / 1e3:.0f} us after it came")
         self.last_request_ns = received
         if self.first_request_ns is None:
             self.first_request_ns = received
@@ -175,10 +202,14 @@ class PtsMapper:
     from another origin: `restart()`.
     """
 
-    def __init__(self, window_ns: int = 2 * NS) -> None:
+    def __init__(self, window_ns: int = 2 * NS, slew_ns: Optional[int] = None) -> None:
         self.window_ns = window_ns
+        # Experiment: how far the offset in use may move per frame towards the window's smallest,
+        # instead of jumping to it when the smallest leaves the window (every window_ns or so).
+        self.slew_ns = slew_ns
         self._offsets: deque[tuple[int, int]] = deque()  # (arrival, offset), offsets increasing
         self._last: Optional[int] = None
+        self._used: Optional[int] = None  # the offset in use, with slew_ns
         self.lowest: Optional[int] = None  # the smallest offset of the session
 
     def restart(self) -> None:
@@ -202,7 +233,12 @@ class PtsMapper:
         self._offsets.append((arrival_ns, offset))
         while self._offsets[0][0] < arrival_ns - self.window_ns:
             self._offsets.popleft()
-        mapped = pts_ms * 1_000_000 + self._offsets[0][1]
+        target = self._offsets[0][1]
+        if self.slew_ns is None or self._used is None:
+            self._used = target
+        else:
+            self._used += max(-self.slew_ns, min(self.slew_ns, target - self._used))
+        mapped = pts_ms * 1_000_000 + self._used
         if self._last is not None and mapped <= self._last:
             mapped = self._last + 1_000  # 1 us later than the frame before it
         self._last = mapped

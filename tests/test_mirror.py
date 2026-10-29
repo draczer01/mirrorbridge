@@ -954,3 +954,78 @@ async def test_the_video_connection_closes_cleanly_once_its_buffer_went_out():
     finally:
         server.close()
     assert len(received) == 300_000
+
+
+def test_an_experiment_shows_frames_as_they_arrive():
+    """MIRRORBRIDGE_ON_ARRIVAL=1: codec packets with 14 01 at [6:8] (without RespectTimestamps)."""
+    assert packets.codec_packet(b"avcc", 0, 1920, 1080, on_arrival=True)[6:8] == b"\x14\x01"
+    assert packets.codec_packet(b"avcc", 0, 1920, 1080, on_arrival=False)[6:8] == b"\x16\x01"
+
+
+def test_an_experiment_stops_answering_the_time_but_still_counts_the_requests():
+    """MIRRORBRIDGE_NTP_STOP_S: answers until that long after the first request, then none."""
+    sent = []
+    responder = clock.NtpResponder()
+    responder.transport = type("T", (), {"sendto": lambda self, data, addr: sent.append(data)})()
+    responder.stop_after_ns = 0  # stop as soon as the first request is in
+    request = clock.ntp_request(clock.now_ns())
+    responder.datagram_received(request, ("192.0.2.1", 5000))  # the first: answered
+    responder.datagram_received(request, ("192.0.2.1", 5000))  # later: not answered
+    assert len(sent) == 1 and responder.requests == 2 and responder.stopped_answering
+    assert responder.last_request_ns is not None  # the quiet warning goes by requests
+
+
+async def test_an_experiment_sends_the_heartbeat_only_when_no_frame_went(monkeypatch):
+    """MIRRORBRIDGE_HEARTBEAT_IDLE_ONLY=1: no heartbeat in a second a frame went out in."""
+    from mirrorbridge.mirror import datachannel
+
+    monkeypatch.setattr(datachannel, "HEARTBEAT_SECONDS", 0.05)
+    written = []
+
+    class Writer:
+        def write(self, data):
+            written.append(data)
+
+        def is_closing(self):
+            return False
+
+    reader = asyncio.StreamReader()
+    channel = datachannel.DataChannel(reader, Writer())
+    channel.heartbeat_idle_only = True
+    channel._started = True  # pylint: disable=protected-access
+    task = asyncio.ensure_future(channel._heartbeat())  # pylint: disable=protected-access
+    for _ in range(6):  # frames every 20 ms: no heartbeat
+        channel.write(b"frame")
+        await asyncio.sleep(0.02)
+    assert channel.heartbeats == 0 and channel.heartbeats_skipped >= 1
+    await asyncio.sleep(0.15)  # no frames: heartbeats again
+    assert channel.heartbeats >= 1
+    task.cancel()
+    reader.feed_eof()
+    for t in channel._tasks:  # pylint: disable=protected-access
+        t.cancel()
+
+
+def test_an_experiment_sets_up_mirroring_without_the_audio_stream(monkeypatch):
+    """MIRRORBRIDGE_NO_AUDIO=1: the plan has no audio stream (no type-96 SETUP)."""
+    from mirrorbridge.mirror import negotiation
+
+    monkeypatch.delenv("MIRRORBRIDGE_NO_AUDIO", raising=False)
+    assert negotiation.audio_from_env(True) is True
+    monkeypatch.setenv("MIRRORBRIDGE_NO_AUDIO", "1")
+    assert negotiation.audio_from_env(True) is False
+
+
+def test_an_experiment_adds_noise_to_the_test_pattern(monkeypatch):
+    """MIRRORBRIDGE_PATTERN_NOISE=N: noise before the pixel format, so the encoder fills the bitrate."""
+    from mirrorbridge.config import Settings
+
+    def vf():
+        cmd = source.build_command("ffmpeg", Settings(), source=source.TEST_PATTERN, encoder="h264_nvenc",
+                                   width=1920, height=1080, fps=60)
+        return cmd[cmd.index("-vf") + 1]
+
+    monkeypatch.delenv("MIRRORBRIDGE_PATTERN_NOISE", raising=False)
+    assert vf() == "format=nv12"
+    monkeypatch.setenv("MIRRORBRIDGE_PATTERN_NOISE", "12")
+    assert vf() == "noise=alls=12:allf=t,format=nv12"

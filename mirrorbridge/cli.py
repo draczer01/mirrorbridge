@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import getpass
 import logging
+import os
 import sys
 
 from . import (APP_NAME, CLI_NAME, __version__, airplay_patch, audio, ffmpeg, googlecast, mirror, probe, vdisplay,
@@ -239,6 +240,9 @@ async def cmd_mirror(args) -> int:
     """Screen mirroring (experimental), or with --probe, how the TV takes it."""
     settings = Settings.load()
     _what_to_send(settings, args)
+    fps = args.framerate or int(os.environ.get("MIRRORBRIDGE_FPS", "0") or 0)  # MIRRORBRIDGE_FPS: experiment
+    if fps:
+        settings.framerate = fps  # this run only: settings.json is not written
     manager = DeviceManager(asyncio.get_running_loop())
     device = await _choose(manager, args)
     if device.airplay is None:
@@ -261,7 +265,8 @@ async def cmd_mirror(args) -> int:
         print(f"[{state.value}] {message}" if message else f"[{state.value}]")
 
     source = mirror.TEST_PATTERN if args.test_pattern else mirror.DESKTOP
-    session = mirror.MirrorSession(target, settings, status, source=source, seconds=args.seconds)
+    session = mirror.MirrorSession(target, settings, status, source=source, seconds=args.seconds,
+                                   timing=args.timing)
     print("Press Ctrl+C to stop mirroring.")
     try:
         await session.run()
@@ -485,6 +490,12 @@ def build_parser() -> argparse.ArgumentParser:
     mirroring.add_argument("--test-pattern", action="store_true",
                            help="mirror a test pattern, not the screen (and no virtual screen)")
     mirroring.add_argument("--seconds", type=float, help="stop after this many seconds (--probe: 10)")
+    mirroring.add_argument("--fps", dest="framerate", type=int,
+                           help="frame rate for this run only (default: the app's choice)")
+    mirroring.add_argument("--timing", choices=["ntp", "ptp"],
+                           help="how the TV gets the time, for this run only (default: MIRRORBRIDGE_TIMING, else "
+                                "NTP). ptp is an experiment: MirrorBridge as the TV's PTP clock, which needs inbound "
+                                "UDP 319-320; NTP if the TV does not follow it")
 
     gcast = common(sub.add_parser("googlecast", help="mirror the screen to a Chromecast or a TV with Chromecast "
                                                      "built-in (experimental)"))
@@ -526,7 +537,7 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        format="%(asctime)s.%(msecs)03d %(levelname)-7s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
     if not args.verbose:

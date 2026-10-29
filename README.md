@@ -257,6 +257,10 @@ included.
   encoder is busy), it goes on with GDI capture, then with x264 (CPU), as a cast does.
 * The TV asks the PC for the time over UDP: allow MirrorBridge, or inbound UDP ports
   7880-7889, in Windows Firewall on private networks, or the TV shows nothing.
+  The experimental PTP timing (`mirror --timing ptp`, or `MIRRORBRIDGE_TIMING=ptp`), where
+  MirrorBridge is the TV's PTP clock, also needs inbound UDP 319 and 320; if the TV does not
+  follow that clock within a few seconds (`MIRRORBRIDGE_PTP_LOCK_S`), the session goes on with
+  NTP, and says why in the log. Nothing about PTP is saved for the next session.
 * TVs differ in the order they want the session set up in, whether they need an (empty) audio
   stream, whether they offer PTP timing, and how they want the H.264 header to end.
   `mirror --probe` tries each, prints what the TV answered, and saves what worked in

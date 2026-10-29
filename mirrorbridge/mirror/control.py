@@ -358,8 +358,9 @@ class ControlChannel:
     ) -> HttpResponse:
         """Send one RTSP request and return the TV's answer, whatever its status.
 
-        A dict body goes as a binary plist. Raises NoAnswer if the TV does not answer within
-        `timeout`, ChannelClosed if the connection is gone.
+        A dict body goes as a binary plist; bytes go as they are, with `content_type` (SETPEERS's
+        plist array). Raises NoAnswer if the TV does not answer within `timeout`, ChannelClosed
+        if the connection is gone.
         """
         async with self._lock:
             if self.closed:
@@ -377,6 +378,8 @@ class ControlChannel:
             if isinstance(body, dict):
                 hdrs["Content-Type"] = BPLIST_CONTENT_TYPE
                 data = plistlib.dumps(body, fmt=plistlib.FMT_BINARY)  # pylint: disable=no-member
+            elif isinstance(body, bytearray):
+                data = bytes(body)
             try:
                 resp = await self.conn.send_and_receive(
                     method, uri, protocol="RTSP/1.0", user_agent=USER_AGENT, content_type=content_type,

@@ -107,6 +107,9 @@ def build_command(
     if source == TEST_PATTERN:
         video_in = ["-re", "-f", "lavfi", "-i", f"testsrc=size={width}x{height}:rate={fps}"]
         filters = ["format=yuv420p" if encoder == "libx264" else "format=nv12"]
+        noise = os.environ.get("MIRRORBRIDGE_PATTERN_NOISE", "")
+        if noise.isdigit() and int(noise) > 0:  # experiment: a pattern that fills the bitrate
+            filters.insert(0, f"noise=alls={int(noise)}:allf=t")
     else:
         settings_in = dataclasses.replace(settings, framerate=fps)
         video_in, prefilters = ffmpeg._video_input(backend, settings_in, monitor, region)  # pylint: disable=protected-access
