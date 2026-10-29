@@ -150,11 +150,13 @@ class RouteHistory:
         tv = self.data.setdefault(identifier, {})
         return tv.setdefault(route, {"ok": 0, "failed": 0, "last": ""})
 
-    def worked(self, identifier: str, route: str) -> None:
+    def worked(self, identifier: str, route: str, confirmed: bool = False) -> None:
+        """A way that reached the TV; an UNCONFIRMED way becomes the one to try first only when
+        `confirmed` (the TV said it showed frames)."""
         entry = self._route(identifier, route)
         entry.update(ok=entry["ok"] + 1, last="ok", at=int(time.time()))
         entry.pop("error", None)
-        if route not in UNCONFIRMED:
+        if route not in UNCONFIRMED or confirmed:
             self.data[identifier]["worked"] = route
         self._save()
 

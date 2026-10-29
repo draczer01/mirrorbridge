@@ -205,3 +205,37 @@ def test_a_receiver_named_by_its_serial_number_gets_a_readable_name():
     assert box.name == "IZZI BOX (192.168.1.2)"
     assert routes.Screen(cast=CastDevice(name="1001B026D756D451", host="192.168.1.2")).name == "Google Cast (192.168.1.2)"
     assert routes.Screen(cast=_cast()).name == "TCL 55QM7L"
+
+
+def test_google_cast_is_confirmed_by_the_frames_the_tv_showed(controller, monkeypatch):
+    from types import SimpleNamespace
+
+    controller.devices, controller.casts = [_device()], [_cast()]
+    controller.settings.last_device_id = controller.devices[0].identifier
+    tv = controller.selected_screen.identifier
+    controller.routes.failed(tv, routes.AIRPLAY_MIRROR, "refused")  # Google Cast goes first
+    running = []
+    monkeypatch.setattr(type(controller), "is_active", property(lambda self: bool(running)))
+
+    controller.start_primary()
+    running.append(True)
+    assert controller.started == [routes.CAST_MIRROR]
+    controller.session = SimpleNamespace(frames_shown=120)
+    controller._route_worked()  # pylint: disable=protected-access
+    assert controller.routes.last_worked(tv) == ""  # not yet: the TV has not said
+    controller._check_shown(controller.session, controller._attempt)  # pylint: disable=protected-access
+    assert controller.routes.last_worked(tv) == routes.CAST_MIRROR
+
+    # A black TV: none shown, so the next way starts
+    controller.session = SimpleNamespace(frames_shown=0, stop=lambda: None)
+    monkeypatch.setattr(controller.runner, "submit", lambda *a, **k: None)
+    running.clear()
+    controller.start_primary()
+    running.append(True)
+    controller._route_worked()  # pylint: disable=protected-access
+    controller._check_shown(controller.session, controller._attempt)  # pylint: disable=protected-access
+    assert controller.routes.last(tv, routes.CAST_MIRROR) == "failed" and controller.routes.last_worked(tv) == ""
+    assert controller._go_on()  # pylint: disable=protected-access  # once the session has stopped
+    _settle()
+    assert controller.started[-1] == routes.AIRPLAY_CAST
+    controller.session = None

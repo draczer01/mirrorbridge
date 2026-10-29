@@ -16,7 +16,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Coroutine, Optional
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import QApplication, QInputDialog, QLineEdit, QMessageBox, QWidget
 
 from .. import airplay_patch, ffmpeg, googlecast, mirror, probe, routes, vdisplay
@@ -31,6 +31,7 @@ from .i18n import say, state_text, tr
 _LOGGER = logging.getLogger(__name__)
 
 LOG_FILE_NAME = "mirrorbridge.log"
+SHOWN_CHECK_SECONDS = 6  # into Google Cast mirroring, when the TV must have shown a frame
 
 
 class UiBridge(QObject):
@@ -662,7 +663,28 @@ class Controller(QObject):
         attempt = self._attempt
         if attempt is not None and not attempt["reached"]:
             attempt["reached"] = True
-            self.routes.worked(attempt["screen"], attempt["plan"][attempt["index"]])
+            route = attempt["plan"][attempt["index"]]
+            if route in routes.UNCONFIRMED:  # sending is no proof: ask the TV in a few seconds
+                session = self.session
+                QTimer.singleShot(int(SHOWN_CHECK_SECONDS * 1000), lambda: self._check_shown(session, attempt))
+            else:
+                self.routes.worked(attempt["screen"], route)
+
+    def _check_shown(self, session, attempt: dict) -> None:
+        """A few seconds into Google Cast mirroring: the TV's own count of frames it showed
+        confirms the way, and none means a black TV, so the next way starts."""
+        if session is None or session is not self.session or attempt is not self._attempt:
+            return  # it has ended, or another way runs
+        shown = getattr(session, "frames_shown", None)
+        route = attempt["plan"][attempt["index"]]
+        if shown:
+            self.routes.worked(attempt["screen"], route, confirmed=True)
+        elif shown == 0:
+            _LOGGER.info("%s: the TV showed no frame in %s s", route, SHOWN_CHECK_SECONDS)
+            if self.can_try_another_way():
+                self.try_another_way()
+            else:
+                self.routes.failed(attempt["screen"], route, "the TV showed no frame", lasting=True)
 
     def can_try_another_way(self) -> bool:
         """While the big button's way runs, whether there is another way to try on this TV."""
