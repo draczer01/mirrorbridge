@@ -39,6 +39,10 @@ CAST_MIRROR = "googlecast_mirror"
 AIRPLAY_CAST = "airplay_cast"
 ORDER = [AIRPLAY_MIRROR, CAST_MIRROR, AIRPLAY_CAST]  # lowest delay first, with no history
 MIRRORING = {AIRPLAY_MIRROR, CAST_MIRROR}
+# Ways whose session can say it is sending while the TV shows nothing: Google Cast mirroring
+# reached CASTING on Humberto's TCL with the screen black (2026-10-29). Their CASTING is counted,
+# but never makes them the way to try first.
+UNCONFIRMED = {CAST_MIRROR}
 FILE_NAME = "routes.json"
 CAST_PREFIX = "cast:"
 
@@ -140,7 +144,8 @@ class RouteHistory:
         entry = self._route(identifier, route)
         entry.update(ok=entry["ok"] + 1, last="ok", at=int(time.time()))
         entry.pop("error", None)
-        self.data[identifier]["worked"] = route
+        if route not in UNCONFIRMED:
+            self.data[identifier]["worked"] = route
         self._save()
 
     def failed(self, identifier: str, route: str, error: str = "", lasting: bool = True) -> None:

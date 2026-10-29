@@ -194,6 +194,12 @@ class MainWindow(QMainWindow):
         self.status_label.setObjectName("status")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
+        self.another_btn = QPushButton()  # the TV stays black: the next way, without stopping first
+        self.another_btn.clicked.connect(self.c.try_another_way)
+        arow = QHBoxLayout()
+        arow.addWidget(self.another_btn)
+        arow.addStretch(1)
+        layout.addLayout(arow)
         self.file_btn = QPushButton()
         self.file_btn.clicked.connect(self._play_file)
         frow = QHBoxLayout()
@@ -305,7 +311,7 @@ class MainWindow(QMainWindow):
                             (self.forget_btn, "forget"), (self.rb_display, "ui_show_display"),
                             (self.rb_window, "ui_show_window"), (self.rb_extend, "ui_show_extend"),
                             (self.audio_cb, "audio"), (self.cursor_cb, "cursor"), (self.file_btn, "play_file"),
-                            (self.cast_btn, "ui_cast_instead")):
+                            (self.cast_btn, "ui_cast_instead"), (self.another_btn, "ui_try_another")):
             button.setText(tr(key))
         self.refresh_win.setToolTip(tr("ui_refresh_windows"))
         self.window_combo.setToolTip(tr("window_moved_hint"))
@@ -576,6 +582,7 @@ class MainWindow(QMainWindow):
         self.show_btn.style().unpolish(self.show_btn)
         self.show_btn.style().polish(self.show_btn)
         self.action_hint.setText(self.action_text(screen))
+        self.another_btn.setVisible(c.can_try_another_way())
 
         # The fallbacks, for a TV where the big button's way does not work
         self.cast_btn.setEnabled(usable and not active)

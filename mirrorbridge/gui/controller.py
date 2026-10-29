@@ -133,6 +133,7 @@ class Controller(QObject):
         self.routes = routes.RouteHistory()  # which way worked with each TV
         # The big button's try: {"screen", "plan", "index", "reached"}, while it may still fall back
         self._attempt: Optional[dict] = None
+        self._then_next: Optional[dict] = None  # "Not on the TV? Try another way": the try to go on with
         self.scanning = False
         self.last_scan = 0.0
         self.encoders: list[str] = []
@@ -531,10 +532,11 @@ class Controller(QObject):
         def ended(_=None):
             self._attempt = None
             finished()
+            self._go_on()
 
         def failed(exc):
             finished()
-            if self._fall_back(exc):
+            if self._go_on() or self._fall_back(exc):
                 return
             if isinstance(exc, concurrent.futures.CancelledError):
                 return
@@ -662,6 +664,37 @@ class Controller(QObject):
             attempt["reached"] = True
             self.routes.worked(attempt["screen"], attempt["plan"][attempt["index"]])
 
+    def can_try_another_way(self) -> bool:
+        """While the big button's way runs, whether there is another way to try on this TV."""
+        attempt = self._attempt
+        return self.is_active and attempt is not None and attempt["index"] + 1 < len(attempt["plan"])
+
+    def try_another_way(self, *_args) -> None:
+        """The person says the TV shows nothing (a session can send while the TV stays black): this
+        way goes last for this TV, the session stops, and the next way starts."""
+        if not self.can_try_another_way():
+            return
+        attempt, self._attempt = self._attempt, None
+        route = attempt["plan"][attempt["index"]]
+        self.routes.failed(attempt["screen"], route, "no picture on the TV, said the person", lasting=True)
+        _LOGGER.info("%s: no picture on the TV; trying the next way", route)
+        attempt["index"] += 1
+        attempt["reached"] = False
+        self._then_next = attempt
+        if self.session:
+            self.runner.submit(self.session.stop())
+
+    def _go_on(self) -> bool:
+        """After a session that try_another_way stopped: start the next way."""
+        attempt, self._then_next = self._then_next, None
+        screen = self.selected_screen
+        if attempt is None or screen is None or not screen.answers_to(attempt["screen"]):
+            return False
+        self._attempt = attempt
+        route = attempt["plan"][attempt["index"]]
+        self.bridge.call(lambda: self._start_route(screen, route))
+        return True
+
     def _will_fall_back(self, exc: Any) -> bool:
         """Whether _fall_back will start another way after `exc` (what a session failed with)."""
         attempt = self._attempt
@@ -747,10 +780,11 @@ class Controller(QObject):
         def ended(_=None):
             self._attempt = None
             finished()
+            self._go_on()
 
         def failed(exc):
             finished()
-            if self._fall_back(exc):
+            if self._go_on() or self._fall_back(exc):
                 return
             if isinstance(exc, concurrent.futures.CancelledError):
                 return
@@ -770,7 +804,7 @@ class Controller(QObject):
             self.notify.emit(tr("mirror_stopped"), say(message) if isinstance(message, Text) else "", False)
 
     def stop_cast(self, *_args) -> None:
-        self._attempt = None  # stopped by the person: no other way is tried
+        self._attempt = self._then_next = None  # stopped by the person: no other way is tried
         if self.session:
             self.runner.submit(self.session.stop())
         if self.file_future:

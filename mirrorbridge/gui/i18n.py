@@ -1029,6 +1029,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "Si la TV no muestra tu pantalla con el botón grande, prueba esto: va unos segundos atrás pero "
               "funciona con más TVs, y lleva sonido.",
     },
+    "ui_try_another": {
+        "en": "Nothing on the TV? Try another way",
+        "es": "¿No se ve en la TV? Probar otra forma",
+    },
     "ui_advanced": {"en": "Advanced settings", "es": "Ajustes avanzados"},
     "ui_cast_latency": {"en": "Delay when casting", "es": "Retraso al transmitir"},
     "ui_details": {"en": "Technical details (for reporting a problem)",
