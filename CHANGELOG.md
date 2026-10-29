@@ -120,6 +120,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   for casts: Mirror screen has no sound yet. While the main item's way runs and the TV takes
   another, *Nothing on the TV? Try another way*, under *Stop*, goes to the next one, as the
   window's button does.
+- `MirrorBridge.exe` carries FFmpeg 8.1.1 (gyan.dev's essentials build, checked against the
+  size and SHA-256 in `packaging/ffmpeg_pin.json`) in place of the FFmpeg 7.1 of
+  `imageio-ffmpeg`, for `scale_d3d11`. Its NVENC needs an NVIDIA driver 570 or newer: with an
+  older one MirrorBridge uses the next encoder, and the log's warning has FFmpeg's line on the
+  driver it needs. An FFmpeg named in the settings still goes first, and `doctor` says which
+  one is used.
 - The video says which colours it carries: the processor's picture is now converted and tagged
   as BT.709 (HD's colours), and the graphics card's carries BT.709 primaries and transfer, where
   NVENC fed the screen directly said BT.601.

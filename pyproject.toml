@@ -17,7 +17,7 @@ dependencies = [
     "numpy>=1.26",
     "soundcard>=0.4.3; sys_platform == 'win32'",
     "PySide6-Essentials>=6.6",
-    "imageio-ffmpeg>=0.6; sys_platform == 'win32'",  # FFmpeg 7.1 with ddagrab and GPU encoders
+    "imageio-ffmpeg>=0.6; sys_platform == 'win32'",  # FFmpeg 7.1 with ddagrab and GPU encoders (the exe has 8.1.1)
 ]
 
 [project.optional-dependencies]
