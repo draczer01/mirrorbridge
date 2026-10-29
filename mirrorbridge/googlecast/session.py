@@ -393,7 +393,7 @@ class GoogleCastMirror:
                             else encoder, width=width, height=height, fps=self.fps, backend=backend, monitor=monitor,
                             region=region)
         if encoder == VP8_ENCODER:
-            cmd = vp8_command(cmd, self.settings.video_bitrate_kbps, self.fps, self.settings.mirror_keyframe_seconds)
+            cmd = vp8_command(cmd, self.settings.video_bitrate_kbps, self.fps, self.settings.mirror_keyframes)
         self.encoder = encoder
         self._set(State.STARTING, Text("encoder_via", "{encoder} via {backend}",
                                        encoder=ffmpeg.ENCODER_LABELS.get(encoder, encoder),

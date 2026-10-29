@@ -248,6 +248,10 @@ Igual que `cast`, `mirror` parte de los ajustes de la app: sin `--monitor`, `--w
   registro guarda las últimas 30 líneas de FFmpeg cada vez que se detiene.
 * La TV le pide la hora al equipo por UDP: permite MirrorBridge, o los puertos UDP de entrada
   7880-7889, en el Firewall de Windows para redes privadas, o la TV no mostrará nada.
+  La hora por PTP, experimental (`mirror --timing ptp`, o `MIRRORBRIDGE_TIMING=ptp`), en la
+  que MirrorBridge es el reloj PTP de la TV, necesita además UDP 319 y 320 de entrada; si la
+  TV no sigue ese reloj en unos segundos (`MIRRORBRIDGE_PTP_LOCK_S`), la sesión sigue con NTP
+  y el registro dice por qué. Nada de PTP se guarda para la sesión siguiente.
 * `mirror --probe` prueba las formas en que las TVs difieren, muestra qué contestó la TV y
   guarda lo que funcionó en `%APPDATA%\MirrorBridge\mirroring.json`, que *Duplicar pantalla* y
   cada `mirror` piden primero. La última prueba de *Probar esta TV* hace lo mismo en 75

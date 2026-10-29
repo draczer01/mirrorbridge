@@ -5,10 +5,12 @@ import asyncio
 import dataclasses
 import json
 import logging
+import os
 import random
 import socket
 import struct
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -336,10 +338,13 @@ def test_pts_mapper_never_goes_backwards():
     assert mapper.map(90, 990_000_000) > first
 
 
-def test_pts_mapper_starts_again_with_a_new_ffmpeg():
+@pytest.mark.parametrize("slew_ns", [None, 100_000])
+def test_pts_mapper_starts_again_with_a_new_ffmpeg(slew_ns):
     """FFmpeg started again 5 s in: its pts are back at 0, its frames come 50 ms after they were
-    taken. The times follow the new frames at once and keep going up."""
-    mapper, ms, base = clock.PtsMapper(), 1_000_000, 10 * clock.NS
+    taken. The times follow the new frames at once and keep going up, also with the offset
+    moving at most slew_ns a frame (MIRRORBRIDGE_PTS_SLEW_US), which does not creep from the old
+    FFmpeg's origin to the new one's."""
+    mapper, ms, base = clock.PtsMapper(slew_ns=slew_ns), 1_000_000, 10 * clock.NS
     old = [mapper.map(i * 33, base + i * 33 * ms + 40 * ms) for i in range(150)]
     assert mapper.behind(150 * 33, base + 150 * 33 * ms + 40 * ms) == 0
     mapper.restart()
@@ -828,12 +833,10 @@ async def test_google_cast_mirroring_keeps_a_keyframe_every_2_s(monkeypatch):
     assert _option(started[-1], "-vf").startswith("hwdownload,format=bgra,scale=")
 
 
-async def test_google_cast_vp8_keeps_a_keyframe_every_2_s(monkeypatch):
-    """Its VP8 too, whatever the Debug menu says: the old switch it reads (Settings.
-    mirror_keyframe_seconds) stays 2 s, never Mirror screen's 0, which would make every VP8 frame
-    a keyframe; and it is not saved."""
-    from dataclasses import asdict
-
+async def test_google_cast_vp8_keeps_periodic_keyframes(monkeypatch):
+    """Its VP8 follows the Debug menu's keyframe setting, but never without periodic ones: Cast
+    Streaming needs them and it never starts FFmpeg again for one, so "only when needed" (0) is a
+    keyframe every 2 s there (MIRROR_KEYFRAME_SECONDS), never -g 1, every frame a keyframe."""
     from mirrorbridge.googlecast import session as cast_session
     from mirrorbridge.googlecast.discovery import CastDevice
     from mirrorbridge.googlecast.vp8 import ENCODER as VP8
@@ -849,6 +852,7 @@ async def test_google_cast_vp8_keeps_a_keyframe_every_2_s(monkeypatch):
             pass
 
     monkeypatch.setattr(cast_session, "IvfSource", Started)
+    gops = []
     for keyframes in ffmpeg.MIRROR_KEYFRAME_CHOICES:
         settings = Settings(mirror_keyframes=keyframes)
         cast = cast_session.GoogleCastMirror(CastDevice("TV", "192.0.2.1"), settings, source=TEST_PATTERN, codec="vp8")
@@ -857,9 +861,10 @@ async def test_google_cast_vp8_keeps_a_keyframe_every_2_s(monkeypatch):
         cast._frames, cast.canvas, cast.fps = FrameQueue(60), (1920, 1080), 30
         cast._start_source()
         cmd = started[-1]
-        assert _option(cmd, "-c:v") == VP8 and _option(cmd, "-g") == _option(cmd, "-keyint_min") == str(30 * 2)
-    assert Settings().mirror_keyframe_seconds == ffmpeg.MIRROR_KEYFRAME_SECONDS
-    assert "mirror_keyframe_seconds" not in asdict(Settings())
+        assert _option(cmd, "-c:v") == VP8 and _option(cmd, "-g") == _option(cmd, "-keyint_min")
+        gops.append(int(_option(cmd, "-g")))
+    # Only when needed (0), every 10 s, every 2 s: in frames at 30 fps.
+    assert ffmpeg.MIRROR_KEYFRAME_CHOICES == (0, 10, 2) and gops == [30 * 2, 30 * 10, 30 * 2]
 
 
 def test_mirror_command_test_pattern_and_desktop(monkeypatch):
@@ -1124,3 +1129,97 @@ async def test_the_video_connection_closes_cleanly_once_its_buffer_went_out():
     finally:
         server.close()
     assert len(received) == 300_000
+
+
+def test_an_experiment_shows_frames_as_they_arrive():
+    """MIRRORBRIDGE_ON_ARRIVAL=1: codec packets with 14 01 at [6:8] (without RespectTimestamps)."""
+    assert packets.codec_packet(b"avcc", 0, 1920, 1080, on_arrival=True)[6:8] == b"\x14\x01"
+    assert packets.codec_packet(b"avcc", 0, 1920, 1080, on_arrival=False)[6:8] == b"\x16\x01"
+
+
+def test_an_experiment_stops_answering_the_time_but_still_counts_the_requests():
+    """MIRRORBRIDGE_NTP_STOP_S: answers until that long after the first request, then none."""
+    sent = []
+    responder = clock.NtpResponder()
+    responder.transport = type("T", (), {"sendto": lambda self, data, addr: sent.append(data)})()
+    responder.stop_after_ns = 0  # stop as soon as the first request is in
+    request = clock.ntp_request(clock.now_ns())
+    responder.datagram_received(request, ("192.0.2.1", 5000))  # the first: answered
+    responder.datagram_received(request, ("192.0.2.1", 5000))  # later: not answered
+    assert len(sent) == 1 and responder.requests == 2 and responder.stopped_answering
+    assert responder.last_request_ns is not None  # the quiet warning goes by requests
+
+
+async def test_an_experiment_sends_the_heartbeat_only_when_no_frame_went(monkeypatch):
+    """MIRRORBRIDGE_HEARTBEAT_IDLE_ONLY=1: no heartbeat in a second a frame went out in."""
+    from mirrorbridge.mirror import datachannel
+
+    monkeypatch.setattr(datachannel, "HEARTBEAT_SECONDS", 0.05)
+    written = []
+
+    class Writer:
+        def write(self, data):
+            written.append(data)
+
+        def is_closing(self):
+            return False
+
+    reader = asyncio.StreamReader()
+    channel = datachannel.DataChannel(reader, Writer())
+    channel.heartbeat_idle_only = True
+    channel._started = True  # pylint: disable=protected-access
+    task = asyncio.ensure_future(channel._heartbeat())  # pylint: disable=protected-access
+    for _ in range(6):  # frames every 20 ms: no heartbeat
+        channel.write(b"frame")
+        await asyncio.sleep(0.02)
+    assert channel.heartbeats == 0 and channel.heartbeats_skipped >= 1
+    await asyncio.sleep(0.15)  # no frames: heartbeats again
+    assert channel.heartbeats >= 1
+    task.cancel()
+    reader.feed_eof()
+    for t in channel._tasks:  # pylint: disable=protected-access
+        t.cancel()
+
+
+def test_an_experiment_sets_up_mirroring_without_the_audio_stream(monkeypatch):
+    """MIRRORBRIDGE_NO_AUDIO=1: the plan has no audio stream (no type-96 SETUP)."""
+    from mirrorbridge.mirror import negotiation
+
+    monkeypatch.delenv("MIRRORBRIDGE_NO_AUDIO", raising=False)
+    assert negotiation.audio_from_env(True) is True
+    monkeypatch.setenv("MIRRORBRIDGE_NO_AUDIO", "1")
+    assert negotiation.audio_from_env(True) is False
+
+
+def test_an_experiment_adds_noise_to_the_test_pattern(monkeypatch):
+    """MIRRORBRIDGE_PATTERN_NOISE=N: noise before the pixel format, so the encoder fills the bitrate."""
+    from mirrorbridge.config import Settings
+
+    def vf():
+        cmd = source.build_command("ffmpeg", Settings(), source=source.TEST_PATTERN, encoder="h264_nvenc",
+                                   width=1920, height=1080, fps=60)
+        return cmd[cmd.index("-vf") + 1]
+
+    monkeypatch.delenv("MIRRORBRIDGE_PATTERN_NOISE", raising=False)
+    assert vf() == "format=nv12"
+    monkeypatch.setenv("MIRRORBRIDGE_PATTERN_NOISE", "12")
+    assert vf() == "noise=alls=12:allf=t,format=nv12"
+
+
+def test_an_experiment_says_the_sender_is_an_iphone_and_picks_the_h264_profile():
+    """MIRRORBRIDGE_SENDER=iphone and MIRRORBRIDGE_H264_PROFILE=main, read when MirrorBridge starts."""
+    code = ("from mirrorbridge import ffmpeg; from mirrorbridge.mirror import control, negotiation; "
+            "args = ffmpeg.mirror_encoder_args('h264_nvenc', 8000, 60); "
+            "print(negotiation.SENDER_MODEL, negotiation.SENDER_OS_BUILD, control.SENDER.get('osVersion'), "
+            "control.USER_AGENT, ffmpeg.MIRROR_PROFILE, args[args.index('-profile:v') + 1])")
+
+    def run(**knobs):
+        env = {key: value for key, value in os.environ.items() if not key.startswith("MIRRORBRIDGE_")}
+        return subprocess.run([sys.executable, "-c", code], env={**env, **knobs}, capture_output=True, text=True,
+                              check=True).stdout.split()
+
+    assert run() == ["Windows", "10.0", "None", "AirPlay/980.71.1", "high", "high"]
+    assert run(MIRRORBRIDGE_SENDER="iphone", MIRRORBRIDGE_H264_PROFILE="main") == [
+        "iPhone14,3", "20F66", "16.5", "AirPlay/690.7.1", "main", "main"]
+    assert run(MIRRORBRIDGE_SOURCE_VERSION="377.40.00", MIRRORBRIDGE_H264_PROFILE="nonsense")[3:] == [
+        "AirPlay/377.40.00", "high", "high"]

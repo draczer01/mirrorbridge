@@ -114,6 +114,9 @@ def build_command(
     if source == TEST_PATTERN:
         video_in = ["-re", "-f", "lavfi", "-i", f"testsrc=size={width}x{height}:rate={fps}"]
         filters = ["format=yuv420p" if encoder == "libx264" else "format=nv12"]
+        noise = os.environ.get("MIRRORBRIDGE_PATTERN_NOISE", "")
+        if noise.isdigit() and int(noise) > 0:  # experiment: a pattern that fills the bitrate
+            filters.insert(0, f"noise=alls={int(noise)}:allf=t")
     elif gpu and chain.kind == capture.GFX and chain.size_out is not None:
         # Windows Graphics Capture scales the display on the graphics card; frames as it changes
         video_in = capture.gfx_input(capture.gfx_monitor(monitor), chain.size_out, fps, settings.show_cursor)

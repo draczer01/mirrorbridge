@@ -7,6 +7,10 @@ NTP requests to the sender's timing port, RECORD, /feedback, TEARDOWN, and a vid
 whose frames it decrypts and turns back into an H.264 stream FFmpeg can decode. Its TvProfile
 also makes it slow, forgetful or stubborn in the ways real TVs can be.
 
+Under PTP timing it answers SETUP as Apple's SDK for receivers does (a timingPeerInfo without a
+ClockID, and no NTP), takes SETPEERS with the SDK's answers, and then starts a PTP clock of the
+kind TvProfile.ptp names (fake_ptp.py) on the ports ptp_ports() gives.
+
 It reads the wire on its own (struct offsets, HKDF with pyatv's hkdf_expand), not with
 mirrorbridge.mirror.packets, so that the two sides check each other.
 """
@@ -33,6 +37,7 @@ from pyatv.protocols.airplay.server_auth import AirPlayServerAuth
 from pyatv.support.chacha20 import Chacha20Cipher8byteNonce
 from pyatv.support.http import BasicHttpServer, HttpRequest, HttpResponse, http_server, parse_response
 
+from fake_ptp import FakePtp
 from mirrorbridge.mirror.control import Target
 
 _LOGGER = logging.getLogger(__name__)
@@ -78,6 +83,10 @@ class TvProfile:
     stall_after: Optional[int] = None  # stop reading the video after this many frames, keeping it open
     pause_after: Optional[int] = None  # once, after this many frames, read no video for pause_seconds
     pause_seconds: float = 0.6  # (as Wi-Fi holds the video up for a moment)
+    ptp: Optional[str] = None  # the PTP clock SETPEERS starts: "slave", "grandmaster", "both", "silent" (fake_ptp.py)
+    setpeers_status: int = 200  # what a SETPEERS the SDK would take is answered with (400: SetPeers failed)
+    ptp_video_status: Optional[int] = None  # the video stream's SETUP in a PTP session is answered with this
+    ptp_info: Optional[dict] = None  # GET /info's PTPInfo
 
 
 TCL = TvProfile()
@@ -93,6 +102,8 @@ class VideoReceived:
     arrived: list[int] = field(default_factory=list)  # when each frame came, time.perf_counter_ns()
     codec_subtypes: list[bytes] = field(default_factory=list)  # [6:8] of each codec packet
     paused_at: Optional[int] = None  # frames that had come when the TV paused (TvProfile.pause_after)
+    timelines: list[int] = field(default_factory=list)  # each frame's [40:48]
+    codec_after_lock: list[bool] = field(default_factory=list)  # each codec packet: our PTP clock followed first
     heartbeats: int = 0
     annexb: bytearray = field(default_factory=bytearray)
     errors: list[str] = field(default_factory=list)
@@ -127,6 +138,7 @@ class _EventSender(AbstractHAPChannel):
 
     def connection_made(self, transport) -> None:
         super().connection_made(transport)
+        self.tv.event_ports.append(transport.get_extra_info("sockname")[1])
         body = plistlib.dumps({"type": "updateInfo", "value": {"screenStreamState": "ready"}},
                               fmt=plistlib.FMT_BINARY)
         self.send(b"POST /command RTSP/1.0\r\nCSeq: 1\r\nContent-Type: application/x-apple-binary-plist\r\n"
@@ -189,6 +201,7 @@ class _Handler(AirPlayServerAuth):
         self.add_route("RECORD", ".*", self.handle_record)
         self.add_route("POST", "^/feedback$", self.handle_feedback)
         self.add_route("TEARDOWN", ".*", self.handle_teardown)
+        self.add_route("SETPEERS", ".*", self.handle_setpeers)
 
     def enable_encryption(self, output_key: bytes, input_key: bytes) -> None:
         self.conn.pending_keys = (output_key, input_key)  # after the M4 answer has gone out
@@ -246,6 +259,8 @@ class _Handler(AirPlayServerAuth):
             "statusFlags": 4,
             "deviceID": "AA:BB:CC:DD:EE:FF",
         }
+        if p.ptp_info is not None:
+            info["PTPInfo"] = p.ptp_info
         if p.displays_before_setup or self.mirror:
             info["displays"] = [{"uuid": self.tv.display_id, "widthPixels": p.width, "heightPixels": p.height,
                                  "width": p.width, "height": p.height, "maxFPS": p.max_fps, "features": 30,
@@ -261,6 +276,7 @@ class _Handler(AirPlayServerAuth):
             await asyncio.sleep(p.setup_delay)
         body = plistlib.loads(request.body)
         self.tv.setups.append(body)
+        self.tv.raw_setups.append(request.body)
         self.tv.user_agents.add(request.headers.get("User-Agent", ""))
         streams = body.get("streams") or []
         reply: dict = {}
@@ -269,6 +285,9 @@ class _Handler(AirPlayServerAuth):
             return self._answer(request, 455)
         if p.audio_first and 110 in types and not self.audio and 96 not in types[:types.index(110)]:
             return self._answer(request, 400)
+        if p.ptp_video_status and 110 in types and (body if "sessionUUID" in body else self.mirror).get(
+                "timingProtocol") == "PTP":
+            return self._answer(request, p.ptp_video_status)
         if "sessionUUID" in body:
             ordering = "media-first" if streams else "control-first"
             if ordering in p.refuse or not body.get("isScreenMirroringSession"):
@@ -278,7 +297,9 @@ class _Handler(AirPlayServerAuth):
             self.mirror = body
             self.tv.orderings.append(ordering)
             if body.get("timingProtocol") == "PTP":
-                peer = {"ID": "fe80::1", "Addresses": ["127.0.0.1"], "SupportsClockPortMatchingOverride": True}
+                # As the SDK answers: a random UUID, the session's addresses, no ClockID.
+                peer = {"ID": str(uuid.uuid4()).upper(), "Addresses": ["127.0.0.1"],
+                        "SupportsClockPortMatchingOverride": False}
                 if p.ptp_clock_id is not None:
                     peer["ClockID"] = p.ptp_clock_id
                 reply["timingPeerInfo"] = peer
@@ -369,6 +390,9 @@ class _Handler(AirPlayServerAuth):
                 if p.read_kbps:  # no faster than that
                     await asyncio.sleep(max(0.0, began + read * 8 / (p.read_kbps * 1000) - time.perf_counter()))
                 if kind == 1:
+                    ptp = self.tv.ptp
+                    received.codec_after_lock.append(ptp is not None and ptp.locked_ns is not None
+                                                     and ptp.locked_ns < arrived)
                     width, height = struct.unpack_from("<ff", header, 16)
                     # 0x14: frames shown as they come (RespectTimestamps, bit 0x02, cleared)
                     if header[6:8] not in (b"\x16\x01", b"\x14\x01") or (
@@ -399,6 +423,7 @@ class _Handler(AirPlayServerAuth):
                         received.errors.append(f"timestamp {timestamp:#x} after {received.frames[-1][0]:#x}")
                     received.frames.append((timestamp, idr, types))
                     received.arrived.append(arrived)
+                    received.timelines.append(struct.unpack_from("<Q", header, 40)[0])
                     received.annexb += (params if idr else b"") + out
                     drop = self.tv.profile.drop_video_after
                     if drop is not None and len(received.frames) >= drop:
@@ -424,6 +449,27 @@ class _Handler(AirPlayServerAuth):
 
     def handle_feedback(self, request: HttpRequest):
         return self._answer(request, 200)  # with nothing in it, as TCL's TVs answer
+
+    def handle_setpeers(self, request: HttpRequest):
+        """As the SDK's receiver: 454 without a session, 451 for anything but a binary-plist
+        array; then the PTP clock starts if the sender is among the peers."""
+        body = request.body if isinstance(request.body, bytes) else str(request.body).encode()
+        self.tv.setpeers.append((request.headers.get("Content-Type", ""), body))
+        if not self.mirror:
+            return self._answer(request, 454)
+        try:
+            peers = plistlib.loads(body) if body.startswith(b"bplist") else None
+        except Exception:  # pylint: disable=broad-except
+            peers = None
+        if not isinstance(peers, list):
+            return self._answer(request, 451)
+        if self.tv.profile.setpeers_status != 200:
+            return self._answer(request, self.tv.profile.setpeers_status)
+        self.tv.peers = peers
+        if self.tv.profile.ptp and self.conn.peer in peers:
+            self.tv.ptp_ports()
+            self.tv.ptp.begin(self.tv.profile.ptp)
+        return self._answer(request, 200)
 
     def handle_teardown(self, request: HttpRequest):
         self.tv.teardowns += 1
@@ -503,6 +549,17 @@ class FakeMirrorTV:
         self.user_agents: set[str] = set()
         self.video_writers: list[asyncio.StreamWriter] = []
         self.display_id = str(uuid.uuid4()).upper()  # a display's own UUID, as each TV makes one up
+        self.raw_setups: list[bytes] = []
+        self.setpeers: list[tuple[str, bytes]] = []  # (Content-Type, body) of each SETPEERS
+        self.peers: list = []  # what the last SETPEERS it took named
+        self.ptp: Optional[FakePtp] = None  # its PTP clock, once ptp_ports() opened it
+        self.event_ports: list[int] = []  # the port of each event channel the sender opened
+
+    def ptp_ports(self) -> tuple[int, int]:
+        """The UDP ports of its PTP clock (event, general), opened at the first call."""
+        if self.ptp is None:
+            self.ptp = FakePtp()
+        return self.ptp.ports
 
     async def start(self) -> "FakeMirrorTV":
         self.server, self.port = await http_server(lambda: _Connection(self), "127.0.0.1")
@@ -515,6 +572,8 @@ class FakeMirrorTV:
                 conn.transport.close()
         if self.server is not None:
             self.server.close()
+        if self.ptp is not None:
+            self.ptp.stop()
 
     def end_mirroring(self) -> None:
         """Someone ends mirroring on the TV: it closes its control and video connections at once."""

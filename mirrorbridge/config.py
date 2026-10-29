@@ -101,13 +101,6 @@ class Settings:
     last_device_id: str = ""
     manual_hosts: list[str] = field(default_factory=list)
 
-    @property
-    def mirror_keyframe_seconds(self) -> int:
-        """The old Debug keyframe switch, which Google Cast mirroring still reads for VP8: a
-        keyframe every 2 s (ffmpeg.MIRROR_KEYFRAME_SECONDS), as its H.264 keeps whatever the Debug
-        menu says. Not a setting any more, so it is neither loaded nor saved."""
-        return 2
-
     @classmethod
     def load(cls, path: Path | None = None) -> "Settings":
         path = path or app_data_dir() / "settings.json"

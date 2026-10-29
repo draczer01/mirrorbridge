@@ -1334,6 +1334,23 @@ async def test_mirror_command_test_pattern(tv, cli_device, capsys):
     assert out.rstrip().endswith("Mirrored for 1 s, as asked") and tv.teardowns == 1
 
 
+@pytest.mark.parametrize("argv, env", [(["--fps", "24"], ""), ([], "24")])
+async def test_mirror_command_takes_a_frame_rate_for_one_run(tv, cli_device, capsys, monkeypatch, argv, env):
+    """mirror --fps (or MIRRORBRIDGE_FPS) in place of Mirror screen settings > Frame rate, and
+    settings.json is left as it was."""
+    from mirrorbridge import cli
+
+    _ffmpeg()
+    SETTINGS.save()
+    saved = Settings.load()
+    if env:
+        monkeypatch.setenv("MIRRORBRIDGE_FPS", env)
+    args = cli.build_parser().parse_args(["mirror", "-d", "TCL", "--test-pattern", "--seconds", "1", *argv])
+    assert await cli.cmd_mirror(args) == 0
+    assert "[Casting] Mirroring the test pattern to TCL 55QM7L (640x360, 24 fps)" in capsys.readouterr().out
+    assert Settings.load() == saved
+
+
 async def test_mirror_command_names_the_forget_command(tv, cli_device, capsys):
     from mirrorbridge import cli
 

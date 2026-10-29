@@ -501,8 +501,9 @@ class _Probe:
             if state == State.CASTING:  # its first frame went to the TV: the time to look
                 self._pattern_shown()
 
+        # NTP whatever MIRRORBRIDGE_TIMING says: the probe's checks are made for it.
         session = MirrorSession(self.target, self.settings, status, source=TEST_PATTERN, profile=profile,
-                                seconds=self.seconds, remember=False)
+                                seconds=self.seconds, remember=False, timing=NTP)
         check.report = session.report
         try:
             await asyncio.wait_for(session.run(), self.seconds + STREAM_SETUP_SECONDS)

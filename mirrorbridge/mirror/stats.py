@@ -82,6 +82,7 @@ class StageTimes:
         self._window_start = now_ns()
         self._last: Optional[int] = None  # when the last frame came, was sent or was dropped
         self._ntp_requests: Optional[int] = None
+        self._lag: list[float] = []  # ms, this window
 
     def set_rate(self, kbps: int, fps: int) -> None:
         """The bitrate and frame rate asked for from now on (another FFmpeg)."""
@@ -126,6 +127,9 @@ class StageTimes:
             self._window[stage].append(ms)
             self._all[stage].append(ms)
 
+    def loop_lag(self, ns: int) -> None:
+        self._lag.append(ns / 1e6)
+
     def drop(self, count: int = 1) -> None:
         if count > 0:
             self._frame_seen()
@@ -135,9 +139,9 @@ class StageTimes:
     def due(self, now: Optional[int] = None) -> bool:
         return (now or now_ns()) - self._window_start >= self.interval_ns
 
-    def log_window(self, now: Optional[int] = None, ntp_requests: Optional[int] = None) -> None:
+    def log_window(self, now: Optional[int] = None, ntp_requests: Optional[int] = None, ptp: str = "") -> None:
         """Log the frames since the last time, and start a new window. `ntp_requests` is how
-        many times the TV has asked for the time so far."""
+        many times the TV has asked for the time so far; `ptp`, what PTP timing did (ptp.py)."""
         now = now or now_ns()
         seconds = max(1e-9, (now - self._window_start) / NS)
         parts = [f"{stage} {percentile(values, 0.5):.1f}/{percentile(values, 0.95):.1f}"
@@ -148,14 +152,19 @@ class StageTimes:
             if self._ntp_requests is not None:
                 timing = f"; the TV asked for the time {ntp_requests - self._ntp_requests} times"
             self._ntp_requests = ntp_requests
+        lag = ""
+        if self._lag:  # experiment: how late the session's loop runs a 10 ms sleep
+            lag = (f"; loop lag ms p50/p95/max {percentile(self._lag, 0.5):.1f}/{percentile(self._lag, 0.95):.1f}/"
+                   f"{max(self._lag):.1f}")
+            self._lag = []
         _LOGGER.info(
             "Mirroring: %.1f fps (of %s%d), %.1f Mbit/s; ms p50/p95: %s (after capture and encoding); lead %d ms; "
-            "up to %d KB waiting to go; keyframes %d (largest %d KB%s); dropped %d, late %d%s%s",
+            "up to %d KB waiting to go; keyframes %d (largest %d KB%s); dropped %d, late %d%s%s%s%s",
             delivered, "up to " if self.variable_rate else "", self.fps, self._window_bytes * 8 / seconds / 1e6,
             ", ".join(parts) or "no frames",
             self.lead_ms, self._window_buffered // 1024, self.keyframes, self.largest_keyframe // 1024,
             f", {self.big_keyframes} over {BIG_KEYFRAME_FRAMES} frames' share of the bitrate" if self.big_keyframes
-            else "", self.dropped, self.late, timing,
+            else "", self.dropped, self.late, timing, lag, f"; {ptp}" if ptp else "",
             f"; FFmpeg started again {self.restarts} times" if self.restarts else "",
         )
         restarted = (self._restarted_ns is not None
@@ -176,11 +185,11 @@ class StageTimes:
         self._window_buffered = 0
         self._window_start = now
 
-    def log_last(self, ntp_requests: Optional[int] = None) -> None:
+    def log_last(self, ntp_requests: Optional[int] = None, ptp: str = "") -> None:
         """Log the frames since the last window, which ends with the last frame: the time the
         session took to stop after it is not FFmpeg's."""
         if self._last is not None and (self._window_frames or self._window_dropped or self._window_arrived):
-            self.log_window(max(self._last, self._window_start + 1), ntp_requests)
+            self.log_window(max(self._last, self._window_start + 1), ntp_requests, ptp)
 
     def summary(self) -> dict:
         """p50/p95 (ms) of each stage over the session, and the counts."""

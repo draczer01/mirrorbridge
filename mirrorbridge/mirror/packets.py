@@ -25,9 +25,10 @@ heartbeats stay in the clear.
 
 from __future__ import annotations
 
+import os
 import struct
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Optional
 
 from pyatv.support.chacha20 import Chacha20Cipher8byteNonce
 
@@ -86,11 +87,17 @@ class Header:
         return cls(kind, size, timestamp, bool(flags & IDR_FLAG), width, height, timeline, bytes(data[6:8]))
 
 
-def codec_packet(avcc: bytes, timestamp: int, width: int, height: int, on_arrival: bool = False) -> bytes:
+# Experiment: MIRRORBRIDGE_ON_ARRIVAL=1 shows frames on arrival for every session, as the Debug menu's
+# "Show frames on arrival (test)" does for one.
+ON_ARRIVAL = os.environ.get("MIRRORBRIDGE_ON_ARRIVAL") == "1"
+
+
+def codec_packet(avcc: bytes, timestamp: int, width: int, height: int, on_arrival: Optional[bool] = None) -> bytes:
     """The avcC with its header. `on_arrival` clears RespectTimestamps, which receivers read
-    from the codec packet: they then show each frame as it comes instead of at its time."""
+    from the codec packet: they then show each frame as it comes instead of at its time.
+    None: MIRRORBRIDGE_ON_ARRIVAL decides."""
     subtype = _SUBTYPES[CODEC]
-    if on_arrival:
+    if ON_ARRIVAL if on_arrival is None else on_arrival:
         subtype = bytes([subtype[0] & ~RESPECT_TIMESTAMPS]) + subtype[1:]
     header = Header(CODEC, len(avcc), timestamp, width=float(width), height=float(height), subtype=subtype)
     return header.pack() + avcc
