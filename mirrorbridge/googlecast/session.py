@@ -47,7 +47,7 @@ from .vp8 import IvfSource, vp8_command
 _LOGGER = logging.getLogger(__name__)
 
 APP_ID = "0F5096E8"  # Chrome's audio and video mirroring receiver
-DEFAULT_DELAY_MS = 200  # Chrome asks for 400; a LAN gets lost packets again well within 200
+DEFAULT_DELAY_MS = 400  # as Chrome asks; the TCL closed the connection after 2 s at 200
 MIN_DELAY_MS, MAX_DELAY_MS = 50, 2000
 CATCH_UP_MS = 500  # how far past its delay the receiver may fall before frames are dropped
 QUEUE_SECONDS = 2
@@ -82,9 +82,10 @@ def choose_delay(wanted: Optional[int]) -> int:
 
 
 def choose_codec(wanted: Optional[str]) -> str:
-    """The codec to send: `wanted`, the test value in CODEC_ENV, or H.264."""
-    wanted = (wanted or os.environ.get(CODEC_ENV, "") or H264).strip().lower()
-    return wanted if wanted in CODECS else H264
+    """The codec to send: `wanted`, the test value in CODEC_ENV, or VP8: the TCL's receiver takes
+    H.264, says it decodes and shows every frame, and leaves the screen black."""
+    wanted = (wanted or os.environ.get(CODEC_ENV, "") or VP8).strip().lower()
+    return wanted if wanted in CODECS else VP8
 
 
 def find_app(status: dict) -> Optional[dict]:
@@ -141,14 +142,23 @@ class GoogleCastMirror:
         self._first_sent_ns: Optional[int] = None
         self._dropped = 0
         self._shown = 0
+        self._reported = False
         self._xscreen: Optional[extended.ExtendedScreen] = None
 
     @property
     def frames_shown(self) -> int:
-        """Frames the receiver's own event log says it showed: the proof the picture is on the
-        TV (frames sent, even acknowledged, can still leave it black)."""
+        """Frames the receiver's own event log says it showed: with VP8, the proof the picture is
+        on the TV (frames sent, even acknowledged, can still leave it black). With H.264 the TCL
+        reports every frame shown on a black screen."""
         sender = self._sender
         return sender.stats.played if sender is not None else self._shown
+
+    @property
+    def frames_reported(self) -> bool:
+        """Whether the receiver sends an event log at all: without one, frames_shown stays 0
+        even with the picture on the TV."""
+        sender = self._sender
+        return sender.stats.logs > 0 if sender is not None else self._reported
 
     def _set(self, state: State, message: str = "") -> None:
         self.state = state
@@ -481,6 +491,7 @@ class GoogleCastMirror:
         if self._sender is not None:
             self._log_stats()
             self._shown = self._sender.stats.played
+            self._reported = self._sender.stats.logs > 0
             self._sender.close()
             self._sender = None
         channel, self._channel = self._channel, None

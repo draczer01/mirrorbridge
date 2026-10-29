@@ -31,7 +31,7 @@ def vp8_command(h264_cmd: list[str], kbps: int, fps: int, keyframe_seconds: int)
     gop = max(1, round(fps * ffmpeg.mirror_keyframe_seconds(keyframe_seconds)))
     return h264_cmd[:cut] + [
         "-c:v", ENCODER, "-deadline", "realtime", "-cpu-used", "8", "-lag-in-frames", "0", "-auto-alt-ref", "0",
-        "-error-resilient", "1", "-row-mt", "1", "-threads", str(max(1, min(8, (os.cpu_count() or 2) // 2))),
+        "-error-resilient", "1", "-threads", str(max(1, min(8, (os.cpu_count() or 2) // 2))),
         "-b:v", f"{kbps}k", "-maxrate", f"{kbps}k", "-minrate", f"{kbps}k", "-bufsize", f"{max(1, kbps // 2)}k",
         "-g", str(gop), "-keyint_min", str(gop), "-flush_packets", "1", "-f", "ivf", "pipe:1",
     ]

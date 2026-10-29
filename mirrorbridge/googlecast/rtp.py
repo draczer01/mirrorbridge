@@ -136,6 +136,7 @@ class Rtcp:
     report: Optional[dict] = None  # fraction lost, cumulative lost, jitter, last SR, delay since it
     decoded: int = 0  # frames the receiver's event log says it decoded
     played: list[int] = field(default_factory=list)  # ...and showed: ms to spare (negative: late)
+    log: bool = False  # it had an event log at all
     kinds: list[int] = field(default_factory=list)
 
 
@@ -186,6 +187,7 @@ def parse_rtcp(packet: bytes) -> Rtcp:
         elif kind == PT_PSFB and count == 1:
             out.pli = True
         elif kind == PT_APP and count == RECEIVER_LOG and body[4:8] == CAST:
+            out.log = True
             _receiver_log(body[8:], out)
         pos += size
     return out

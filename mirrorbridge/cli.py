@@ -493,7 +493,7 @@ def build_parser() -> argparse.ArgumentParser:
     gcast.add_argument("--seconds", type=float, help="stop after this many seconds")
     gcast.add_argument("--delay", type=int, help="ms the TV shows each frame after it was taken "
                                                  f"(default {googlecast.DEFAULT_DELAY_MS})")
-    gcast.add_argument("--codec", choices=["h264", "vp8"], help="video codec (default h264)")
+    gcast.add_argument("--codec", choices=["h264", "vp8"], help="video codec (default vp8)")
     gcast.add_argument("--fps", dest="framerate", type=int)
     gcast.add_argument("--bitrate", type=int, help="video kbps")
     gcast.add_argument("--encoder", choices=["auto", *ffmpeg.ENCODER_PREFERENCE])
