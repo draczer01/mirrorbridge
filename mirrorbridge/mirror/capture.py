@@ -16,13 +16,13 @@ the command for each:
   has gfxcapture (8.1 and later): Windows Graphics Capture scales the display on the graphics
   card into the size asked for, keeping its shape (gfx_input), and NVENC converts its RGB as for
   GPU. It gives a frame only when something on the screen changes, stamped with when it did,
-  up to gfx_rate a second. An FFmpeg whose gfxcapture can repeat the last frame (dup_frames,
-  after FFmpeg 9.1: gfx_repeats) is asked to, as ddagrab does by itself, and gfx_filters keeps
-  the frames to the frame rate sent. Without it a still screen gives no frames for as long as
-  it stays so (the session allows for that), and none come to sharpen the one that changed it,
-  which is blurred through a one-frame VBV (a larger one helps only in part:
-  GFX_STILL_VBV_FRAMES). A still slide would stay blurred until something moves, so Scaling
-  "auto" takes GFX only with repeats, and "gfx" (the Debug menu's test) takes it either way.
+  up to gfx_rate a second, each going to the encoder as it comes. An FFmpeg whose gfxcapture
+  can repeat the last frame (dup_frames, after FFmpeg 9.1: gfx_repeats) is asked to, as ddagrab
+  does by itself. Without it a still screen gives no frames for as long as it stays so (the
+  session allows for that), and none come to sharpen the one that changed it, which is blurred
+  through a one-frame VBV (a larger one helps only in part: GFX_STILL_VBV_FRAMES). A still
+  slide would stay blurred until something moves, so Scaling "auto" takes GFX only with
+  repeats, and "gfx" (the Debug menu's test) takes it either way.
 - CPU, for every other encoder and capture, and as the fallback: the frames are copied to
   memory and scaled by swscale into BT.709 limited range, and tagged so (until now the pixels
   were BT.601 and the stream said nothing, which receivers take as BT.709 for HD).
@@ -60,13 +60,12 @@ GPU_ENCODERS = ("h264_nvenc",)  # encoders the graphics card chains feed; Quick 
 GPU_SCALED_ENABLED = False
 GFX_ENABLED = True  # gfxcapture when the screen is bigger than the TV's (if this FFmpeg has it)
 GFX_REPEATS = "dup_frames"  # gfxcapture's option to repeat the last frame (FFmpeg after 9.1: gfx_repeats)
-GFX_EXTRA_FPS = 10  # gfxcapture's max_framerate above the frame rate sent, with repeats (gfx_rate)
-# Without repeats nothing keeps the frames to the frame rate (gfx_filters), so max_framerate is the
+# Nothing keeps gfxcapture's frames to the frame rate (gfx_rate says why), so max_framerate is the
 # frame rate and this much more: Windows hands a frame over no sooner than 1/max_framerate after the
 # last one, and at exactly 60 a 60 Hz screen's refreshes would be right at that edge, where one a
 # hair early would wait for the next. At 62 (16.1 ms) a 60, 120 or 240 Hz screen gives 60 frames a
-# second; one whose refresh is not a multiple of 60 gives fewer: 50 at 200 Hz (every fourth
-# refresh), 48 at 144 Hz and 55 at 165 Hz (every third).
+# second while it changes; one whose refresh is not a multiple of 60 gives fewer: 50 at 200 Hz
+# (every fourth refresh), 48 at 144 Hz and 55 at 165 Hz (every third).
 GFX_SPARE_FPS = 2
 # The VBV, in frames, of the GFX chain without repeats. Through the one-frame VBV of the other chains
 # (ffmpeg.MIRROR_VBV_FRAMES) a frame that changes most of the screen (a keyframe, a new slide) comes
@@ -86,6 +85,9 @@ GFX_SPARE_FPS = 2
 # (50 ms at 60 fps, 100 ms at 30); on a 100 Mbit/s link, 4 ms.
 GFX_STILL_VBV_FRAMES = 4
 GFX_SCALE_MODE = "bilinear"  # gfxcapture's own default (bicubic is not measured)
+# The first frames of each FFmpeg whose gfxcapture repeats frames that are looked at for the black ones it
+# may begin with (gfx_black_start)
+GFX_BLACK_FRAMES = 6
 # What gfxcapture logs when Windows ends its capture (the display gone): only as information, which
 # FFmpeg does not show at -loglevel warning, and the video ends, so FFmpeg ends by itself, exit code 0.
 GFX_CLOSED = "Capture item closed"
@@ -376,21 +378,62 @@ def gfx_repeats(ff: str) -> bool:
     return GFX_REPEATS in ffmpeg.filter_options(ff, "gfxcapture")
 
 
-def gfx_rate(fps: int, repeats: bool) -> int:
-    """gfxcapture's max_framerate when `fps` are sent. Windows hands a frame over at a refresh of
-    the screen at least 1/max_framerate after the last one: on Humberto's 200 Hz screen 60
-    (16.7 ms) gave every fourth refresh, 50 fps, and 70 (14.3 ms) every third, 66 fps. With
-    repeats, GFX_EXTRA_FPS more, which gfx_filters keeps to `fps` (on a 144 Hz screen 70 is still
-    every third refresh: 48 fps); without, GFX_SPARE_FPS more, and nothing else."""
-    return fps + (GFX_EXTRA_FPS if repeats else GFX_SPARE_FPS)
+def gfx_rate(fps: int) -> int:
+    """gfxcapture's max_framerate when `fps` are sent: GFX_SPARE_FPS more. Windows hands a frame
+    over at a refresh of the screen at least 1/max_framerate after the last one (on Humberto's
+    200 Hz screen 60, 16.7 ms, gave every fourth refresh, 50 fps, and 70, 14.3 ms, every third,
+    66 fps). With repeats, gfxcapture repeats the last frame when none came for 1.5 of those
+    intervals (24 ms at 62), then once each interval (16.1 ms) until one comes (FFmpeg's
+    vsrc_gfxcapture_winrt.cpp): 62 a second on a still screen.
+
+    Each frame goes to the encoder as it comes (gfx_filters): nothing keeps them to `fps`. Not
+    the fps filter: that holds each frame until the next one comes, to know how many times to
+    repeat it, so on a screen that changes now and then each change would show only with the
+    next one, and the time between them would come at once, as repeats of the frame before (seen
+    with a source like gfxcapture's: a frame 1.5 s late, then 84 repeats in 70 ms). Nor select
+    keeping the first frame in each 1/fps of a second, with max_framerate 10 above the frame
+    rate (as before, for 60 a second of a 200 Hz screen's 66): a repeat takes a slot as readily
+    as a new frame, and a new frame that came after one in the same slot was left out, to show
+    only with the next repeat, about 21 ms later. With gfxcapture's timing simulated, that was
+    18 of 48 frames of 24 fps video on a 60 Hz screen (unevenly: judder) and 59 of 75 of a 75 Hz
+    screen in motion.
+
+    The cost: fewer frames than `fps` while a screen whose refresh is not a multiple of it
+    changes (50 at 200 Hz), and more where its refreshes put a new frame just after a repeat. A
+    75 Hz screen in motion gives a new frame every second refresh (37.5 a second) and a repeat
+    1 to 2 ms before each, and 24 fps video on a 120 or 144 Hz screen 72 frames a second
+    (simulated). NVENC gives each frame its share (gfx_kbps), so there the stream is up to a
+    quarter over its bitrate."""
+    return fps + GFX_SPARE_FPS
 
 
-def gfx_kbps(kbps: int, fps: int, repeats: bool) -> int:
+def gfx_kbps(kbps: int, fps: int) -> int:
     """The bitrate NVENC is given with gfxcapture. It is told gfx_rate frames a second (the
     capture's own rate: FFmpeg has no other to give it for frames that come as the screen
     changes) and gives each frame its bitrate's share of that, so it gets as many more kbit/s
     as make each frame's share what it is at `fps`, and the VBV (bufsize) the same."""
-    return round(kbps * gfx_rate(fps, repeats) / max(1, fps))
+    return round(kbps * gfx_rate(fps) / max(1, fps))
+
+
+def gfx_black_start(times_ms: list[int], rate: int) -> int:
+    """How many of the first frames of an FFmpeg whose gfxcapture repeats frames (their times in
+    ms, as FFmpeg wrote them; `rate`, its gfx_rate) were most likely black: with no picture from
+    Windows within 1/rate of a second of the first ask, gfxcapture sends a black frame, and
+    another every 1/rate until one comes (FFmpeg's vsrc_gfxcapture_winrt.cpp), so the encoder's
+    first frame, the keyframe, is black, and the picture follows as the next frame. Those are
+    frames 1/rate apart from the first, then one sooner than that after them: a frame of the
+    screen never comes that soon after another (Windows hands the next over at least 1/rate
+    after it), nor a repeat (1.5/rate after a frame of the screen, 1/rate after a repeat), so it
+    is a frame of the screen after a repeat, and before the first picture the only frame to
+    repeat is black. 0 if not so."""
+    interval = 1000 / max(1, rate)
+    for n in range(1, len(times_ms)):
+        gap = times_ms[n] - times_ms[n - 1]
+        if gap < interval - 1:
+            return n
+        if abs(gap - interval) > 1:  # not a repeat's: a picture came first
+            return 0
+    return 0
 
 
 def gfx_monitor(monitor: "ffmpeg.Monitor | None") -> str:
@@ -421,39 +464,26 @@ def gfx_monitor(monitor: "ffmpeg.Monitor | None") -> str:
 def gfx_input(target: str, size: tuple[int, int], fps: int, cursor: bool, repeats: bool) -> list[str]:
     """gfxcapture's input: the display `target` names (gfx_monitor; with none FFmpeg ends at once,
     saying so), scaled on the graphics card into `size` keeping its shape (fit_even's, so with no
-    bars), up to gfx_rate(fps, repeats) frames a second, repeating the last one while the screen
-    is still (`repeats`: an FFmpeg that can, gfx_repeats) or not, with the mouse pointer or not."""
+    bars), up to gfx_rate(fps) frames a second, repeating the last one while the screen is still
+    (`repeats`: an FFmpeg that can, gfx_repeats) or not, with the mouse pointer or not."""
     options = [target, f"width={size[0]}", f"height={size[1]}", "resize_mode=scale_aspect",
-               f"scale_mode={GFX_SCALE_MODE}", f"max_framerate={gfx_rate(fps, repeats)}",
+               f"scale_mode={GFX_SCALE_MODE}", f"max_framerate={gfx_rate(fps)}",
                f"{GFX_REPEATS}=1" if repeats else "", f"capture_cursor={int(bool(cursor))}"]
     return ["-f", "lavfi", "-i", "gfxcapture=" + ":".join(option for option in options if option)]
 
 
-def gfx_filters(fps: int, repeats: bool) -> list[str]:
-    """gfxcapture's -vf with repeats: at most one frame in each 1/fps of a second (the first that
-    comes in it), each as soon as it comes; without, none (gfx_rate keeps to about fps).
-
-    Not the fps filter: that holds each frame until the next one comes, to know how many times
-    to repeat it, so on a screen that changes now and then each change would show only with the
-    next one, and the time between them would come at once, as repeats of the frame before (seen
-    with a source like gfxcapture's: a frame 1.5 s late, then 84 repeats in 70 ms).
-
-    The slots are half of one off the first frame: gfxcapture's times start at 0 with it, so on a
-    screen refreshed at the frame rate (60 Hz) the next ones would come at the slots' edges, and
-    a few microseconds early would put one in the slot of the frame before, which loses it (half
-    of a 60 a second, in a test with times 0.05 ms either side of the edges).
-
-    A frame that comes in the slot of the one before is left out (on a 200 Hz screen, gfxcapture
-    gives 66 a second for 60: one in ten). If it was the last change for a while, its first
-    repeat is not: gfxcapture repeats the last frame when none came for 1.5 of its intervals
-    (FFmpeg's vsrc_gfxcapture_winrt.cpp: 21 ms at 70 a second, then every 14 ms), stamped later
-    than that frame by at least as much, so in a later slot (1.5/gfx_rate is more than 1/fps
-    above 20 fps), and the screen as it ended reaches the TV about 21 ms late, not never.
-    Without repeats nothing would come after it, and the TV would show the frame before until
-    the screen changes again: so then no select."""
+def gfx_filters(repeats: bool) -> list[str]:
+    """gfxcapture's -vf: with repeats, each frame at least 1 ms after the one before; without,
+    none. gfxcapture stamps a frame of the screen that came just after a repeat 100 ns after it
+    (when the repeat went out between the frame's capture and its arrival), and FFmpeg puts each
+    frame on the encoder's milliseconds (GFX_OUTPUT): one in the millisecond of the one before
+    goes 1 ms later if FFmpeg gives it a duration (1/max_framerate, from the link's rate), and is
+    left out if not (FFmpeg 7.1, on a source like gfxcapture's whose link says no rate). So it
+    does not depend on that. Without repeats no two frames come so close: Windows hands them over
+    1/max_framerate apart."""
     if not repeats:
         return []
-    return [f"select='isnan(prev_selected_t)+gt(floor(t*{fps}+0.5),floor(prev_selected_t*{fps}+0.5))'"]
+    return ["setpts='if(isnan(PREV_OUTPTS),PTS,max(PTS,PREV_OUTPTS+0.001/TB))'"]
 
 
 # -- the picture made ------------------------------------------------------------------------------

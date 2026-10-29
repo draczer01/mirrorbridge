@@ -944,10 +944,10 @@ GFX_MAIN = ffmpeg.Monitor(0, 0, 0, 2560, 1440, True, 0, device=r"\\.\DISPLAY1")
 GFX_COMMAND = [
     "ffmpeg.exe", "-hide_banner", "-nostats", "-loglevel", "warning", "-thread_queue_size", "2",
     "-f", "lavfi", "-i", "gfxcapture=hmonitor=65537:width=1920:height=1080:resize_mode=scale_aspect:scale_mode=bilinear"
-    ":max_framerate=70:dup_frames=1:capture_cursor=1",
-    "-vf", "select='isnan(prev_selected_t)+gt(floor(t*60+0.5),floor(prev_selected_t*60+0.5))'",
+    ":max_framerate=62:dup_frames=1:capture_cursor=1",
+    "-vf", "setpts='if(isnan(PREV_OUTPTS),PTS,max(PTS,PREV_OUTPTS+0.001/TB))'",
     "-an", "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ll", "-rc", "cbr", "-profile:v", "high",
-    "-zerolatency", "1", "-delay", "0", "-forced-idr", "1", "-b:v", "9333k", "-maxrate", "9333k", "-bufsize", "133k",
+    "-zerolatency", "1", "-delay", "0", "-forced-idr", "1", "-b:v", "8267k", "-maxrate", "8267k", "-bufsize", "133k",
     "-g", "2147483647", "-bf", "0", "-enc_time_base", "1:1000",
     "-bsf:v", "h264_metadata=colour_primaries=1:transfer_characteristics=1",
     "-flush_packets", "1", "-flvflags", "no_duration_filesize+no_metadata", "-f", "flv", "pipe:1"]
@@ -967,11 +967,11 @@ GFX_CHANGES_COMMAND = [
 def test_mirror_command_with_gfxcapture(monkeypatch, repeats):
     """A screen bigger than the TV's, with NVENC: Windows Graphics Capture scales it on the graphics
     card, for the display found by its handle (not ddagrab's output index); NVENC converts the RGB
-    itself, and the stream says BT.709 primaries and transfer as at the screen's own size. With
-    repeats, up to 10 frames a second more than are sent, kept to the frame rate by select, and
-    NVENC told the capture's 70 fps and as much more bitrate (the same 133 kbit a frame); without,
-    up to 62 a second and no select (it could leave out the last change of a burst), NVENC told
-    62 fps, and a VBV of 4 frames (533 kbit) for a still screen's last frame."""
+    itself, and the stream says BT.709 primaries and transfer as at the screen's own size. Up to
+    62 frames a second, each to the encoder as it comes (select's slots left out a frame of the
+    screen that came after a repeat in the same slot; with repeats, each at least 1 ms after the
+    one before), NVENC told 62 fps and as much more bitrate (the same 133 kbit a frame); with
+    repeats a VBV of one frame, without, of 4 frames (533 kbit) for a still screen's last frame."""
     monkeypatch.setattr(capture, "gfx_monitor", lambda monitor: "hmonitor=65537" if monitor is GFX_MAIN else "")
     monkeypatch.setattr(source, "_version", lambda ff: (8, 1))
 
@@ -984,18 +984,16 @@ def test_mirror_command_with_gfxcapture(monkeypatch, repeats):
     assert command() == expected
     assert not any("ddagrab" in arg or "hwdownload" in arg for arg in expected)
     assert _option(command(Settings(show_cursor=False)), "-i").endswith(":capture_cursor=0")
-    # Every 2 s (as for the other chains): the forced keyframes by time, -g only a bound at 70 (62) fps.
+    # Every 2 s (as for the other chains): the forced keyframes by time, -g only a bound at 62 fps.
     periodic = command(keyframes=2)
     assert _option(periodic, "-force_key_frames") == "expr:gte(t,n_forced*2)"
-    assert _option(periodic, "-g") == ("140" if repeats else "124")
+    assert _option(periodic, "-g") == "124"
     thirty = command(fps=30)
+    assert ("-vf" in thirty) == repeats and _option(thirty, "-b:v") == "8533k"
     if repeats:
-        assert ":max_framerate=40:dup_frames=1:" in _option(thirty, "-i")
-        assert "floor(t*30+0.5)" in _option(thirty, "-vf")
-        assert (_option(thirty, "-b:v"), _option(thirty, "-bufsize")) == ("10667k", "267k")
+        assert ":max_framerate=32:dup_frames=1:" in _option(thirty, "-i") and _option(thirty, "-bufsize") == "267k"
     else:
-        assert ":max_framerate=32:capture_cursor=1" in _option(thirty, "-i") and "-vf" not in thirty
-        assert (_option(thirty, "-b:v"), _option(thirty, "-bufsize")) == ("8533k", "1067k")
+        assert ":max_framerate=32:capture_cursor=1" in _option(thirty, "-i") and _option(thirty, "-bufsize") == "1067k"
     # The display gone since: no option for it, so FFmpeg ends at once, saying so.
     gone = dataclasses.replace(GFX_MAIN, device=r"\\.\DISPLAY9")
     assert _option(command(monitor=gone), "-i").startswith("gfxcapture=width=1920:height=1080:")
@@ -1100,6 +1098,21 @@ def test_stage_times_do_not_warn_of_a_slow_ffmpeg_for_a_window_it_was_started_ag
     assert times.summary()["slow_windows"] == 1 and times.summary()["restarts"] == 1
     times.set_rate(1500, 30)  # the x264 FFmpeg that came after a hardware encoder's
     assert (times.fps, times.frame_budget) == (30, 1500 * 1000 // 8 // 30)
+
+
+def test_stage_times_do_not_warn_of_frames_at_the_screens_refreshes(caplog):
+    """gfxcapture (with repeats too) gives a frame at a refresh of the screen no sooner than 1/62 s
+    after the last: 50 a second while a 200 Hz screen changes, which is no capture or encoder
+    that cannot keep up. The line says them of the 60 asked for, not "up to"."""
+    caplog.set_level("INFO")
+    times = stats.StageTimes(kbps=8000, fps=60, lead_ms=100)
+    times.paced_by_screen = True
+    start = clock.now_ns()
+    for _ in range(100):
+        times.add(1000, keyframe=False)
+    times.log_window(start + 2 * clock.NS)
+    assert "Mirroring: 50.0 fps (of 60)" in caplog.text and "cannot keep up" not in caplog.text
+    assert times.summary()["slow_windows"] == 0
 
 
 def test_stage_times_do_not_warn_of_a_screen_that_changes_now_and_then(caplog):

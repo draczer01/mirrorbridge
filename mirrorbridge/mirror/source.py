@@ -120,13 +120,13 @@ def build_command(
             filters.insert(0, f"noise=alls={int(noise)}:allf=t")
     elif gpu and chain.kind == capture.GFX and chain.size_out is not None:
         # Windows Graphics Capture scales the display on the graphics card; frames as it changes,
-        # and repeats of the last while it does not if this FFmpeg can (chain.repeats)
-        repeats = chain.repeats
+        # and repeats of the last while it does not if this FFmpeg can (chain.repeats), each to
+        # the encoder as it comes (capture.gfx_rate)
         video_in = capture.gfx_input(capture.gfx_monitor(monitor), chain.size_out, fps, settings.show_cursor,
-                                     repeats)
-        filters = capture.gfx_filters(fps, repeats)
+                                     chain.repeats)
+        filters = capture.gfx_filters(chain.repeats)
         output = capture.output_args(chain)
-        kbps, rate = capture.gfx_kbps(kbps, fps, repeats), capture.gfx_rate(fps, repeats)
+        kbps, rate = capture.gfx_kbps(kbps, fps), capture.gfx_rate(fps)
         vbv = capture.vbv_frames(chain)
     else:
         settings_in = dataclasses.replace(settings, framerate=fps)

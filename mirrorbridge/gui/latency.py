@@ -127,16 +127,17 @@ def clock_text(seconds: float) -> str:
 
 
 def short_stats(line: str) -> str:
-    """A "Mirroring:" line cut to what fits under the clock: the frame rate, the age of the frames
-    when sent (p50/p95) and the TV's lead. Anything else is shown whole."""
+    """A "Mirroring:" line cut to what fits under the clock: the frame rate (of the one asked for,
+    or of "up to" it for a capture that gives frames only as the screen changes), the age of the
+    frames when sent (p50/p95) and the TV's lead. Anything else is shown whole."""
     found = _STATS.search(line)
     if not found:
         return line
-    fps, asked, age, lead = found.groups()
-    return f"{fps} fps (of {asked}) · age p50/p95 {age} ms · lead {lead} ms"
+    fps, up_to, asked, age, lead = found.groups()
+    return f"{fps} fps (of {up_to or ''}{asked}) · age p50/p95 {age} ms · lead {lead} ms"
 
 
-_STATS = re.compile(r"Mirroring: ([\d.]+) fps \(of (\d+)\).*?\bage ([\d.]+/[\d.]+) .*?lead (\d+) ms")
+_STATS = re.compile(r"Mirroring: ([\d.]+) fps \(of (up to )?(\d+)\).*?\bage ([\d.]+/[\d.]+) .*?lead (\d+) ms")
 
 
 def tick_ms(refresh_rate: float) -> int:

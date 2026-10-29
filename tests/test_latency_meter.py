@@ -72,6 +72,26 @@ def test_the_log_line_is_cut_to_the_frame_rate_the_age_and_the_lead():
         "Mirroring: 0.0 fps (of 24), 0.0 Mbit/s; ms p50/p95: no frames")
 
 
+def test_the_log_line_of_a_capture_that_gives_frames_as_the_screen_changes_is_cut_too(caplog):
+    """gfxcapture without repeats: the line says "(of up to 60)", and has the loop's lag and
+    PTP's tail after the lead. The meter shows the frame rate, the age and the lead, not the whole
+    line cut off on the right before the age."""
+    from mirrorbridge.gui.latency import short_stats
+    from mirrorbridge.mirror import clock, stats
+
+    caplog.set_level("INFO", logger="mirrorbridge.mirror.stats")
+    times = stats.StageTimes(kbps=8000, fps=60, lead_ms=100)
+    times.variable_rate = True
+    start = clock.now_ns()
+    for i in range(90):
+        times.add(1000, keyframe=i == 0, pipe=8_000_000, age=9_300_000 if i < 80 else 16_500_000)
+        times.loop_lag(2_000_000)
+    times.log_window(start + 2 * clock.NS, ntp_requests=3, ptp="PTP a second: 8 Sync, 8 Follow_Up")
+    line = next(record.getMessage() for record in caplog.records if record.getMessage().startswith("Mirroring:"))
+    assert "(of up to 60)" in line and "; loop lag ms" in line and line.endswith("PTP a second: 8 Sync, 8 Follow_Up")
+    assert short_stats(line) == "45.0 fps (of up to 60) · age p50/p95 9.3/16.5 ms · lead 100 ms"
+
+
 def test_the_debug_menu_opens_a_clock_on_every_screen_and_esc_closes_them_all(controller, monkeypatch):
     from PySide6.QtCore import QEvent, Qt
     from PySide6.QtGui import QGuiApplication, QKeyEvent

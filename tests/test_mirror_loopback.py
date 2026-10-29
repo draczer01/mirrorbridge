@@ -956,9 +956,9 @@ async def test_gfxcapture_that_fails_before_its_first_frame_gives_way_to_the_pro
     assert ("Capture chain: the graphics card's, through Windows Graphics Capture (gfxcapture scales from 1920x1080 "
             "to 1280x720, repeating the last frame while the screen is still)") in caplog.text
     assert ("FFmpeg 1 (start): GPU gfxcapture with repeats, 1920x1080 -> 1280x720, x264 (CPU) at 30 fps, 1500 kbit/s "
-            "(VBV 6250 bytes; NVENC told 2000 kbit/s at 40 fps, the same share a frame), gfxcapture's frames as the "
-            "screen changes and repeats of the last while it does not, up to 40 a second (kept to 30), keyframes "
-            "only when needed") in caplog.text
+            "(VBV 6250 bytes; NVENC told 1600 kbit/s at 32 fps, the same share a frame), gfxcapture's frames as the "
+            "screen changes and repeats of the last while it does not, up to 32 a second, each as it comes, "
+            "keyframes only when needed") in caplog.text
     assert (r"gfxcapture with libx264 on the graphics card failed on \\.\DISPLAY1 (not tried there again until "
             "MirrorBridge quits), trying the processor's chain. FFmpeg said:\n[Parsed_gfxcapture_0 @ 0x1] Failed to "
             "create D3D11VA device.") in caplog.text
@@ -1026,6 +1026,35 @@ async def test_a_still_screen_does_not_end_a_gfxcapture_session(tv, monkeypatch,
     if ends is None:
         assert session.error is None and session.report.frames_sent == frames and session.report.restarts == []
         assert "cannot keep up" not in caplog.text and "fps (of up to 30)" in caplog.text
+    assert "black keyframe" not in caplog.text  # its frames 1/30 s apart: none black
+
+
+@pytest.mark.parametrize("black", [True, False])
+async def test_a_gfxcapture_start_on_a_black_frame_is_told(tv, monkeypatch, caplog, black):
+    """gfxcapture that repeats frames sends a black one when Windows gives no picture within
+    1/32 s of the first ask (here at 30 fps), which becomes the TV's first keyframe; the picture
+    then comes sooner after it than a repeat would. The log says so, for each FFmpeg; not when
+    the picture comes first."""
+    _ffmpeg()
+    _gfxcapture(tv, monkeypatch)
+    Screen(monkeypatch, size=(1280, 720))
+    stand_in = mirror_session.build_command
+
+    def black_first(ff, settings, **kw):
+        cmd = stand_in(ff, settings, **kw)
+        if black:  # the second frame 1 ms after the first, then one every 1/30 s; in ms, as gfxcapture's
+            cmd[cmd.index("-vf") + 1] += ",settb=1/1000,setpts='if(eq(N\\,0)\\,0\\,0.001+(N-1)/30)/TB'"
+        return cmd[:-3] + ["-enc_time_base", "1:1000"] + cmd[-3:]
+
+    monkeypatch.setattr(mirror_session, "build_command", black_first)
+    session = MirrorSession(tv.target(), GFX_SETTINGS, seconds=1, remember=False)
+    with caplog.at_level(logging.INFO, logger=mirror_session.__name__):
+        await asyncio.wait_for(session.run(), 60)
+    assert session.error is None and tv.videos[0].frames
+    told = ("FFmpeg 1: its first frame was most likely black (frames at 0, 1 ms: the picture 1 ms after, sooner "
+            "than gfxcapture repeats a frame), as gfxcapture sends while Windows gives no picture yet: the TV began "
+            "with a black keyframe")
+    assert told in caplog.text if black else "black keyframe" not in caplog.text
 
 
 async def test_gfxcapture_ending_its_video_is_a_lost_capture(tv, monkeypatch, caplog):

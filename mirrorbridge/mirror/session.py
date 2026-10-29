@@ -626,7 +626,9 @@ class MirrorSession:
         size_in = capture.capture_size(backend, monitor, region) if self.source == DESKTOP else None
         chain = self._chain = self._chain_for(backend, kind)
         changes_only = chain is not None and chain.changes_only and backend == "ddagrab"
+        gfx = chain is not None and chain.kind == capture.GFX and backend == "ddagrab"
         self._stats.variable_rate = changes_only  # gfxcapture without repeats: frames only as the screen changes
+        self._stats.paced_by_screen = gfx  # gfxcapture: frames at the screen's refreshes, fewer at 200 Hz
         self.report.keyframes = keyframes_text(encoder, s)
         fps = self.report.fps
         cmd = build_command(ff, s, source=self.source, encoder=encoder, width=canvas[0], height=canvas[1], fps=fps,
@@ -638,6 +640,8 @@ class MirrorSession:
         self._gen_frames = 0
         frames, stats = self._frames, self._stats
         assert frames is not None
+        # gfxcapture that repeats frames may begin with black ones (capture.gfx_black_start): their times
+        first_times: Optional[list[int]] = [] if gfx and chain is not None and chain.repeats else None
 
         def take(unit: Optional[Unit]) -> None:
             if gen != self._accepting:  # from an FFmpeg stopped for a newer one
@@ -648,6 +652,10 @@ class MirrorSession:
                     self._recovering_since = 0  # the capture is back
                 self._gen_frames += 1
                 stats.arrived()
+                if first_times is not None and len(first_times) < capture.GFX_BLACK_FRAMES:
+                    first_times.append(unit.pts_ms)
+                    if len(first_times) == capture.GFX_BLACK_FRAMES:
+                        self._black_start(gen, first_times, capture.gfx_rate(fps))
             frames.put(unit)
 
         def hand_over(unit: Optional[Unit]) -> None:  # from FFmpeg's pipe thread
@@ -666,11 +674,11 @@ class MirrorSession:
             rate += f", {vbv_frames:g} frames"
         if chain is not None and chain.kind == capture.GFX and backend == "ddagrab":
             # what NVENC is told (source.build_command), and the frames it gets
-            top = capture.gfx_rate(fps, chain.repeats)
-            rate += (f"; NVENC told {capture.gfx_kbps(s.video_bitrate_kbps, fps, chain.repeats)} kbit/s at {top} "
+            top = capture.gfx_rate(fps)
+            rate += (f"; NVENC told {capture.gfx_kbps(s.video_bitrate_kbps, fps)} kbit/s at {top} "
                      "fps, the same share a frame")
             gfx_said = (f", gfxcapture's frames as the screen changes and repeats of the last while it does not, up "
-                        f"to {top} a second (kept to {fps})" if chain.repeats else
+                        f"to {top} a second, each as it comes" if chain.repeats else
                         f", frames only as the screen changes, without repeats (gfxcapture up to {top} a second)")
         _LOGGER.info("FFmpeg %d (%s): %s, %s -> %s%dx%d, %s at %s%d fps, %d kbit/s (%s)%s, keyframes %s; "
                      "lead %d ms (%s)",
@@ -683,6 +691,20 @@ class MirrorSession:
         self._ffmpeg = FFmpegSource(cmd, hand_over)
         self._gen_started_ns = now_ns()
         self._ffmpeg.start()
+
+    @staticmethod
+    def _black_start(gen: int, times_ms: list[int], rate: int) -> None:
+        """Say so in the log when an FFmpeg's gfxcapture most likely began with black frames: the
+        TV then begins with a black keyframe, and the picture comes after it as an ordinary frame
+        (blurred at first, as every frame that changes the whole screen is). Not yet seen on real
+        hardware: this is how to tell."""
+        blacks = capture.gfx_black_start(times_ms, rate)
+        if blacks:
+            _LOGGER.info("FFmpeg %d: its first %s most likely black (frames at %s ms: the picture %d ms after, "
+                         "sooner than gfxcapture repeats a frame), as gfxcapture sends while Windows gives no "
+                         "picture yet: the TV began with a black keyframe", gen,
+                         "frame was" if blacks == 1 else f"{blacks} frames were",
+                         ", ".join(str(t) for t in times_ms[:blacks + 1]), times_ms[blacks] - times_ms[blacks - 1])
 
     async def _next_source(self) -> None:
         """FFmpeg ended before its first frame: the next way of capturing and encoding, on the

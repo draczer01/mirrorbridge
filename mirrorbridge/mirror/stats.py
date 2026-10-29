@@ -19,8 +19,10 @@ delivers (whether sent or dropped) against the one asked for, with a warning whe
 bitrate, the most bytes the video connection held unsent, keyframes, dropped frames, frames sent
 late, how often the TV asked for the time and how often FFmpeg was started again (for a
 keyframe, a lost screen capture or another way of capturing: the picture stands still while it
-starts, so a window with one gives no warning about the frame rate; nor does an FFmpeg that
-gives frames only as the screen changes, gfxcapture's without repeats: variable_rate). The TV
+starts, so a window with one gives no warning about the frame rate; nor does gfxcapture, which
+gives frames at the screen's refreshes no sooner than its max_framerate allows, so fewer than
+asked for while a screen whose refresh rate is not a multiple of the frame rate changes, 50 of
+60 at 200 Hz: paced_by_screen; without repeats, only as the screen changes: variable_rate). The TV
 shows a frame its lead (latencyMs) after it was taken, so an age that comes near the lead means
 frames arrive too late to be shown smoothly; "late" counts the frames sent past their lead (a
 network that held the video up for a moment, ridden out instead of dropping frames up to the
@@ -71,6 +73,7 @@ class StageTimes:
         self.slow_windows = 0  # windows in which FFmpeg delivered too few frames
         self.restarts = 0  # FFmpegs started after the first
         self.variable_rate = False  # frames only as the screen changes (gfxcapture without repeats): fps is the most
+        self.paced_by_screen = False  # frames at the screen's refreshes (gfxcapture): fewer than fps is no fault
         self._restarted_ns: Optional[int] = None  # when the last of them was
         self._window: dict[str, list[float]] = {stage: [] for stage in STAGES}
         self._all: dict[str, deque] = {stage: deque(maxlen=KEEP) for stage in STAGES}
@@ -169,7 +172,8 @@ class StageTimes:
         )
         restarted = (self._restarted_ns is not None
                      and self._restarted_ns >= self._window_start - int(RESTART_GRACE_SECONDS * NS))
-        if self.fps and seconds >= 1 and delivered < SLOW_FPS * self.fps and not restarted and not self.variable_rate:
+        if (self.fps and seconds >= 1 and delivered < SLOW_FPS * self.fps and not restarted and not self.variable_rate
+                and not self.paced_by_screen):
             self.slow_windows += 1
             behind = self._window["behind"]
             _LOGGER.warning(

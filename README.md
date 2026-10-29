@@ -276,21 +276,25 @@ included.
   settings*. There is no sound yet. If FFmpeg cannot capture or encode at the start (the
   graphics driver refuses ddagrab, the GPU encoder is busy), it goes on with GDI capture, then
   with x264 (CPU), as a cast does.
-* With NVENC and Desktop Duplication the picture stays on the graphics card at the TV's size:
-  it goes from the capture to the encoder untouched. A bigger screen is scaled on the
-  processor, unless FFmpeg's Windows Graphics Capture (`gfxcapture`) can repeat its last frame
-  while the screen stays as it is (`dup_frames`, in FFmpeg after 9.1, not in the FFmpeg 8.1.1
-  inside `MirrorBridge.exe`): then it takes the screen at the TV's size, scaled on the graphics
-  card. Without repeats that capture gives a frame only when the screen changes, so a new slide,
-  blurred at first as every frame that changes the whole screen is, would stay blurred until
-  something moves; Desktop Duplication's repeats sharpen it within a few frames. **More options >
-  Debug > Scaling** can try it anyway (a still screen then sends no frames, which does not end
-  the session; how long a TV keeps a still picture is still to be tried). MirrorBridge's own
-  command for this capture has not yet run on real hardware. (FFmpeg's `scale_d3d11` is not used: on an RTX 4080 SUPER with driver
-  621.01 it could not make its picture.) If the capture ends before its first picture, or the
-  picture comes out at another size than asked for, that display goes back to the processor
-  until MirrorBridge quits; when Windows takes the capture away instead, it is started again as
-  below. Quick Sync, AMF and Media Foundation scale on the processor.
+* With NVENC and Desktop Duplication the picture stays on the graphics card at the TV's size: it
+  goes from the capture to the encoder untouched. A bigger screen is scaled on the processor,
+  unless FFmpeg's Windows Graphics Capture (`gfxcapture`) can repeat its last frame while the
+  screen stays as it is (`dup_frames`, in FFmpeg after 9.1, not in the FFmpeg 8.1.1 inside
+  `MirrorBridge.exe`): then it takes the screen at the TV's size, scaled on the graphics card,
+  and each frame goes to the encoder as it comes, at most 2 a second over the frame rate (so a
+  screen whose refresh rate is not a multiple of it sends fewer while it changes: 50 fps on a
+  200 Hz monitor, 48 on a 144 Hz one). Without repeats that capture gives a frame only when the
+  screen changes, so a new slide, blurred at first as every frame that changes the whole screen
+  is, would stay blurred until something moves; Desktop Duplication's repeats sharpen it within
+  a few frames. **More options > Debug > Scaling** can try it anyway (a still screen then sends
+  no frames, which does not end the session; how long a TV keeps a still picture is still to be
+  tried). MirrorBridge's own command for this capture has not yet run on real hardware; if
+  Windows is slow to give the first picture, `gfxcapture` begins with a black frame, and the log
+  says so. (FFmpeg's `scale_d3d11` is not used: on an RTX 4080 SUPER with driver 621.01 it could
+  not make its picture.) If the capture ends before its first picture, or the picture comes out
+  at another size than asked for, that display goes back to the processor until MirrorBridge
+  quits; when Windows takes the capture away instead, it is started again as below. Quick Sync,
+  AMF and Media Foundation scale on the processor.
 * A keyframe (a complete picture) goes only when it is needed: at the start, and after frames
   were dropped, when FFmpeg is started again for a fresh one at once (at most every 2 seconds),
   whether or not the screen changes meanwhile. A keyframe every 2 seconds made text blur every 2
