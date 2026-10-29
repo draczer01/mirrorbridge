@@ -71,6 +71,9 @@ AUDIO_QUEUE = 100  # Opus frames (a second) waiting to be sent, at most
 DELAY_ENV = "MIRRORBRIDGE_CAST_DELAY_MS"  # a test value for the delay, from a .bat
 CODEC_ENV = "MIRRORBRIDGE_CAST_CODEC"  # h264 or vp8, from a .bat
 AUDIO_DELAY_ENV = "MIRRORBRIDGE_CAST_AUDIO_DELAY_MS"  # a test value for the sound's own delay
+# The sound's own targetDelay. The TCL shows the picture at once whatever its delay, but plays
+# the sound at its delay plus about 0.4 s of its own: 100 ms brings it nearest the picture.
+AUDIO_DELAY_MS = 100
 H264, VP8 = "h264", "vp8"
 CODECS = (H264, VP8)
 
@@ -260,13 +263,12 @@ class GoogleCastMirror:
         if self._audio_sender is not None:
             self._start_audio()
 
-    @staticmethod
-    def _audio_delay() -> Optional[int]:
+    def _audio_delay(self) -> int:
         try:
             wanted = int(os.environ.get(AUDIO_DELAY_ENV, "") or 0)
         except ValueError:
             wanted = 0
-        return max(MIN_DELAY_MS, min(MAX_DELAY_MS, wanted)) if wanted else None
+        return max(MIN_DELAY_MS, min(MAX_DELAY_MS, self.delay_ms, wanted or AUDIO_DELAY_MS))
 
     def _audio_possible(self, ff: str) -> bool:
         if not has_opus(ff):

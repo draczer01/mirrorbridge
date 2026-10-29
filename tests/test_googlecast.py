@@ -360,6 +360,8 @@ async def test_mirrors_sound(tv):
     sound = tv.audio
     assert sound is not None and sound.receiver_ssrc == AUDIO_RECEIVER_SSRC
     assert tv.payload_types == {96, 127}
+    delays = {st["type"]: st["targetDelay"] for st in tv.offer["offer"]["supportedStreams"]}
+    assert delays == {"video_source": 400, "audio_source": 100}  # the TCL plays sound ~0.4 s late
     assert len(sound.frames) >= 200  # 100 a second
     assert all(opus_samples(data) == 480 for _id, _key, data in sound.frames)  # decrypted Opus, 10 ms each
     steps = [b - a for a, b in zip(sound.rtp_times, sound.rtp_times[1:])]
