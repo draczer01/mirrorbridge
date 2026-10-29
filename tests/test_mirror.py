@@ -756,6 +756,40 @@ async def test_google_cast_mirroring_keeps_a_keyframe_every_2_s(monkeypatch):
     assert _option(started[-1], "-vf").startswith("hwdownload,format=bgra,scale=")
 
 
+async def test_google_cast_vp8_keeps_a_keyframe_every_2_s(monkeypatch):
+    """Its VP8 too, whatever the Debug menu says: the old switch it reads (Settings.
+    mirror_keyframe_seconds) stays 2 s, never Mirror screen's 0, which would make every VP8 frame
+    a keyframe; and it is not saved."""
+    from dataclasses import asdict
+
+    from mirrorbridge.googlecast import session as cast_session
+    from mirrorbridge.googlecast.discovery import CastDevice
+    from mirrorbridge.googlecast.vp8 import ENCODER as VP8
+
+    monkeypatch.setattr(source, "_version", lambda ff: (7, 1))
+    started = []
+
+    class Started:
+        def __init__(self, cmd, on_unit):
+            started.append(cmd)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(cast_session, "IvfSource", Started)
+    for keyframes in ffmpeg.MIRROR_KEYFRAME_CHOICES:
+        settings = Settings(mirror_keyframes=keyframes)
+        cast = cast_session.GoogleCastMirror(CastDevice("TV", "192.0.2.1"), settings, source=TEST_PATTERN, codec="vp8")
+        # pylint: disable=protected-access
+        cast._capture, cast._sources = ("ffmpeg", None, None), [("test", VP8)]
+        cast._frames, cast.canvas, cast.fps = FrameQueue(60), (1920, 1080), 30
+        cast._start_source()
+        cmd = started[-1]
+        assert _option(cmd, "-c:v") == VP8 and _option(cmd, "-g") == _option(cmd, "-keyint_min") == str(30 * 2)
+    assert Settings().mirror_keyframe_seconds == ffmpeg.MIRROR_KEYFRAME_SECONDS
+    assert "mirror_keyframe_seconds" not in asdict(Settings())
+
+
 def test_mirror_command_test_pattern_and_desktop(monkeypatch):
     settings = Settings(video_bitrate_kbps=4000)
     monkeypatch.setattr(source, "_version", lambda ff: (7, 1))
