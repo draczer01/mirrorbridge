@@ -95,6 +95,7 @@ def test_a_language_shows_english_for_any_string_it_lacks():
     assert i18n.tr("status_casting", device="Salon") == "Casting to Salon"
     assert i18n.state_text(State.CASTING) == "Diffusion" and i18n.state_text(State.FAILED) == "Failed"
     # A core module's Text, and the menu path it names, in English too
+    # (Quality > "Delay (when transmitting)" is named without what is in brackets)
     assert i18n.say(Text("hint_smooth", "Try Quality > Delay > Smooth.")) == "Try Quality > Delay > Smooth."
     assert i18n._menu_paths()["menu_forget"] == "Device > Forget pairing"  # pylint: disable=protected-access
     assert i18n.language_menu_title() == "Language / Idioma / Langue"
@@ -168,6 +169,7 @@ def _same_in_every_language() -> set[str]:
     same |= {f"{f} fps" for f in tray.FRAMERATES} | {f"{b} Mbps" for b in tray.BITRATES}
     same |= {name for name, height in tray.RESOLUTIONS if height}
     same |= {f"{ms} ms" for ms in tray.DEBUG_LEADS if ms}
+    same |= {i18n.tr("mirror_lat_normal")}  # Mirror screen settings > Latency > Normal: the same word in Spanish
     return same | {extend.size_label(mode) for _name, mode in extend.EXTEND_SIZES}
 
 
@@ -199,11 +201,15 @@ def test_choosing_spanish_retranslates_the_tray_menu_at_once(controller):
     tray = TrayMenu(controller, lambda: None, lambda: None)
     english = _menu_texts(tray.menu)
     assert english[0] == "Open MirrorBridge" and english[-1] == "Quit" and "More options" in english
+    assert {"Mirror screen settings", "Latency", "Normal", "Debug (for testing)", "Scaling"} <= set(english)
+    assert not set(english) & set(i18n._STRINGS)  # pylint: disable=protected-access  # no key without its words
     assert tray.tray.toolTip() == "MirrorBridge - Not casting"
 
     _submenu(tray.menu, "Language / Idioma").actions()[1].trigger()  # Español
     spanish = _menu_texts(tray.menu)
     assert spanish[0] == "Abrir MirrorBridge" and spanish[-1] == "Salir" and "Más opciones" in spanish
+    assert {"Ajustes de Duplicar pantalla", "Latencia", "Suave", "Depuración (para pruebas)", "Escalado",
+            "Transmitir (modo anterior, 3-7 s de retraso)"} <= set(spanish)
     assert [a.isChecked() for a in _submenu(tray.menu, "Language / Idioma").actions()] == [False, True]
     assert tray.tray.toolTip() == "MirrorBridge - Sin transmitir"
     assert set(english) & set(spanish) <= _same_in_every_language()  # no English left

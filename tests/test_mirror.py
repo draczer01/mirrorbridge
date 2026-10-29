@@ -2,6 +2,7 @@
 cryptography, and FFmpeg's own output (tests/test_mirror_loopback.py has whole sessions)."""
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
@@ -23,7 +24,7 @@ from mirrorbridge.config import Settings
 from mirrorbridge.mirror import capture, clock, flv, h264, packets, profiles, source, stats
 from mirrorbridge.mirror.control import ReceiverInfo, Target, parse_features, sender_id
 from mirrorbridge.mirror.datachannel import DataChannel
-from mirrorbridge.mirror.errors import no_timing, refused
+from mirrorbridge.mirror.errors import MirrorError, no_timing, refused
 from mirrorbridge.mirror.negotiation import CONTROL_FIRST, MEDIA_FIRST, PTP, Plan
 from mirrorbridge.mirror import session as mirror_session
 from mirrorbridge.mirror.session import (MirrorSession, catch_up_bytes, canvas_limit, choose_canvas, choose_fps,
@@ -337,10 +338,13 @@ def test_pts_mapper_never_goes_backwards():
     assert mapper.map(90, 990_000_000) > first
 
 
-def test_pts_mapper_starts_again_with_a_new_ffmpeg():
+@pytest.mark.parametrize("slew_ns", [None, 100_000])
+def test_pts_mapper_starts_again_with_a_new_ffmpeg(slew_ns):
     """FFmpeg started again 5 s in: its pts are back at 0, its frames come 50 ms after they were
-    taken. The times follow the new frames at once and keep going up."""
-    mapper, ms, base = clock.PtsMapper(), 1_000_000, 10 * clock.NS
+    taken. The times follow the new frames at once and keep going up, also with the offset
+    moving at most slew_ns a frame (MIRRORBRIDGE_PTS_SLEW_US), which does not creep from the old
+    FFmpeg's origin to the new one's."""
+    mapper, ms, base = clock.PtsMapper(slew_ns=slew_ns), 1_000_000, 10 * clock.NS
     old = [mapper.map(i * 33, base + i * 33 * ms + 40 * ms) for i in range(150)]
     assert mapper.behind(150 * 33, base + 150 * 33 * ms + 40 * ms) == 0
     mapper.restart()
@@ -447,6 +451,75 @@ async def test_an_ffmpeg_that_ended_is_seen_to_before_a_keyframe_that_was_asked_
     assert calls == ["ended"]
 
 
+async def test_a_keyframe_asked_for_is_not_got_for_an_ffmpeg_that_ended(monkeypatch):
+    """A keyframe due while FFmpeg has ended, its last frame waiting and its end (None) not here
+    yet: FFmpeg is not started again for it (that would throw the end away), and the end goes
+    to _ended when it comes, which says what next (a lost capture, the next way)."""
+    # pylint: disable=protected-access
+    session = _sender()
+    session._frames.put(Unit(flv.FRAME, 0, False, b"", 0))
+    session._cipher, session._ffmpeg = object(), SimpleNamespace(running=lambda: False)
+    session.report.established = SimpleNamespace(plan=SimpleNamespace(lead_ms=100))
+    session._keyframe_wanted, session._last_restart_ns = "frames were dropped", 0
+    calls = []
+
+    async def ended() -> bool:
+        calls.append("ended")
+        return False
+
+    async def restart(why, **kw) -> None:
+        calls.append(f"restart for {why}")
+
+    monkeypatch.setattr(session, "_ended", ended)
+    monkeypatch.setattr(session, "_restart", restart)
+    asyncio.get_running_loop().call_later(0.2, session._frames.put, None)
+    await asyncio.wait_for(session._pump(), 5)
+    assert calls == ["ended"]
+
+
+async def test_a_keyframe_asked_for_comes_when_it_is_due_whether_a_frame_comes_or_not(monkeypatch):
+    """No frame comes (gfxcapture, a screen that stays as it is): FFmpeg is started again for the
+    keyframe when KEYFRAME_RESTART_SECONDS have gone since the last time, not at the next frame."""
+    # pylint: disable=protected-access
+    session = _sender()
+    session._cipher, session._ffmpeg = object(), SimpleNamespace(running=lambda: True)
+    session.report.established = SimpleNamespace(plan=SimpleNamespace(lead_ms=100))
+    session._keyframe_wanted = "frames were dropped"
+    started = clock.now_ns()
+    session._last_restart_ns = started - int((mirror_session.KEYFRAME_RESTART_SECONDS - 0.3) * clock.NS)
+    calls = []
+
+    async def restart(why, **kw) -> None:
+        calls.append((why, (clock.now_ns() - started) / clock.NS))
+        session._keyframe_wanted = ""
+        session._frames.put(None)
+
+    async def ended() -> bool:
+        return False
+
+    monkeypatch.setattr(session, "_ended", ended)
+    monkeypatch.setattr(session, "_restart", restart)
+    await asyncio.wait_for(session._pump(), 5)
+    ((why, after),) = calls
+    assert why == "a keyframe: frames were dropped" and 0.25 < after < 1.5
+
+
+def test_a_still_gfxcapture_screen_whose_ffmpeg_just_ended_is_left_to_say_why():
+    """gfxcapture, once its FFmpeg gave a frame: a long gap is no fault, even if FFmpeg has just
+    ended (its end goes to _ended); ddagrab's is."""
+    # pylint: disable=protected-access
+    session = MirrorSession(Target("TV", "1.2.3.4"), Settings(), profile=profiles.MirrorProfile())
+    session._frames, now = FrameQueue(60), clock.now_ns()
+    session._frames.last_frame_ns = now - 30 * clock.NS
+    session._ffmpeg = SimpleNamespace(running=lambda: False, started_ns=now - 40 * clock.NS, errors=lambda *a: "")
+    session._stats.variable_rate, session._gen_frames = True, 5
+    session._check_frames(now)
+    session._stats.variable_rate = False
+    with pytest.raises(MirrorError) as caught:
+        session._check_frames(now)
+    assert caught.value.args[0].key == "mirror_no_picture"
+
+
 def test_frames_the_network_held_up_go_late_for_as_long_as_the_tv_is_given_to_catch_up():
     """_drop_reason(idr, waiting, late_ns, behind_ns, fresh) for P-frames while sending."""
     # pylint: disable=protected-access
@@ -544,7 +617,7 @@ def test_an_older_settings_json_loads_with_mirror_screens_new_settings(tmp_path,
         for junk in ({"mirror_keyframes": 5}, {"mirror_keyframes": "10"}, {"mirror_keyframes": True},
                      {"mirror_keyframes": 10.0}, {"mirror_latency": "fast"}, {"mirror_latency": None},
                      {"mirror_framerate": 24}, {"mirror_framerate": "60"}, {"mirror_scaler": "gpu"},
-                     {"mirror_encoder_extra": 8}, {"mirror_encoder_extra": ["-ldkfs", "8"]}):
+                     {"mirror_scaler": "GFX"}, {"mirror_encoder_extra": 8}, {"mirror_encoder_extra": ["-ldkfs", "8"]}):
             path.write_text(json.dumps(junk), encoding="utf-8")
             assert Settings.load(path) == Settings(), junk
     assert "Ignoring mirror_keyframes=5" in caplog.text
@@ -553,6 +626,9 @@ def test_an_older_settings_json_loads_with_mirror_screens_new_settings(tmp_path,
     path.write_text(json.dumps(chosen), encoding="utf-8")
     settings = Settings.load(path)
     assert {key: getattr(settings, key) for key in chosen} == chosen
+    for scaler in ("auto", "cpu", "gfx"):  # Scaling's three, gfxcapture even without repeats too
+        path.write_text(json.dumps({"mirror_scaler": scaler}), encoding="utf-8")
+        assert Settings.load(path).mirror_scaler == scaler
 
 
 def test_frames_are_shown_on_arrival_only_when_settings_json_says_true():
@@ -681,8 +757,10 @@ def test_a_keyframe_every_2_s_every_10_s_or_only_when_needed(encoder):
 
     every_2, every_10, needed = args(2), args(10), args(0)
     assert every_2 == ffmpeg.mirror_encoder_args(encoder, 6000, 30)  # a caller that does not say: as before
-    assert (_option(every_2, "-g"), _option(every_2, "-force_key_frames")) == ("60", "expr:gte(t,n_forced*2)")
-    assert (_option(every_10, "-g"), _option(every_10, "-force_key_frames")) == ("300", "expr:gte(t,n_forced*10)")
+    # AMF's come from -g (its IDR period) alone: what -force_key_frames asks of it are I-frames in 8.x.
+    forced = (None, None) if encoder == "h264_amf" else ("expr:gte(t,n_forced*2)", "expr:gte(t,n_forced*10)")
+    assert (_option(every_2, "-g"), _option(every_2, "-force_key_frames")) == ("60", forced[0])
+    assert (_option(every_10, "-g"), _option(every_10, "-force_key_frames")) == ("300", forced[1])
     if encoder in ("h264_nvenc", "libx264"):
         # The first keyframe only (the session starts FFmpeg again for another).
         assert _option(needed, "-g") == "2147483647" and "-force_key_frames" not in needed
@@ -758,6 +836,40 @@ async def test_google_cast_mirroring_keeps_a_keyframe_every_2_s(monkeypatch):
     assert _option(started[-1], "-vf").startswith("hwdownload,format=bgra,scale=")
 
 
+async def test_google_cast_vp8_keeps_periodic_keyframes(monkeypatch):
+    """Its VP8 follows the Debug menu's keyframe setting, but never without periodic ones: Cast
+    Streaming needs them and it never starts FFmpeg again for one, so "only when needed" (0) is a
+    keyframe every 2 s there (MIRROR_KEYFRAME_SECONDS), never -g 1, every frame a keyframe."""
+    from mirrorbridge.googlecast import session as cast_session
+    from mirrorbridge.googlecast.discovery import CastDevice
+    from mirrorbridge.googlecast.vp8 import ENCODER as VP8
+
+    monkeypatch.setattr(source, "_version", lambda ff: (7, 1))
+    started = []
+
+    class Started:
+        def __init__(self, cmd, on_unit):
+            started.append(cmd)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(cast_session, "IvfSource", Started)
+    gops = []
+    for keyframes in ffmpeg.MIRROR_KEYFRAME_CHOICES:
+        settings = Settings(mirror_keyframes=keyframes)
+        cast = cast_session.GoogleCastMirror(CastDevice("TV", "192.0.2.1"), settings, source=TEST_PATTERN, codec="vp8")
+        # pylint: disable=protected-access
+        cast._capture, cast._sources = ("ffmpeg", None, None), [("test", VP8)]
+        cast._frames, cast.canvas, cast.fps = FrameQueue(60), (1920, 1080), 30
+        cast._start_source()
+        cmd = started[-1]
+        assert _option(cmd, "-c:v") == VP8 and _option(cmd, "-g") == _option(cmd, "-keyint_min")
+        gops.append(int(_option(cmd, "-g")))
+    # Only when needed (0), every 10 s, every 2 s: in frames at 30 fps.
+    assert ffmpeg.MIRROR_KEYFRAME_CHOICES == (0, 10, 2) and gops == [30 * 2, 30 * 10, 30 * 2]
+
+
 def test_mirror_command_test_pattern_and_desktop(monkeypatch):
     settings = Settings(video_bitrate_kbps=4000)
     monkeypatch.setattr(source, "_version", lambda ff: (7, 1))
@@ -772,7 +884,7 @@ def test_mirror_command_test_pattern_and_desktop(monkeypatch):
     assert "-readrate_initial_burst" not in cmd  # an FFmpeg that does not know it
     mon = ffmpeg.Monitor(1, 0, 0, 2560, 1440, dxgi_output=0)
     cmd = build_command("ffmpeg", settings, source=DESKTOP, encoder="h264_nvenc", width=1920, height=1080, fps=60,
-                        backend="ddagrab", monitor=mon)
+                        backend="ddagrab", monitor=mon, bt709=True)
     assert "ddagrab=output_idx=0:framerate=60:draw_mouse=1" in cmd
     # The CPU chain: to memory, scaled into BT.709 limited range (bilinear), tagged as that.
     assert cmd[cmd.index("-vf") + 1] == (
@@ -780,12 +892,17 @@ def test_mirror_command_test_pattern_and_desktop(monkeypatch):
         ":force_divisible_by=2:flags=bilinear:out_color_matrix=bt709:out_range=tv,format=nv12,"
         "setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709")
     gdi = build_command("ffmpeg", settings, source=DESKTOP, encoder="libx264", width=1280, height=720, fps=30,
-                        backend="gdigrab", monitor=mon)
+                        backend="gdigrab", monitor=mon, bt709=True)
     assert _option(gdi, "-vf") == (
         "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
         ":flags=bilinear:out_color_matrix=bt709:out_range=tv,format=yuv420p,"
         "setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709")
     assert "-bsf:v" not in cmd + gdi
+    # A caller that does not ask (Google Cast, whose VP8 is taken as BT.601): swscale's pixels, as before.
+    old = build_command("ffmpeg", settings, source=DESKTOP, encoder="libx264", width=1280, height=720, fps=30,
+                        backend="gdigrab", monitor=mon)
+    assert _option(old, "-vf") == ("scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease"
+                                   ":force_divisible_by=2:flags=bilinear,format=yuv420p")
 
 
 def test_mirror_command_on_the_graphics_card(monkeypatch):
@@ -819,6 +936,71 @@ def test_mirror_command_on_the_graphics_card(monkeypatch):
     gdi = build_command("ffmpeg", Settings(), source=DESKTOP, encoder="h264_nvenc", width=1920, height=1080, fps=60,
                         backend="gdigrab", monitor=big, chain=capture.chain_for(capture.GPU, (2560, 1440), (1920, 1080)))
     assert _option(gdi, "-vf").startswith("scale=w='min(1920,iw)'")
+
+
+# Humberto's main monitor (ddagrab's output 0), at 60 fps on a 1080p TV, as the session asks for it
+GFX_MAIN = ffmpeg.Monitor(0, 0, 0, 2560, 1440, True, 0, device=r"\\.\DISPLAY1")
+# With an FFmpeg whose gfxcapture repeats frames (dup_frames, after FFmpeg 9.1)
+GFX_COMMAND = [
+    "ffmpeg.exe", "-hide_banner", "-nostats", "-loglevel", "warning", "-thread_queue_size", "2",
+    "-f", "lavfi", "-i", "gfxcapture=hmonitor=65537:width=1920:height=1080:resize_mode=scale_aspect:scale_mode=bilinear"
+    ":max_framerate=62:dup_frames=1:capture_cursor=1",
+    "-vf", "setpts='if(isnan(PREV_OUTPTS),PTS,max(PTS,PREV_OUTPTS+0.001/TB))'",
+    "-an", "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ll", "-rc", "cbr", "-profile:v", "high",
+    "-zerolatency", "1", "-delay", "0", "-forced-idr", "1", "-b:v", "8267k", "-maxrate", "8267k", "-bufsize", "133k",
+    "-g", "2147483647", "-bf", "0", "-enc_time_base", "1:1000",
+    "-bsf:v", "h264_metadata=colour_primaries=1:transfer_characteristics=1",
+    "-flush_packets", "1", "-flvflags", "no_duration_filesize+no_metadata", "-f", "flv", "pipe:1"]
+# With FFmpeg 8.1.1, whose gfxcapture does not (Scaling "gfx" only): frames only as the screen changes
+GFX_CHANGES_COMMAND = [
+    "ffmpeg.exe", "-hide_banner", "-nostats", "-loglevel", "warning", "-thread_queue_size", "2",
+    "-f", "lavfi", "-i", "gfxcapture=hmonitor=65537:width=1920:height=1080:resize_mode=scale_aspect:scale_mode=bilinear"
+    ":max_framerate=62:capture_cursor=1",
+    "-an", "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ll", "-rc", "cbr", "-profile:v", "high",
+    "-zerolatency", "1", "-delay", "0", "-forced-idr", "1", "-b:v", "8267k", "-maxrate", "8267k", "-bufsize", "533k",
+    "-g", "2147483647", "-bf", "0", "-enc_time_base", "1:1000",
+    "-bsf:v", "h264_metadata=colour_primaries=1:transfer_characteristics=1",
+    "-flush_packets", "1", "-flvflags", "no_duration_filesize+no_metadata", "-f", "flv", "pipe:1"]
+
+
+@pytest.mark.parametrize("repeats", [True, False])
+def test_mirror_command_with_gfxcapture(monkeypatch, repeats):
+    """A screen bigger than the TV's, with NVENC: Windows Graphics Capture scales it on the graphics
+    card, for the display found by its handle (not ddagrab's output index); NVENC converts the RGB
+    itself, and the stream says BT.709 primaries and transfer as at the screen's own size. Up to
+    62 frames a second, each to the encoder as it comes (select's slots left out a frame of the
+    screen that came after a repeat in the same slot; with repeats, each at least 1 ms after the
+    one before), NVENC told 62 fps and as much more bitrate (the same 133 kbit a frame); with
+    repeats a VBV of one frame, without, of 4 frames (533 kbit) for a still screen's last frame."""
+    monkeypatch.setattr(capture, "gfx_monitor", lambda monitor: "hmonitor=65537" if monitor is GFX_MAIN else "")
+    monkeypatch.setattr(source, "_version", lambda ff: (8, 1))
+
+    def command(settings=Settings(), keyframes=0, backend="ddagrab", monitor=GFX_MAIN, fps=60):
+        chain = capture.chain_for(capture.GFX, (monitor.width, monitor.height), (1920, 1080), repeats)
+        return build_command("ffmpeg.exe", settings, source=DESKTOP, encoder="h264_nvenc", width=1920, height=1080,
+                             fps=fps, backend=backend, monitor=monitor, chain=chain, keyframe_seconds=keyframes)
+
+    expected = GFX_COMMAND if repeats else GFX_CHANGES_COMMAND
+    assert command() == expected
+    assert not any("ddagrab" in arg or "hwdownload" in arg for arg in expected)
+    assert _option(command(Settings(show_cursor=False)), "-i").endswith(":capture_cursor=0")
+    # Every 2 s (as for the other chains): the forced keyframes by time, -g only a bound at 62 fps.
+    periodic = command(keyframes=2)
+    assert _option(periodic, "-force_key_frames") == "expr:gte(t,n_forced*2)"
+    assert _option(periodic, "-g") == "124"
+    thirty = command(fps=30)
+    assert ("-vf" in thirty) == repeats and _option(thirty, "-b:v") == "8533k"
+    if repeats:
+        assert ":max_framerate=32:dup_frames=1:" in _option(thirty, "-i") and _option(thirty, "-bufsize") == "267k"
+    else:
+        assert ":max_framerate=32:capture_cursor=1" in _option(thirty, "-i") and _option(thirty, "-bufsize") == "1067k"
+    # The display gone since: no option for it, so FFmpeg ends at once, saying so.
+    gone = dataclasses.replace(GFX_MAIN, device=r"\\.\DISPLAY9")
+    assert _option(command(monitor=gone), "-i").startswith("gfxcapture=width=1920:height=1080:")
+    # A gfxcapture chain is only in place of ddagrab: gdigrab gets the CPU one.
+    gdi = command(backend="gdigrab")
+    assert _option(gdi, "-vf").startswith("scale=w='min(1920,iw)'") and _option(gdi, "-b:v") == "8000k"
+    assert _option(gdi, "-bufsize") == "133k"
 
 
 def test_ffmpeg_versions_are_read_from_its_banner(monkeypatch):
@@ -916,6 +1098,35 @@ def test_stage_times_do_not_warn_of_a_slow_ffmpeg_for_a_window_it_was_started_ag
     assert times.summary()["slow_windows"] == 1 and times.summary()["restarts"] == 1
     times.set_rate(1500, 30)  # the x264 FFmpeg that came after a hardware encoder's
     assert (times.fps, times.frame_budget) == (30, 1500 * 1000 // 8 // 30)
+
+
+def test_stage_times_do_not_warn_of_frames_at_the_screens_refreshes(caplog):
+    """gfxcapture (with repeats too) gives a frame at a refresh of the screen no sooner than 1/62 s
+    after the last: 50 a second while a 200 Hz screen changes, which is no capture or encoder
+    that cannot keep up. The line says them of the 60 asked for, not "up to"."""
+    caplog.set_level("INFO")
+    times = stats.StageTimes(kbps=8000, fps=60, lead_ms=100)
+    times.paced_by_screen = True
+    start = clock.now_ns()
+    for _ in range(100):
+        times.add(1000, keyframe=False)
+    times.log_window(start + 2 * clock.NS)
+    assert "Mirroring: 50.0 fps (of 60)" in caplog.text and "cannot keep up" not in caplog.text
+    assert times.summary()["slow_windows"] == 0
+
+
+def test_stage_times_do_not_warn_of_a_screen_that_changes_now_and_then(caplog):
+    """gfxcapture gives a frame only as the screen changes: a few a second is a still screen, not
+    a capture or an encoder that cannot keep up."""
+    caplog.set_level("INFO")
+    times = stats.StageTimes(kbps=8000, fps=60, lead_ms=100)
+    times.variable_rate = True
+    start = clock.now_ns()
+    for _ in range(4):
+        times.add(1000, keyframe=False)
+    times.log_window(start + 2 * clock.NS)
+    assert "fps (of up to 60)" in caplog.text and "cannot keep up" not in caplog.text
+    assert times.summary()["slow_windows"] == 0
 
 
 async def test_the_video_connection_closes_cleanly_once_its_buffer_went_out():

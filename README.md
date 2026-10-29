@@ -42,7 +42,7 @@ Spanish again, choose **Language / Idioma** > **Español** in its menu once.
 | Extend screen: the TV as a second monitor | Experimental, not yet tested with the real driver; needs a free driver from Parsec, installed the first time |
 | Hardware encoding: NVIDIA NVENC, Intel Quick Sync, AMD AMF, Media Foundation, x264 fallback | Auto-detected |
 | Play a local video file on the TV | Works |
-| Real-time screen mirroring like a Mac or iPhone (under 0.5 s delay) | Experimental, for AirPlay 2 TVs of other brands: *Mirror screen* in the tray menu, or `mirror` (see [Screen mirroring](#screen-mirroring-experimental)); not possible with Apple TV yet |
+| Real-time screen mirroring like a Mac or iPhone (under 0.5 s delay) | Experimental, for AirPlay 2 TVs of other brands: *Show my screen on (your TV)* in the tray menu, or `mirror` (see [Screen mirroring](#screen-mirroring-experimental)); not possible with Apple TV yet |
 
 ### Why there is a delay, and why this is not "true" mirroring
 
@@ -81,9 +81,12 @@ the TV.
    arrow; drag it out to keep it visible). Left- or right-click it to open the menu.
 3. When Windows Firewall asks, **allow MirrorBridge on private networks**. The Apple TV has
    to download the stream from your PC.
-4. In the menu, choose your TV under **Device**, then **Start casting**, and type the
-   PIN the TV shows. You only pair once.
-5. **More options** has *Start with Windows*, *Create desktop shortcut* and the log
+4. In the menu, choose your TV under **Device**, then **Show my screen on (your TV)**, and
+   type the PIN the TV shows. You only pair once. A TV of another brand gets screen mirroring,
+   a fraction of a second behind (see [Screen mirroring](#screen-mirroring-experimental)); an
+   Apple TV gets the cast, a few seconds behind.
+5. **More options** has *Transmit (old way, 3-7 s delay)*, the cast, for a TV that does not
+   show the screen the first way; *Start with Windows*, *Create desktop shortcut* and the log
    folder. **Open MirrorBridge** shows the full window; closing it keeps MirrorBridge in the
    tray. **Quit** stops any cast and exits.
 
@@ -184,22 +187,36 @@ tried on a real TV.
 
 ### Mirror screen, from the tray menu
 
-1. Choose the TV under **Device** and pair it, as for a cast (**Start casting** once, or
-   *Device > Pair with PIN…*).
+1. Choose the TV under **Device** and pair it (*Device > Pair with PIN…*: type in the PIN the
+   TV shows).
 2. Once, run **More options > Test this TV…**. Its last test mirrors a moving test pattern
    for about 10 seconds: when a notification says *Watch the TV now*, look for it. What worked
    is saved for the TV, so Mirror screen asks for it straight away (see *Reporting a TV that
    does not work* under Troubleshooting).
-3. Choose **Mirror screen (low latency, experimental)**, right under *Start casting*. As for a
-   cast, the tray icon's tooltip says *Connecting to the TV…*, then *Mirroring to (your TV)*,
-   and a notification says when it starts, when it stops, and why if it fails.
-   **Stop mirroring** (where *Stop casting* is) or **Quit** ends it.
+3. Choose **Show my screen on (your TV)**, right under the status line (it pairs first if
+   step 1 was skipped). As for a cast, the tray icon's tooltip says *Connecting to the TV…*,
+   then *Mirroring to (your TV)*, and a notification says when it starts, when it stops, and
+   why if it fails. **Stop mirroring**, in the same place, or **Quit** ends it.
 
-Mirror screen is greyed out until MirrorBridge is paired with the TV (its tooltip says so), for
-receivers that do not offer screen mirroring, and for Apple TVs and Macs, whose screen mirroring
-needs FairPlay: support for them is coming in a later version, and they cast as before. One
-thing runs at a time: while a cast, Mirror screen or *Test this TV* runs, the others are greyed
-out until it stops. The full window has the same *Mirror screen* button, under *Start casting*.
+The item's tooltip says what it will do. A receiver that does not offer screen mirroring gets
+the cast, and so do Apple TVs and Macs, whose screen mirroring needs FairPlay (coming in a later
+version). If screen mirroring fails before the picture reaches the TV, the next way is tried
+without asking. The cast is also under *More options > Transmit (old way, 3-7 s delay)*, with
+sound. One thing runs at a time: while a cast, Mirror screen or *Test this TV* runs, the others
+are greyed out until it stops. The full window's big button does the same.
+
+**Mirror screen settings**, in the tray menu, change the next Mirror screen:
+
+* *Latency*: how long after a frame was captured the TV shows it. *Low* is 60 ms, for a cable
+  or a strong Wi-Fi signal; *Normal* (the default) is what is saved for the TV, 100 ms;
+  *Smooth* is 200 ms, a little more delay and fewer skips when the Wi-Fi falters. A shorter
+  wait only lowers the delay if the TV honours the frames' times.
+* *Frame rate*: *Automatic* (the default) is 60 fps when the graphics card encodes and Desktop
+  Duplication captures, and 30 fps with x264 (the processor) or GDI capture; *30 fps* and
+  *60 fps* keep to that rate. It is never more than the TV takes. *Quality*'s frame rate and
+  delay are the cast's. On a Google Cast TV the main item mirrors by Google Cast, which these
+  two do not change yet: it has the PC's sound (*Include computer sound*) and *Quality*'s frame
+  rate, so while one is chosen they are named without "when transmitting".
 
 **What to send back** after trying it on your TV:
 
@@ -215,16 +232,19 @@ out until it stops. The full window has the same *Mirror screen* button, under *
   click closes it;
 * `%APPDATA%\MirrorBridge\mirroring.json`, which holds what worked for the TV.
 
-Next to *Latency meter*, **More options > Debug** has three switches for tests. They start
-from the defaults, and change the next Mirror screen (and `mirror`), not *Test this TV* or
-`mirror --probe`:
+Next to *Latency meter*, **More options > Debug (for testing)** has four switches for tests.
+They start from the defaults, and change the next Mirror screen (and `mirror`), not *Test this
+TV* or `mirror --probe`:
 *TV wait (test)* asks the TV to wait 60 to 300 ms after a frame was captured before it shows
-it, instead of what is saved for the TV (*Automatic*; a test value is never saved);
-*Keyframe every* sends a complete picture every 1, 2 (the default) or 5 seconds; *Show frames
-on arrival (test)* asks the TV to show each frame as soon as it comes instead of at its time.
-A shorter wait only lowers the delay if the TV honours the frames' times; over Wi-Fi, a longer
-one rides out the moments when the network holds the video up. The log says, as each session
-starts, which ones it used.
+it, instead of what *Latency* says (*Automatic*; choosing a Latency puts it back there, and a
+test value is never saved); *Keyframes* sends a complete picture only when needed (the
+default), every 10 seconds or every 2 seconds, as before; *Scaling* resizes the picture as
+described below (*Automatic*, the default), on the processor (*Processor (as before)*), or
+with Windows Graphics Capture even when it cannot repeat frames (*Windows capture on the
+graphics card (test)*: a still slide can stay blurred until something moves); *Show frames on
+arrival (test)* asks the TV to show each frame as soon as it comes
+instead of at its time. The log says, as each session starts, which ones it used, and each
+time FFmpeg starts again, why.
 
 ### From the command line
 
@@ -252,9 +272,39 @@ included.
   added at 1080p), fitted into the TV's screen (Resolution does not apply, as for a cast). It
   stays for the whole session and goes when the session ends; if it goes away first (sleep),
   the session ends and says so. *Test this TV* and `mirror --probe` never add it. Each is sent
-  with the encoder, frame rate and bitrate of the *Quality* menu. There is no sound yet. If
-  FFmpeg cannot capture or encode at the start (the graphics driver refuses ddagrab, the GPU
-  encoder is busy), it goes on with GDI capture, then with x264 (CPU), as a cast does.
+  with the encoder and bitrate of the *Quality* menu, at the frame rate of *Mirror screen
+  settings*. There is no sound yet. If FFmpeg cannot capture or encode at the start (the
+  graphics driver refuses ddagrab, the GPU encoder is busy), it goes on with GDI capture, then
+  with x264 (CPU), as a cast does.
+* With NVENC and Desktop Duplication the picture stays on the graphics card at the TV's size: it
+  goes from the capture to the encoder untouched. A bigger screen is scaled on the processor,
+  unless FFmpeg's Windows Graphics Capture (`gfxcapture`) can repeat its last frame while the
+  screen stays as it is (`dup_frames`, in FFmpeg after 9.1, not in the FFmpeg 8.1.1 inside
+  `MirrorBridge.exe`): then it takes the screen at the TV's size, scaled on the graphics card,
+  and each frame goes to the encoder as it comes, at most 2 a second over the frame rate (so a
+  screen whose refresh rate is not a multiple of it sends fewer while it changes: 50 fps on a
+  200 Hz monitor, 48 on a 144 Hz one). Without repeats that capture gives a frame only when the
+  screen changes, so a new slide, blurred at first as every frame that changes the whole screen
+  is, would stay blurred until something moves; Desktop Duplication's repeats sharpen it within
+  a few frames. **More options > Debug > Scaling** can try it anyway (a still screen then sends
+  no frames, which does not end the session; how long a TV keeps a still picture is still to be
+  tried). MirrorBridge's own command for this capture has not yet run on real hardware; if
+  Windows is slow to give the first picture, `gfxcapture` begins with a black frame, and the log
+  says so. (FFmpeg's `scale_d3d11` is not used: on an RTX 4080 SUPER with driver 621.01 it could
+  not make its picture.) If the capture ends before its first picture, or the picture comes out
+  at another size than asked for, that display goes back to the processor until MirrorBridge
+  quits; when Windows takes the capture away instead, it is started again as below. Quick Sync,
+  AMF and Media Foundation scale on the processor.
+* A keyframe (a complete picture) goes only when it is needed: at the start, and after frames
+  were dropped, when FFmpeg is started again for a fresh one at once (at most every 2 seconds),
+  whether or not the screen changes meanwhile. A keyframe every 2 seconds made text blur every 2
+  seconds, because in a one-frame buffer it gets far fewer bits than the frames around it. Quick
+  Sync, AMF and Media Foundation, not yet tried that way, still make one every 10 seconds.
+* When Windows takes the screen capture away (a display driver installed or removed, a logoff,
+  a change of resolution, a UAC prompt), FFmpeg is started again on the same display, looked
+  up again (the virtual screen too), up to five times in 10 seconds; only then does the session
+  end, saying that Windows stopped the screen capture. The log has FFmpeg's last 30 lines
+  whenever it stops.
 * The TV asks the PC for the time over UDP: allow MirrorBridge, or inbound UDP ports
   7880-7889, in Windows Firewall on private networks, or the TV shows nothing.
   The experimental PTP timing (`mirror --timing ptp`, or `MIRRORBRIDGE_TIMING=ptp`), where
@@ -278,7 +328,8 @@ included.
   just stops it.
 * Every 5 seconds the log says where the frames' time went, from FFmpeg's pipe to the network,
   as median and 95th percentile per stage, with the frame rate FFmpeg delivers (and a warning
-  when it falls short), what was waiting to go to the TV, how many frames were dropped or sent
+  when it falls short, except with Windows Graphics Capture, which gives frames only as the
+  screen changes), what was waiting to go to the TV, how many frames were dropped or sent
   late, and how often the TV asked for the time.
 
 ## How it works
@@ -453,20 +504,22 @@ control-first SETUP, needs the audio stream, answers PTP without a ClockID, asks
 opens an event channel and answers `/feedback` with nothing. It decrypts the video, and FFmpeg
 decodes every frame of it. The probe is run against it too, with TVs that drop the pairing,
 drop the video or refuse it, never ask for the time, or take only the other avcC ending.
-*Mirror screen* is tested with the real tray menu and window built offscreen: it is offered
-only for a paired TV that does not need FairPlay (the tooltip saying why not, in English and
-Spanish), it runs against the same fake TV on the controller's own loop through Connecting,
-Casting and Stopping, Stop and Quit tear the session down with no task left running, a
-failure is explained in Spanish, ending mirroring on the TV is said, and only one cast,
-mirroring session or test runs at a time. *Test this TV*'s last test runs against it as well:
-the TV that keeps the video, drops it, refuses the session or has dropped the pairing, the
-time limit, Stop, the skip for a TV that needs FairPlay, and the command line's output.
+*Mirror screen* is tested with the real tray menu and window built offscreen: the main item
+mirrors a TV that does not need FairPlay, pairing first, and casts to an Apple TV (the tooltip
+saying which, in English and Spanish), the cast is under *More options*, *Mirror screen
+settings* and the Debug switches save what they say, it runs against the same fake TV on the
+controller's own loop through Connecting, Casting and Stopping, Stop and Quit tear the session
+down with no task left running, a failure is explained in Spanish, ending mirroring on the TV
+is said, and only one cast, mirroring session or test runs at a time. *Test this TV*'s last
+test runs against it as well: the TV that keeps the video, drops it, refuses the session or has
+dropped the pairing, the time limit, Stop, the skip for a TV that needs FairPlay, and the
+command line's output.
 
 ## Building MirrorBridge.exe
 
 On Windows: `.\packaging\build_exe.ps1`. It installs the pinned build requirements
 (`packaging/requirements-build.txt`), gets FFmpeg 8.1.1 (gyan.dev's essentials build, which
-scales the screen on the graphics card with `scale_d3d11`), and runs PyInstaller with
+has `gfxcapture` to capture the screen scaled on the graphics card), and runs PyInstaller with
 `packaging/MirrorBridge.spec` to produce a one-file `dist\MirrorBridge.exe`.
 
 `packaging/fetch_ffmpeg.py` gets FFmpeg: it downloads the zip that `packaging/ffmpeg_pin.json`
@@ -474,7 +527,7 @@ names (109 MB, once), checks its size and SHA-256 and those of the `ffmpeg.exe` 
 takes out only `ffmpeg.exe`, to `build\ffmpeg_811\`. Where downloads are blocked, give it a
 copy of the zip: `.\packaging\build_exe.ps1 -FFmpegZip C:\path\ffmpeg-8.1.1-essentials_build.zip`.
 Before PyInstaller runs, the script runs the `ffmpeg.exe` that will go inside and stops unless
-it is 8.1.1 and has `scale_d3d11`. The spec bundles that file only: `MIRRORBRIDGE_FFMPEG`
+it is 8.1.1 and has `gfxcapture`. The spec bundles that file only: `MIRRORBRIDGE_FFMPEG`
 (or `AIRCAST_FFMPEG`, the name from before the rename) set to another `ffmpeg.exe`, or else
 the FFmpeg 7.1 of `imageio-ffmpeg`, goes inside only with
 `.\packaging\build_exe.ps1 -AllowOtherFFmpeg` (which sets `MIRRORBRIDGE_OTHER_FFMPEG=1` for the
@@ -500,5 +553,5 @@ CI (`.github/workflows/ci.yml`) runs the tests on Linux and builds the exe on Wi
    brands the screen with about 100 ms of delay (experimental), but no sound yet; Apple TVs and
    Macs also need the FairPlay setup step. See the research report in the project files
    (`research/airplay-mirroring-windows.html`).
-5. **Lower CPU use now**: keep ddagrab frames on the GPU (no `hwdownload`) when the
-   encoder accepts D3D11 frames.
+5. **Lower CPU use with Quick Sync and AMF**: keep ddagrab frames on the GPU for them too,
+   as Mirror screen does for NVENC.

@@ -213,9 +213,12 @@ class PtsMapper:
         self.lowest: Optional[int] = None  # the smallest offset of the session
 
     def restart(self) -> None:
-        """A new FFmpeg, whose pts start from 0 again: forget the offsets, and the session's
-        smallest, but not the last time given, so that the times that follow never go back."""
+        """A new FFmpeg, whose pts start from 0 again: forget the offsets, the one in use (with
+        slew_ns, the new FFmpeg's is taken at once, not crept up to from the old origin) and the
+        session's smallest, but not the last time given, so that the times that follow never go
+        back."""
         self._offsets.clear()
+        self._used = None
         self.lowest = None
 
     def behind(self, pts_ms: int, arrival_ns: int) -> int:

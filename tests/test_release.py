@@ -694,7 +694,7 @@ def test_build_exe_checks_the_ffmpeg_it_bundles_and_never_redirects_stderr():
     assert '$fetch = @("-I", "packaging\\fetch_ffmpeg.py")' in code and '$fetch += @("--zip", $FFmpegZip)' in code
     assert "python -I packaging\\fetch_ffmpeg.py --bundled" in code
     assert "& $ffmpeg -hide_banner -version" in code and "& $ffmpeg -hide_banner -filters" in code
-    assert "[regex]::Escape($pin.version)" in code and "\\bscale_d3d11\\b" in code
+    assert "[regex]::Escape($pin.version)" in code and "\\bgfxcapture\\b" in code
     assert code.index("--bundled") < code.index("-filters") < code.index("pyinstaller --noconfirm")
     # With "Stop", Windows PowerShell ends the script at the first line PyInstaller writes to a
     # redirected standard error.

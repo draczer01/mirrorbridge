@@ -56,8 +56,9 @@ def _cli_words(message: str, device: Device) -> str:
         "Quality > Encoder > x264 (CPU)": "--encoder libx264",
         "What to cast > Extended screen size > 720p": "--extend-mode 720p",
         "More options > Test this TV": f'probe -d "{device.name}"',
-        "Mirror screen should work": f'mirror -d "{device.name}" should work',
-        "Mirror screen did not work": f'mirror -d "{device.name}" did not work',
+        "Show my screen should work": f'mirror -d "{device.name}" should work',
+        "Show my screen did not work": f'mirror -d "{device.name}" did not work',
+        "Choose Show my screen again": f'Run mirror -d "{device.name}" again',
     }
     for item, option in paths.items():
         message = message.replace(item, option)
@@ -240,9 +241,8 @@ async def cmd_mirror(args) -> int:
     """Screen mirroring (experimental), or with --probe, how the TV takes it."""
     settings = Settings.load()
     _what_to_send(settings, args)
+    # This run only, in place of Mirror screen settings > Frame rate: settings.json is not written.
     fps = args.framerate or int(os.environ.get("MIRRORBRIDGE_FPS", "0") or 0)  # MIRRORBRIDGE_FPS: experiment
-    if fps:
-        settings.framerate = fps  # this run only: settings.json is not written
     manager = DeviceManager(asyncio.get_running_loop())
     device = await _choose(manager, args)
     if device.airplay is None:
@@ -266,7 +266,7 @@ async def cmd_mirror(args) -> int:
 
     source = mirror.TEST_PATTERN if args.test_pattern else mirror.DESKTOP
     session = mirror.MirrorSession(target, settings, status, source=source, seconds=args.seconds,
-                                   timing=args.timing)
+                                   timing=args.timing, fps=fps if fps > 0 else None)
     print("Press Ctrl+C to stop mirroring.")
     try:
         await session.run()

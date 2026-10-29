@@ -1,6 +1,8 @@
-"""Mirror screen in the tray menu (and the window): offered for a paired TV that offers screen
-mirroring and does not need FairPlay, run as a cast is run, shown and stopped as a cast is, and
-one session at a time.
+"""Mirror screen in the tray menu (and the window): the main item shows the screen on the chosen
+TV the best way it takes (Mirror screen for a TV that offers screen mirroring and does not need
+FairPlay, the old cast for an Apple TV), with the old cast under More options; Mirror screen is
+run as a cast is run, shown and stopped as a cast is, and one session at a time. Its settings
+have a menu of their own.
 
 The sessions go to the TCL 55QM7L of fake_mirror_tv.py, which runs on the controller's own
 asyncio loop. Qt runs offscreen, on a controller that neither scans the network nor tests
@@ -30,7 +32,10 @@ TCL_TXT = {"features": "0x7F8AD0,0x38BCF46", "srcvers": "377.40.00", "model": "5
 APPLE_TV_TXT = {"features": "0x4A7FDFD5,0xBC157FDE", "srcvers": "690.7.1", "model": "AppleTV11,1"}  # bit 14
 NO_SCREEN_TXT = {**TCL_TXT, "features": "0x7F8A50,0x38BCF46"}  # the TCL's, without bit 7 (screen mirroring)
 SPEAKER_TXT = {"features": "0x445F8A00,0x1C340", "model": "Era 100", "manufacturer": "Sonos"}  # audio only
-MIRROR = "Mirror screen (low latency, experimental)"
+SHOW = "Show my screen on TCL 55QM7L"
+OLD_WAY = "Transmit (old way, 3-7 s delay)"
+MIRRORING_HINT = ("Your screen appears on the TV almost at once. No sound yet: for a video with sound, use Play a "
+                  "video file.")
 VIRTUAL = r"\\.\DISPLAY9"
 
 _APP = None  # one QApplication for every test here; it must outlive them
@@ -45,14 +50,14 @@ def _ffmpeg() -> None:
         pytest.skip("this FFmpeg has no libx264")
 
 
-def _device(port: int = 7000, credentials=CREDENTIALS, txt=None, name: str = "TCL 55QM7L"):
+def _device(port: int = 7000, credentials=CREDENTIALS, txt=None, name: str = "TCL 55QM7L", host: str = "127.0.0.1"):
     """A TV as discovery finds it (devices.Device), with or without MirrorBridge's pairing."""
     from pyatv.conf import AppleTV, ManualService
     from pyatv.const import PairingRequirement, Protocol
 
     from mirrorbridge.devices import Device
 
-    conf = AppleTV("127.0.0.1", name)
+    conf = AppleTV(host, name)
     conf.add_service(ManualService("fake-tv", Protocol.AirPlay, port, dict(txt or TCL_TXT), credentials=credentials,
                                    pairing_requirement=PairingRequirement.Mandatory))
     return Device(conf)
@@ -117,7 +122,24 @@ def _texts(tray) -> list[str]:
 
 def _more(tray) -> dict:
     more = next(action.menu() for action in tray.menu.actions() if action.text() == i18n.tr("more"))
-    return {action.text(): action for action in more.actions()}
+    return {action.text(): action for action in more.actions() if not action.isSeparator()}
+
+
+def _main(tray):
+    """The main item: the one after the status line."""
+    return [action for action in tray.menu.actions() if not action.isSeparator()][2]
+
+
+def _submenu(menu, title: str):
+    return next(action.menu() for action in menu.actions() if action.text() == title)
+
+
+def _choices(menu) -> dict:
+    return {action.text(): action for action in menu.actions() if not action.isSeparator()}
+
+
+def _checked(menu) -> list[str]:
+    return [text for text, action in _choices(menu).items() if action.isChecked()]
 
 
 def _until(condition, seconds: float = 10) -> None:
@@ -152,71 +174,127 @@ def _tasks(controller) -> set:
 # -- the menu item ------------------------------------------------------------------------------------
 
 
-def test_mirror_screen_is_offered_for_a_paired_tv_of_another_brand(controller):
+def test_the_main_item_shows_the_screen_on_the_chosen_tv(controller, monkeypatch):
+    """It is what the window's big button does (start_primary), right under the status line; the
+    old cast is under More options, first."""
+    calls = []
+    monkeypatch.setattr(controller, "start_primary", lambda *_args: calls.append("primary"))
+    monkeypatch.setattr(controller, "start_cast", lambda *_args: calls.append("cast"))
     tray = _tray(controller)
     assert tray.menu.toolTipsVisible()
-    item = _items(tray)[MIRROR]
-    assert not item.isEnabled()  # no TV chosen
-    assert item.toolTip().startswith("Your screen on the TV a fraction of a second behind")
+    item = _main(tray)
+    assert item.text() == "Show my screen (choose a TV under Device)" and not item.isEnabled()  # no TV chosen
+    assert item.toolTip() == ("No TV found. Check that the TV is on and that this computer is on the same Wi-Fi "
+                              "network, then press Search again.")
 
     _choose(controller, _device())
     tray._rebuild()  # pylint: disable=protected-access
     texts = _texts(tray)
-    assert texts[texts.index("Start casting to TCL 55QM7L") + 1] == MIRROR  # next to Start casting
-    item = _items(tray)[MIRROR]
-    assert item.isEnabled() and item.toolTip() == (
-        "Your screen on the TV a fraction of a second behind, instead of a cast's few seconds: the display, window or "
-        "extended screen chosen under What to cast. For paired AirPlay 2 TVs of other brands (TCL, Roku, Samsung, "
-        "LG…); no sound yet.")
+    assert texts[:3] == ["Open MirrorBridge", "Not casting", SHOW]
+    assert not [text for text in texts if text.startswith(("Start casting", "Mirror screen ("))]
+    item = _main(tray)
+    assert item.isEnabled() and controller.primary_action() == "mirror" and item.toolTip() == MIRRORING_HINT
+    item.trigger()
+    more = _more(tray)
+    assert list(more)[0] == OLD_WAY and more[OLD_WAY].isEnabled()
+    assert more[OLD_WAY].toolTip() == ("The cast from before, for a TV that does not show your screen otherwise: it "
+                                       "is a few seconds behind, but it works with more TVs and has sound.")
+    more[OLD_WAY].trigger()
+    assert calls == ["primary", "cast"]
+    assert "Include computer sound (only when transmitting)" in texts  # Mirror screen has no sound yet
+    assert _items(tray)["Play a video file…"].isEnabled()
+
+
+def test_nothing_on_the_tv_tries_another_way_from_the_menu(controller, monkeypatch):
+    """While the main item's way runs and the TV takes another, the menu has the window's "Try
+    another way" under Stop; the TV's last way has none."""
+    from mirrorbridge import routes
+    from mirrorbridge.googlecast import CastDevice
+
+    started = []  # the ways started, in place of the sessions
+    monkeypatch.setattr(controller, "_start_route", lambda screen, route: started.append(route))
+    monkeypatch.setattr(type(controller), "is_active", property(lambda self: bool(started)))
+    controller.casts = [CastDevice("TCL 55QM7L", "127.0.0.1", identifier="tcl")]  # the TCL by Google Cast too
+    _choose(controller, _device())
+    another = "Nothing on the TV? Try another way"
+    assert another not in _texts(_tray(controller))  # nothing runs
+    controller.start_primary()
+    tray = _tray(controller)
+    assert _texts(tray)[2:4] == ["Stop casting", another]
+
+    def next_way(tray) -> None:
+        count = len(started)
+        _items(tray)[another].trigger()
+        assert controller._go_on()  # pylint: disable=protected-access  # once the session has stopped
+        _until(lambda: len(started) == count + 1)
+
+    next_way(tray)
+    assert started == [routes.AIRPLAY_MIRROR, routes.CAST_MIRROR]
+    assert controller.routes.last(controller.selected_screen.identifier, routes.AIRPLAY_MIRROR) == "failed"
+    controller.set_language("es")
+    tray = _tray(controller)
+    assert _texts(tray)[2:4] == ["Detener transmisión", "¿No se ve en la TV? Probar otra forma"]  # the old cast
+    controller.set_language("en")
+    next_way(_tray(controller))
+    assert started == [routes.AIRPLAY_MIRROR, routes.CAST_MIRROR, routes.AIRPLAY_CAST]
+    assert _texts(_tray(controller))[2] == "Stop casting" and another not in _texts(_tray(controller))  # the last way
 
 
 def test_mirror_screen_pairs_first(controller, monkeypatch):
-    """Without MirrorBridge's pairing, Mirror screen is still offered: it pairs (the TV shows a PIN),
+    """Without MirrorBridge's pairing, the main item still mirrors: it pairs (the TV shows a PIN),
     then mirrors."""
     _choose(controller, _device(credentials=None))
-    item = _items(_tray(controller))[MIRROR]
+    item = _main(_tray(controller))
     assert item.isEnabled() and item.toolTip() == (
-        "The first time, the TV shows a 4-digit code to type in here. Then your screen appears on the TV.")
+        "The first time, the TV shows a 4-digit code: type it in when MirrorBridge asks. " + MIRRORING_HINT)
     asked = []
     monkeypatch.setattr(controller, "pair",
                         lambda device=None, then=None, always=False: asked.append((device.name, then, always)))
-    controller.start_mirror()
+    item.trigger()
     assert asked == [("TCL 55QM7L", controller._mirror_after_pairing, True)]  # pylint: disable=protected-access
     assert not controller.is_active and controller.session is None
     controller._mirror_after_pairing()  # pylint: disable=protected-access  # a pairing that did not take
     assert not controller.is_active and len(asked) == 1  # nothing starts, and it does not pair again in a loop
 
 
-def test_an_apple_tv_is_told_mirroring_is_coming(controller):
+def test_an_apple_tv_is_cast_to(controller, monkeypatch):
+    """Mirror screen needs FairPlay there: the main item casts, as the window's big button does."""
     _choose(controller, _device(txt=APPLE_TV_TXT, name="Living Room"))
+    casts = []
+    monkeypatch.setattr(controller, "start_cast", lambda *_args: casts.append("cast"))
     tray = _tray(controller)
-    item = _items(tray)[MIRROR]
-    assert not item.isEnabled() and item.toolTip() == (
-        "Screen mirroring to Apple TVs and Macs is coming in a later version. For now, cast to them with Start "
-        "casting.")
-    assert _items(tray)["Start casting to Living Room"].isEnabled()  # casting is still there
+    item = _main(tray)
+    assert item.text() == "Show my screen on Living Room" and item.isEnabled()
+    assert item.toolTip() == ("On an Apple TV your screen appears a few seconds behind, with sound. Instant "
+                              "mirroring for Apple TV is coming in a later version.")
+    item.trigger()
+    assert casts == ["cast"] and controller.primary_action() == "cast"
+    assert _more(tray)[OLD_WAY].isEnabled()  # the same cast
     controller.start_mirror()
     assert not controller.is_active
 
 
 @pytest.mark.parametrize("txt", [NO_SCREEN_TXT, SPEAKER_TXT], ids=["no-bit-7", "speaker"])
-def test_a_receiver_that_does_not_mirror_is_not_offered_it(controller, txt):
+def test_a_receiver_that_does_not_mirror_is_cast_to_or_left_out(controller, txt):
     from mirrorbridge.gui.window import MainWindow
 
     _choose(controller, _device(txt=txt, name="Kitchen"))
-    item = _items(_tray(controller))[MIRROR]
-    assert not item.isEnabled() and item.toolTip() == "This receiver does not say that it takes screen mirroring."
+    item = _main(_tray(controller))
+    assert item.text() == "Show my screen on Kitchen"
+    if txt is NO_SCREEN_TXT:  # it takes a cast: the main item casts
+        assert item.isEnabled() and item.toolTip() == "Your screen appears on this TV a few seconds behind, with sound."
+    else:  # a speaker shows no picture
+        assert not item.isEnabled() and item.toolTip() == "A speaker: it plays sound only and cannot show your screen"
     window = MainWindow(controller)
     # The window's big button casts to a TV that does not mirror, and is off for a speaker
     assert controller.primary_action() == ("cast" if txt is NO_SCREEN_TXT else "")
     assert window.show_btn.isEnabled() == (txt is NO_SCREEN_TXT)
     controller.start_mirror()
     assert not controller.is_active and controller.session is None
-    _choose(controller, _device(txt=txt, name="Kitchen", credentials=None))  # not "pair first": it would not help
-    assert _items(_tray(controller))[MIRROR].toolTip() == item.toolTip()
     controller.set_language("es")
-    assert _items(_tray(controller))["Duplicar pantalla (baja latencia, experimental)"].toolTip() == (
-        "Este receptor no indica que admita la duplicación de pantalla.")
+    assert _main(_tray(controller)).toolTip() == (
+        "Tu pantalla aparece en esta TV con unos segundos de retraso, con sonido." if txt is NO_SCREEN_TXT
+        else "Una bocina: solo reproduce sonido y no puede mostrar tu pantalla")
 
 
 def test_mirror_screen_in_spanish(controller):
@@ -225,24 +303,151 @@ def test_mirror_screen_in_spanish(controller):
     controller.set_language("es")
     _choose(controller, _device())
     tray = _tray(controller)
-    item = _items(tray)["Duplicar pantalla (baja latencia, experimental)"]
-    assert item.isEnabled() and item.toolTip().startswith("Tu pantalla en la TV con una fracción de segundo de retraso")
+    item = _main(tray)
+    assert item.text() == "Mostrar mi pantalla en TCL 55QM7L" and item.isEnabled()
+    assert item.toolTip().startswith("Tu pantalla aparece en la TV casi al instante.")
+    assert list(_more(tray))[0] == "Transmitir (modo anterior, 3-7 s de retraso)"
+    assert "Incluir el sonido del equipo (solo al transmitir)" in _texts(tray)
+    quality = _submenu(tray.menu, "Calidad")
+    assert [action.text() for action in quality.actions()] == [
+        "Resolución", "Cuadros por segundo (al transmitir)", "Retraso (al transmitir)", "Tasa de bits", "Codificador"]
+    mirror_settings = _submenu(tray.menu, "Ajustes de Duplicar pantalla")
+    assert list(_choices(_submenu(mirror_settings, "Latencia"))) == ["Baja", "Normal", "Suave"]
+    assert list(_choices(_submenu(mirror_settings, "Cuadros por segundo"))) == ["Automático", "30 fps", "60 fps"]
     window = MainWindow(controller)
     assert window.show_btn.text() == "Mostrar mi pantalla en TCL 55QM7L" and window.show_btn.isEnabled()
     assert window.action_hint.text().startswith("Tu pantalla aparece en la TV casi al instante.")
 
     _choose(controller, _device(credentials=None))
-    item = _items(_tray(controller))["Duplicar pantalla (baja latencia, experimental)"]
-    assert item.toolTip() == ("La primera vez, la TV muestra un código de 4 números para escribirlo aquí. Luego tu "
-                              "pantalla aparece en la TV.")
+    assert _main(_tray(controller)).toolTip().startswith(
+        "La primera vez, la TV muestra un código de 4 números: escríbelo cuando MirrorBridge lo pida. Tu pantalla")
     _choose(controller, _device(txt=APPLE_TV_TXT))
-    item = _items(_tray(controller))["Duplicar pantalla (baja latencia, experimental)"]
-    assert item.toolTip() == ("La duplicación de pantalla en Apple TV y Mac llegará en una versión futura. Por ahora, "
-                              "transmite a ellos con Transmitir.")
+    assert _main(_tray(controller)).toolTip().startswith(
+        "En una Apple TV tu pantalla aparece con unos segundos de retraso, con sonido.")
     controller.set_language("en")  # the window says it again, for the Apple TV now chosen: it casts
     assert window.show_btn.text() == "Show my screen on TCL 55QM7L" and window.show_btn.isEnabled()
     assert window.action_hint.text().startswith("On an Apple TV your screen appears a few seconds behind")
     assert window.cast_btn.isHidden()  # the big button already casts
+
+
+def test_the_device_menu_lists_every_tv_however_it_was_found(controller):
+    """AirPlay and Google Cast TVs (a TV found both ways once), with what choosing each means; a
+    speaker is listed but cannot be chosen. The main item shows the screen on a Google Cast TV too."""
+    from mirrorbridge.googlecast import CastDevice
+
+    controller.devices = [_device(), _device(txt=SPEAKER_TXT, name="Era 100", host="192.0.2.9")]
+    controller.casts = [CastDevice("Sala & cocina", "192.0.2.7", identifier="abc", model="Chromecast"),
+                        CastDevice("TCL 55QM7L", "127.0.0.1", identifier="tcl")]  # the TCL again, by Google Cast
+    tray = _tray(controller)
+    devices = _submenu(tray.menu, "Device")
+    tvs = {text: action for text, action in _choices(devices).items() if action.isCheckable()}
+    assert list(tvs) == ["Sala && cocina  (Ready)", "TCL 55QM7L  (Ready)",
+                         "Era 100  (A speaker: it plays sound only and cannot show your screen)"]
+    assert [action.isEnabled() for action in tvs.values()] == [True, True, False]
+    assert not any(action.isChecked() for action in tvs.values())
+
+    tvs["Sala && cocina  (Ready)"].trigger()
+    assert controller.settings.last_device_id == "cast:abc" and Settings.load().last_device_id == "cast:abc"
+    tray._rebuild()  # pylint: disable=protected-access
+    item = _main(tray)
+    assert item.text() == "Show my screen on Sala && cocina" and item.isEnabled()
+    assert item.toolTip() == "Your screen and its sound appear on the TV almost at once."  # as the window says
+    # Google Cast mirroring has the sound and Quality's frame rate, so they are named without "when transmitting"
+    texts = _texts(tray)
+    assert "Include computer sound" in texts and "Include computer sound (only when transmitting)" not in texts
+    assert [action.text() for action in _submenu(tray.menu, "Quality").actions()] == [
+        "Resolution", "Frame rate", "Delay (when transmitting)", "Bitrate", "Encoder"]
+    devices = _submenu(tray.menu, "Device: Sala && cocina")
+    assert _checked(devices) == ["Sala && cocina  (Ready)"]
+    items = _choices(devices)
+    assert not items["Pair with PIN…"].isEnabled() and not items["Forget pairing"].isEnabled()  # AirPlay's
+    assert not _items(tray)["Play a video file…"].isEnabled() and not _more(tray)[OLD_WAY].isEnabled()
+    assert not _more(tray)["Test this TV…"].isEnabled()
+
+
+def test_mirror_screen_settings_are_for_the_next_session(controller):
+    """Mirror screen settings, next to What to cast: Latency (Normal) and Frame rate (Automatic),
+    saved at once. Choosing a Latency puts More options > Debug > TV wait back on Automatic; the
+    casts' own frame rate and delay, under Quality, are left alone."""
+    controller.update_settings(mirror_lead_ms=200)
+    tray = _tray(controller)
+    texts = _texts(tray)
+    assert texts.index("Mirror screen settings") == texts.index("What to cast") + 1
+    mirror_settings = _submenu(tray.menu, "Mirror screen settings")
+    assert [action.text() for action in mirror_settings.actions()] == ["Latency", "Frame rate"]
+    latency, fps = _submenu(mirror_settings, "Latency"), _submenu(mirror_settings, "Frame rate")
+    assert list(_choices(latency)) == ["Low", "Normal", "Smooth"] and _checked(latency) == ["Normal"]
+    assert latency.toolTipsVisible() and [action.toolTip() for action in latency.actions()] == [
+        "The TV shows each frame 60 ms after it was captured: the least delay, for a cable or a strong Wi-Fi signal.",
+        "The TV shows each frame 100 ms after it was captured, or as saved for this TV: the default.",
+        "The TV shows each frame 200 ms after it was captured: a little more delay, and fewer skips when the Wi-Fi "
+        "falters."]
+    assert list(_choices(fps)) == ["Automatic", "30 fps", "60 fps"] and _checked(fps) == ["Automatic"]
+    assert fps.toolTipsVisible() and _choices(fps)["Automatic"].toolTip() == (
+        "60 fps when the graphics card encodes the video, 30 when the processor does or the screen capture is slow; "
+        "never more than the TV takes.")
+    quality = _submenu(tray.menu, "Quality")
+    assert [action.text() for action in quality.actions()] == [
+        "Resolution", "Frame rate (when transmitting)", "Delay (when transmitting)", "Bitrate", "Encoder"]
+
+    _choices(fps)["60 fps"].trigger()
+    s = controller.settings
+    assert (s.mirror_framerate, s.mirror_lead_ms) == (60, 200)  # the frame rate leaves the TV wait alone
+    _choices(latency)["Smooth"].trigger()
+    assert (s.mirror_latency, s.mirror_framerate, s.mirror_lead_ms) == ("smooth", 60, 0)
+    saved = Settings.load()
+    assert (saved.mirror_latency, saved.mirror_framerate, saved.mirror_lead_ms) == ("smooth", 60, 0)
+    assert (s.framerate, s.latency_mode) == (30, "low")
+
+    tray._rebuild()  # pylint: disable=protected-access
+    mirror_settings = _submenu(tray.menu, "Mirror screen settings")
+    assert _checked(_submenu(mirror_settings, "Latency")) == ["Smooth"]
+    assert _checked(_submenu(mirror_settings, "Frame rate")) == ["60 fps"]
+    _choices(_submenu(mirror_settings, "Frame rate"))["Automatic"].trigger()
+    assert s.mirror_framerate == 0
+
+    # A settings.json edited by hand: each shows what a session uses (Normal, Automatic)
+    s.mirror_latency, s.mirror_framerate = "fast", 45
+    tray._rebuild()  # pylint: disable=protected-access
+    mirror_settings = _submenu(tray.menu, "Mirror screen settings")
+    assert _checked(_submenu(mirror_settings, "Latency")) == ["Normal"]
+    assert _checked(_submenu(mirror_settings, "Frame rate")) == ["Automatic"]
+
+
+
+def test_the_window_has_the_mirror_screen_settings_too(controller):
+    """Advanced settings: Delay when mirroring, with what it means under it, and Frame rate when
+    mirroring, beside the casts' own; the same settings as the tray's, saved at once."""
+    from mirrorbridge.gui.window import MainWindow
+
+    controller.update_settings(mirror_lead_ms=200)
+    window = MainWindow(controller)
+    labels = {key: label.text() for key, label in window._row_labels.items()}  # pylint: disable=protected-access
+    assert labels["ui_cast_framerate"] == "Frame rate when casting"
+    assert labels["ui_mirror_latency"] == "Delay when mirroring"
+    assert labels["ui_mirror_framerate"] == "Frame rate when mirroring"
+    combo, fps = window.mirror_latency_combo, window.mirror_fps_combo
+    assert [combo.itemText(i) for i in range(combo.count())] == ["Low", "Normal", "Smooth"]
+    assert combo.currentText() == "Normal"
+    assert window.mirror_latency_hint.text().startswith("The TV shows each frame 100 ms after it was captured")
+    assert [fps.itemText(i) for i in range(fps.count())] == ["Automatic", "30 fps", "60 fps"]
+    assert fps.currentText() == "Automatic"
+
+    fps.setCurrentIndex(fps.findData(60))
+    s = controller.settings
+    assert (s.mirror_framerate, s.mirror_lead_ms) == (60, 200)  # the frame rate leaves the TV wait alone
+    combo.setCurrentIndex(combo.findData("low"))
+    assert (s.mirror_latency, s.mirror_lead_ms) == ("low", 0)
+    assert window.mirror_latency_hint.text().startswith("The TV shows each frame 60 ms")
+    assert Settings.load().mirror_latency == "low"
+
+    # Chosen in the tray: the window follows; and in Spanish
+    controller.update_settings(mirror_latency="smooth", mirror_framerate=30)
+    assert (combo.currentText(), fps.currentText()) == ("Smooth", "30 fps")
+    controller.set_language("es")
+    assert (combo.currentText(), fps.currentText()) == ("Suave", "30 fps")
+    assert window._row_labels["ui_mirror_latency"].text() == "Retraso al duplicar"  # pylint: disable=protected-access
+    assert window.mirror_latency_hint.text().startswith("La TV muestra cada cuadro 200 ms")
 
 
 # -- a session, from the tray menu ---------------------------------------------------------------------
@@ -260,7 +465,7 @@ def test_mirror_screen_runs_like_a_cast(controller, tv):
     before = _tasks(controller)
     tray = _tray(controller, opened)
 
-    _items(tray)[MIRROR].trigger()
+    _main(tray).trigger()  # the main item: Mirror screen, for this TV
     assert controller.is_active and controller.mirroring
     session = controller.session
     assert isinstance(session, MirrorSession) and session.source == "desktop"
@@ -273,9 +478,9 @@ def test_mirror_screen_runs_like_a_cast(controller, tv):
     assert window.show_btn.text() == "Stop showing on TCL 55QM7L" and not window.file_btn.isEnabled()
     tray._rebuild()  # pylint: disable=protected-access
     items = _items(tray)
-    assert "Stop mirroring" in items and "Start casting to TCL 55QM7L" not in items
-    assert not items[MIRROR].isEnabled() and not items["Play a video file…"].isEnabled()
-    assert not _more(tray)["Test this TV…"].isEnabled()
+    assert _main(tray).text() == "Stop mirroring" and SHOW not in items
+    assert not items["Play a video file…"].isEnabled()
+    assert not _more(tray)["Test this TV…"].isEnabled() and not _more(tray)[OLD_WAY].isEnabled()
 
     # One session at a time: a cast, another mirror or Test this TV do not start
     controller.start_cast()
@@ -491,8 +696,8 @@ def test_mirror_screen_offers_to_install_the_driver_as_a_cast_does(controller, t
     _until(lambda: controller.session_future is None and not controller.extend.busy, 30)
     assert asked == ["install?"]  # Parsec's download and terms, as when a cast finds no driver
     # Extend screen is turned off, so the next Mirror screen sends the display; no "failed" on top.
-    assert notes == [("Extend screen (virtual display)", "Extend screen is off for now, so Start casting and Mirror "
-                      "screen send your display. Choose it again once the driver works.", False)]
+    assert notes == [("Extend screen (virtual display)", "Extend screen is off for now, so Show my screen sends your "
+                      "display. Choose it again once the driver works.", False)]
     assert not controller.settings.extend_screen and controller.vdd_status is DriverStatus.NOT_INSTALLED
     assert controller.cast_state == State.FAILED and not controller.is_active
     assert driver.events == [("start", 1920, 1080, 60), "stop"] and tv.connections == []  # the TV was not asked
@@ -530,22 +735,26 @@ def test_a_cast_or_a_test_keeps_mirror_screen_off(controller, monkeypatch):
 
     monkeypatch.setattr(controller_module, "CastSession", _Cast)
     _choose(controller, _device())
-    controller.start_cast()
-    _until(lambda: controller.cast_state == State.CASTING)
     tray = _tray(controller)
+    _more(tray)[OLD_WAY].trigger()  # the old cast, from More options
+    _until(lambda: controller.cast_state == State.CASTING)
+    tray._rebuild()  # pylint: disable=protected-access
     items = _items(tray)
-    assert "Stop casting" in items and not items[MIRROR].isEnabled()
+    assert _main(tray).text() == "Stop casting" and SHOW not in items and not _more(tray)[OLD_WAY].isEnabled()
     controller.start_mirror()
+    controller.start_primary()
     assert isinstance(controller.session, _Cast) and not controller.mirroring
     assert controller.status() == ("active", "Casting to TCL 55QM7L")
     items["Stop casting"].trigger()
     _until(lambda: controller.session_future is None)
-    assert _items(_tray(controller))[MIRROR].isEnabled()
+    assert _main(_tray(controller)).text() == SHOW and _main(_tray(controller)).isEnabled()
 
     controller.probe_future = concurrent.futures.Future()  # Test this TV is running
     try:
-        assert not _items(_tray(controller))[MIRROR].isEnabled()
+        tray = _tray(controller)
+        assert _main(tray).text() == "Stop casting" and SHOW not in _items(tray)
         controller.start_mirror()
+        controller.start_primary()
         assert controller.session is None
     finally:
         controller.probe_future = None

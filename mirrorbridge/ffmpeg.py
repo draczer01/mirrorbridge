@@ -165,6 +165,22 @@ def has_filter(ffmpeg: str, name: str) -> bool:
     return any(line.split()[1:2] == [name] for line in out.splitlines() if line.strip())
 
 
+_OPTION_LINE = re.compile(r"\s+([\w-]+)\s+<")  # "   max_framerate     <video_rate> ..FV...", not a constant's line
+
+
+@functools.lru_cache(maxsize=None)
+def filter_options(ffmpeg: str, name: str) -> frozenset[str]:
+    """The options of the filter `name` in this FFmpeg, as `-h filter=` lists them: none for a
+    filter it does not have, or when FFmpeg could not be asked (kept for the run, as an answer
+    is)."""
+    try:
+        out = _run([ffmpeg, "-hide_banner", "-h", f"filter={name}"]).stdout
+    except (OSError, subprocess.SubprocessError) as ex:
+        _LOGGER.info("Could not ask %s for the options of %s: %s", ffmpeg, name, ex)
+        return frozenset()
+    return frozenset(found.group(1) for found in map(_OPTION_LINE.match, (out or "").splitlines()) if found)
+
+
 @functools.lru_cache(maxsize=None)
 def has_input_format(ffmpeg: str, name: str) -> bool:
     out = _run([ffmpeg, "-hide_banner", "-devices"]).stdout
@@ -173,8 +189,10 @@ def has_input_format(ffmpeg: str, name: str) -> bool:
 
 _WORKING_ENCODERS: set[tuple[str, str, bool, int | None]] = set()
 _WARNED: set[tuple[str, str, str]] = set()  # (ffmpeg, encoder, why): each one is a warning once a run
+_ADDRESS = re.compile(r"@ (?:0x)?[0-9a-fA-F]+\]")  # "[h264_nvenc @ 000001d2c3a4b5c0]": another in each FFmpeg
 # What FFmpeg says when the NVIDIA driver is older than its NVENC needs (570 for FFmpeg 8.1.1).
 _DRIVER_LINE = re.compile(r"minimum required Nvidia driver|required nvenc API version", re.IGNORECASE)
+PROBE_TAIL_LINES = 4  # of FFmpeg's stderr in the warning, after up to as many of the encoder's own
 
 
 def encoder_works(ffmpeg: str, encoder: str, mirror: bool = False, keyframes: int = 2) -> bool:
@@ -184,9 +202,10 @@ def encoder_works(ffmpeg: str, encoder: str, mirror: bool = False, keyframes: in
     start right after logon gets probed again on the next cast. mirror=True tries the
     options of screen mirroring (mirror_encoder_args, with a keyframe every `keyframes`
     seconds, MIRROR_KEYFRAME_SECONDS unless told, 0 for the first only) instead of those of a
-    cast. A failure is a warning in the log (once a run for each reason), with FFmpeg's line
-    about the NVIDIA driver if it wrote one: with a driver too old for this FFmpeg, NVENC is
-    lost without another word.
+    cast. A failure is a warning in the log (once a run for each reason), with the encoder's
+    own lines, which say why (no such GPU, a DLL missing), and FFmpeg's line about the NVIDIA
+    driver if it wrote one: with a driver too old for this FFmpeg, NVENC is lost without
+    another word.
     """
     key = (ffmpeg, encoder, mirror, keyframes if mirror else None)
     if key in _WORKING_ENCODERS:
@@ -206,17 +225,21 @@ def encoder_works(ffmpeg: str, encoder: str, mirror: bool = False, keyframes: in
         _unusable(ffmpeg, encoder, f"FFmpeg did not answer: {ex}")
         return False
     if result.returncode != 0:
-        stderr = result.stderr.strip()
-        tail = stderr[-300:]
-        driver = [line.strip() for line in stderr.splitlines() if _DRIVER_LINE.search(line) and line not in tail]
-        _unusable(ffmpeg, encoder, "\n".join(driver + [tail]).strip() or f"exit code {result.returncode}")
+        lines = [line.strip() for line in result.stderr.splitlines() if line.strip()]
+        # Whole lines: FFmpeg's last ones are the same for every cause ("Error while opening
+        # encoder"), and the encoder's own ("[h264_nvenc @ ...] Cannot load nvEncodeAPI64.dll",
+        # the driver it needs) come before them, maybe far up.
+        tail = lines[-PROBE_TAIL_LINES:]
+        cause = [line for line in lines[:-PROBE_TAIL_LINES]
+                 if _DRIVER_LINE.search(line) or line.startswith(f"[{encoder} @")][:PROBE_TAIL_LINES]
+        _unusable(ffmpeg, encoder, "\n".join(cause + tail) or f"exit code {result.returncode}")
         return False
     _WORKING_ENCODERS.add(key)
     return True
 
 
 def _unusable(ffmpeg: str, encoder: str, why: str) -> None:
-    key = (ffmpeg, encoder, why)
+    key = (ffmpeg, encoder, _ADDRESS.sub("@ ...]", why))
     log = _LOGGER.debug if key in _WARNED else _LOGGER.warning
     _WARNED.add(key)
     log("Encoder %s does not work here: %s", ENCODER_LABELS.get(encoder, encoder), why)
@@ -464,7 +487,12 @@ def mirror_encoder_args(encoder: str, kbps: int, fps: int, vbv_frames: float = M
     rate = ["-b:v", f"{kbps}k", "-maxrate", f"{kbps}k", "-bufsize", f"{bufsize}k"]
     if seconds:
         gop = max(1, round(fps * seconds))
-        common = ["-g", str(gop), "-bf", "0", "-force_key_frames", f"expr:gte(t,n_forced*{seconds})"]
+        common = ["-g", str(gop), "-bf", "0"]
+        # AMF's keyframes come from -g (its IDR period) alone: the ones -force_key_frames asks
+        # for, FFmpeg 7.1 leaves out, and 8.0 and later make plain I-frames (h264_amf's forced_idr
+        # is off), a blur that ends nothing; AMD's docs keep forced picture types for no IDR period.
+        if encoder != "h264_amf":
+            common += ["-force_key_frames", f"expr:gte(t,n_forced*{seconds})"]
         keyint = f"keyint={gop}:min-keyint={gop}:scenecut=0"
     else:
         common = ["-g", str(NO_PERIODIC_GOP), "-bf", "0"]

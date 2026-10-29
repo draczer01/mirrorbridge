@@ -42,7 +42,7 @@ CHOICES: dict[str, tuple] = {
     "mirror_latency": ("low", "normal", "smooth"),
     "mirror_framerate": (0, 30, 60),
     "mirror_keyframes": (0, 10, 2),  # in the Debug menu's order (ffmpeg.MIRROR_KEYFRAME_CHOICES)
-    "mirror_scaler": ("auto", "cpu"),
+    "mirror_scaler": ("auto", "cpu", "gfx"),  # in the Debug menu's order (gui.tray.SCALERS)
 }
 CHECKED = set(CHOICES) | {"mirror_encoder_extra"}
 
@@ -85,7 +85,9 @@ class Settings:
     # Test this TV and mirror --probe leave them out
     mirror_lead_ms: int = 0  # how long the TV waits to show a frame; 0 = what is saved for the TV
     mirror_keyframes: int = 0  # seconds between keyframes: 0 = only when needed, 10 or 2
-    mirror_scaler: str = "auto"  # auto (on the graphics card when it can) | cpu (as before)
+    # auto (the graphics card when the screen fits the TV's, or gfxcapture can repeat frames) | cpu (as
+    # before) | gfx (gfxcapture to scale, even when it cannot repeat frames: a test)
+    mirror_scaler: str = "auto"
     mirror_on_arrival: bool = False  # ask the TV to show each frame as it comes, not at its time
     mirror_encoder_extra: str = ""  # settings.json only: FFmpeg options after the encoder's, for experiments
 

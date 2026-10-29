@@ -28,7 +28,9 @@ from .controller import Controller
 from .extend import EXTEND_SIZES, error_text, size_label
 from .i18n import LANGUAGES, language, language_menu_title, say, tr
 from .theme import app_icon
-from .tray import LATENCIES, RESOLUTIONS, display_label
+from ..mirror.negotiation import DEFAULT_LEAD_MS
+from ..mirror.session import MIRROR_LATENCIES, mirror_latency
+from .tray import LATENCIES, MIRROR_FRAMERATES, MIRROR_LEVELS, RESOLUTIONS, display_label
 
 _CONNECTING = (State.STARTING, State.BUFFERING, State.CONNECTING)
 
@@ -251,13 +253,26 @@ class MainWindow(QMainWindow):
         self.latency_combo = QComboBox()
         for _key, value in LATENCIES:
             self.latency_combo.addItem("", value)
+        # Mirror screen's own two (the tray's Mirror screen settings)
+        self.mirror_latency_combo = QComboBox()
+        for level in MIRROR_LEVELS:
+            self.mirror_latency_combo.addItem("", level)
+        self.mirror_latency_hint = QLabel()
+        self.mirror_latency_hint.setObjectName("hint")
+        self.mirror_latency_hint.setWordWrap(True)
+        self.mirror_fps_combo = QComboBox()
+        for f in MIRROR_FRAMERATES:
+            self.mirror_fps_combo.addItem(f"{f} fps" if f else "", f)
         self.encoder_combo = QComboBox()
         self._row_labels: dict[str, QLabel] = {}  # i18n key -> the label in front of its control
         for key, field in (("extend_size", self.extend_combo), ("resolution", self.res_combo),
-                           ("framerate", self.fps_combo), ("bitrate", brow), ("ui_cast_latency", self.latency_combo),
+                           ("ui_cast_framerate", self.fps_combo), ("bitrate", brow), ("ui_cast_latency", self.latency_combo),
+                           ("ui_mirror_latency", self.mirror_latency_combo), ("ui_mirror_framerate", self.mirror_fps_combo),
                            ("encoder", self.encoder_combo)):
             self._row_labels[key] = QLabel()
             af.addRow(self._row_labels[key], field)
+            if key == "ui_mirror_latency":
+                af.addRow("", self.mirror_latency_hint)
         self.audio_cb = QCheckBox()
         self.cursor_cb = QCheckBox()
         self.mute_pc_cb = QCheckBox()
@@ -299,6 +314,10 @@ class MainWindow(QMainWindow):
         self.bitrate.valueChanged.connect(self._bitrate_changed)
         self.bitrate.sliderReleased.connect(lambda: self._bitrate_changed(self.bitrate.value()))
         self.latency_combo.currentIndexChanged.connect(lambda _i: self._save(latency_mode=self.latency_combo.currentData()))
+        # A Latency puts the tray's Debug > TV wait back on Automatic, which would win over it.
+        self.mirror_latency_combo.currentIndexChanged.connect(self._mirror_latency_chosen)
+        self.mirror_fps_combo.currentIndexChanged.connect(
+            lambda _i: self._save(mirror_framerate=int(self.mirror_fps_combo.currentData())))
         self.encoder_combo.currentIndexChanged.connect(
             lambda _i: self.encoder_combo.currentData() and self._save(encoder=self.encoder_combo.currentData())
         )
@@ -329,6 +348,10 @@ class MainWindow(QMainWindow):
         self.res_combo.setItemText(self.res_combo.findData(0), tr("native"))
         for i, (key, _value) in enumerate(LATENCIES):
             self.latency_combo.setItemText(i, tr(key))
+        for i, level in enumerate(MIRROR_LEVELS):
+            self.mirror_latency_combo.setItemText(i, tr("mirror_lat_" + level))
+        self.mirror_fps_combo.setItemText(self.mirror_fps_combo.findData(0), tr("mirror_fps_auto"))
+        self._show_mirror_latency_hint()
         self._show_status(self._status)
         self.log_view.setPlaceholderText(tr("log"))
 
@@ -364,6 +387,14 @@ class MainWindow(QMainWindow):
             self.c.update_settings(**changes)
         finally:
             self._saving = False
+
+    def _mirror_latency_chosen(self, _index: int) -> None:
+        self._show_mirror_latency_hint()
+        self._save(mirror_latency=self.mirror_latency_combo.currentData(), mirror_lead_ms=0)
+
+    def _show_mirror_latency_hint(self) -> None:
+        level = self.mirror_latency_combo.currentData() or "normal"
+        self.mirror_latency_hint.setText(tr(f"mirror_lat_{level}_hint", ms=MIRROR_LATENCIES[level] or DEFAULT_LEAD_MS))
 
     def _bitrate_changed(self, value: int) -> None:
         self.bitrate_label.setText(f"{value} Mbps")
@@ -432,6 +463,9 @@ class MainWindow(QMainWindow):
             self.bitrate.setValue(max(2, s.video_bitrate_kbps // 1000))
             self.bitrate_label.setText(f"{self.bitrate.value()} Mbps")
             self.latency_combo.setCurrentIndex(max(0, self.latency_combo.findData(s.latency_mode)))
+            self.mirror_latency_combo.setCurrentIndex(max(0, self.mirror_latency_combo.findData(mirror_latency(s))))
+            self._show_mirror_latency_hint()
+            self.mirror_fps_combo.setCurrentIndex(max(0, self.mirror_fps_combo.findData(s.mirror_framerate)))
             self.encoder_combo.setCurrentIndex(max(0, self.encoder_combo.findData(s.encoder)))
             self.monitor_combo.setEnabled(not s.window_title and not s.extend_screen)
             self.window_combo.setEnabled(bool(s.window_title) and not s.extend_screen)
