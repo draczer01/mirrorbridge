@@ -78,21 +78,41 @@ def test_the_chains_and_their_filters():
     cpu = capture.chain_for(capture.CPU, (2560, 1440), CANVAS)
     assert cpu.size_out is None and cpu.label == "CPU swscale" and capture.output_args(cpu) == []
     assert cpu.colour.label == "BT.709 limited range"
-    # gfxcapture: scaled by Windows into fit_even's size, RGB into NVENC as at the screen's own size.
-    gfx = capture.chain_for(capture.GFX, (2560, 1440), CANVAS)
-    assert gfx.size_out == (1920, 1080) and not gfx.native and gfx.label == "GPU gfxcapture"
+    # gfxcapture: scaled by Windows into fit_even's size, RGB into NVENC as at the screen's own size,
+    # repeating its last frame on a still screen (an FFmpeg that can) or giving frames only on changes.
+    gfx = capture.chain_for(capture.GFX, (2560, 1440), CANVAS, repeats=True)
+    assert gfx.size_out == (1920, 1080) and not gfx.native and gfx.label == "GPU gfxcapture with repeats"
+    assert gfx.repeats and not gfx.changes_only
     assert gfx.colour == capture.NATIVE_COLOUR and capture.output_args(gfx) == ["-enc_time_base", "1:1000",
                                                                                *capture.NATIVE_OUTPUT]
+    changes = capture.chain_for(capture.GFX, (2560, 1440), CANVAS)
+    assert changes.label == "GPU gfxcapture without repeats" and changes.changes_only
+    assert capture.output_args(changes) == capture.output_args(gfx) and changes.size_out == gfx.size_out
     assert capture.chain_for(capture.GFX, (682, 2560), CANVAS).size_out == (286, 1080)
+    # repeats is gfxcapture's alone
+    assert not capture.chain_for(capture.GPU, (2560, 1440), CANVAS, repeats=True).repeats
+    assert not capture.chain_for(capture.CPU, (2560, 1440), CANVAS, repeats=True).changes_only
     for kind in (capture.GPU, capture.GFX):
         with pytest.raises(ValueError):
             capture.chain_for(kind, None, CANVAS)
     assert [capture.chain_label(c, b) for c, b in ((native, "ddagrab"), (scaled, "ddagrab"), (gfx, "ddagrab"),
-                                                   (cpu, "ddagrab"), (None, "ddagrab"), (cpu, "gdigrab"),
-                                                   (None, "test"))] == [
-        "GPU native", "GPU scale_d3d11", "GPU gfxcapture", "CPU swscale", "CPU swscale", "gdigrab", "test"]
+                                                   (changes, "ddagrab"), (cpu, "ddagrab"), (None, "ddagrab"),
+                                                   (cpu, "gdigrab"), (None, "test"))] == [
+        "GPU native", "GPU scale_d3d11", "GPU gfxcapture with repeats", "GPU gfxcapture without repeats",
+        "CPU swscale", "CPU swscale", "gdigrab", "test"]
     assert [capture.capture_name("ddagrab", kind) for kind in (capture.GPU, capture.GFX, capture.CPU)] == [
         "ddagrab", "gfxcapture", "ddagrab"]
+    # What the tray says the encoder gets its frames through, as a session starts: the chain too
+    # where it can be the graphics card's (NVENC with ddagrab), gfxcapture's saying whether it repeats.
+    assert [capture.via(b, c, "h264_nvenc") for c, b in ((native, "ddagrab"), (gfx, "ddagrab"), (changes, "ddagrab"),
+                                                         (cpu, "ddagrab"), (cpu, "gdigrab"), (None, "ddagrab"))] == [
+        "ddagrab on the graphics card", "gfxcapture on the graphics card, repeating frames",
+        "gfxcapture on the graphics card, frames only on changes", "ddagrab and the processor", "gdigrab", "ddagrab"]
+    assert [capture.via("ddagrab", c, "h264_nvenc").key for c in (native, gfx, changes, cpu)] == [
+        "via_gpu", "via_gfx_repeats", "via_gfx_changes", "via_cpu"]
+    assert [capture.via("ddagrab", cpu, encoder) for encoder in ("libx264", "h264_qsv")] == ["ddagrab"] * 2
+    # The VBV: one frame, but four for gfxcapture without repeats (a still screen's last frame is all it gets)
+    assert [capture.vbv_frames(c) for c in (native, gfx, changes, cpu, None)] == [1, 1, 4, 1, 1]
 
 
 def test_the_cpu_chain_writes_and_tags_bt709_limited_range():
@@ -110,10 +130,14 @@ def test_the_cpu_chain_writes_and_tags_bt709_limited_range():
 @pytest.fixture()
 def windows(monkeypatch):
     """Windows, with an FFmpeg that has the filters in `filters` (8.1 has gfxcapture and scale_d3d11,
-    7.1 neither), and Humberto's displays as EnumDisplayMonitors lists them."""
-    filters = {"ddagrab", "scale_d3d11", "gfxcapture"}
+    7.1 neither) and the filters' options named "filter:option" there (gfxcapture:dup_frames: an
+    FFmpeg after 9.1, whose gfxcapture repeats frames), and Humberto's displays as
+    EnumDisplayMonitors lists them."""
+    filters = {"ddagrab", "scale_d3d11", "gfxcapture", "gfxcapture:dup_frames"}
     monkeypatch.setattr(capture.sys, "platform", "win32")
     monkeypatch.setattr(ffmpeg, "has_filter", lambda ff, name: name in filters)
+    monkeypatch.setattr(ffmpeg, "filter_options", lambda ff, name: frozenset(
+        found.split(":")[1] for found in filters if found.startswith(name + ":")))
     monkeypatch.setattr(capture, "BROKEN", set())
     monkeypatch.setattr(winmonitors, "monitor_handles", lambda: list(HANDLES))
     return filters
@@ -126,13 +150,17 @@ def _choose(**kw):
 
 
 SCALES = "from 2560x1440 to 1920x1080"
+REPEATS = "repeating the last frame while the screen is still"
+NO_REPEATS = ("this FFmpeg's gfxcapture has no dup_frames (FFmpeg after 9.1 has it), so a still screen would get "
+              "no frames to sharpen the one that changed it")
 
 
 def test_which_chain_is_tried_first(windows, monkeypatch):
-    """The graphics card's at the screen's own size, gfxcapture when it must be scaled, else the
-    processor's; scale_d3d11 (which fails on Humberto's graphics card) only when turned on."""
+    """The graphics card's at the screen's own size, gfxcapture when it must be scaled (and repeats
+    frames), else the processor's; scale_d3d11 (which fails on Humberto's graphics card) only when
+    turned on."""
     assert not capture.GPU_SCALED_ENABLED and capture.GFX_ENABLED
-    assert _choose() == (capture.GFX, f"gfxcapture scales {SCALES}")
+    assert _choose() == (capture.GFX, f"gfxcapture scales {SCALES}, {REPEATS}")
     assert _choose(monitor=CASE) == (capture.GPU, "1024x600 needs no scaling")
     assert _choose(region=ffmpeg.Region(0, 0, 1280, 720)) == (capture.GPU, "1280x720 needs no scaling")
     # A window bigger than the TV's screen: gfxcapture takes whole displays here, so the processor.
@@ -158,6 +186,9 @@ def test_which_chain_is_tried_first(windows, monkeypatch):
                                       "have it))")
     windows.add("gfxcapture")
     assert _choose()[0] == capture.GFX
+    windows.discard("gfxcapture:dup_frames")  # FFmpeg 8.1.1: no repeats
+    assert _choose() == (capture.GPU, f"scale_d3d11 {SCALES} ({NO_REPEATS})")
+    windows.add("gfxcapture:dup_frames")
     monkeypatch.setattr(capture, "GPU_SCALED_ENABLED", False)
     monkeypatch.setattr(capture, "GFX_ENABLED", False)
     assert _choose() == (capture.CPU, f"scaling {SCALES}: gfxcapture is turned off (capture.GFX_ENABLED); "
@@ -169,6 +200,38 @@ def test_which_chain_is_tried_first(windows, monkeypatch):
                                         "scale_d3d11 is turned off (capture.GPU_SCALED_ENABLED)")
     monkeypatch.setattr(capture.sys, "platform", "linux")
     assert _choose(monitor=CASE) == (capture.CPU, "the graphics card chain is for Windows only")
+
+
+@pytest.mark.parametrize("scaler", ["auto", "gfx", "cpu"])
+@pytest.mark.parametrize("fits", [True, False])
+@pytest.mark.parametrize("repeats", [True, False])
+@pytest.mark.parametrize("broken", [None, capture.GPU, capture.GFX])
+def test_the_debug_menus_scaling_and_gfxcaptures_repeats(windows, scaler, fits, repeats, broken):
+    """Scaling "auto": the graphics card at the screen's own size; to scale, gfxcapture only if it
+    repeats frames (else a still slide stays as blurred as its first frame), else the processor.
+    "gfx" (a test): gfxcapture to scale, repeats or not. "cpu": always the processor. A chain that
+    failed on the display earlier in the run is not tried there again, whatever Scaling says."""
+    if not repeats:
+        windows.discard("gfxcapture:dup_frames")
+    monitor = CASE if fits else MAIN
+    if broken:
+        capture.mark_broken("ffmpeg.exe", monitor, broken)
+    if scaler == "cpu":
+        expected = capture.CPU
+    elif fits:
+        expected = capture.CPU if broken == capture.GPU else capture.GPU
+    elif broken == capture.GFX or (scaler == "auto" and not repeats):
+        expected = capture.CPU
+    else:
+        expected = capture.GFX
+    kind, why = _choose(monitor=monitor, scaler=scaler)
+    assert kind == expected, why
+    if kind == capture.GFX:
+        assert why == (f"gfxcapture scales {SCALES}, {REPEATS}" if repeats else
+                       f"gfxcapture scales {SCALES}, as the Debug menu's Scaling says, without repeats (this "
+                       "FFmpeg's gfxcapture has no dup_frames): frames only as the screen changes")
+    elif kind == capture.CPU and scaler == "auto" and not fits and not broken:
+        assert why == f"scaling {SCALES}: {NO_REPEATS}; scale_d3d11 is turned off (capture.GPU_SCALED_ENABLED)"
 
 
 def test_a_chain_that_failed_on_a_display_is_not_tried_there_again(windows):
@@ -210,44 +273,116 @@ def test_gfxcapture_is_given_the_display_by_its_handle(windows, monkeypatch):
     assert capture.gfx_monitor(MAIN) == ""
 
 
+def _bufsize(args: list[str]) -> str:
+    return args[args.index("-bufsize") + 1]
+
+
 def test_gfxcapture_input_and_filters():
-    """Scaled by Windows into the size asked for, keeping its shape, at most 10 frames a second more
-    than are sent, which select keeps to the frame rate without holding any back."""
-    assert capture.gfx_rate(60) == 70 and capture.gfx_rate(30) == 40
-    assert capture.gfx_input("hmonitor=65537", (1920, 1080), 60, True) == [
+    """Scaled by Windows into the size asked for, keeping its shape. With repeats (an FFmpeg whose
+    gfxcapture has dup_frames), at most 10 frames a second more than are sent, which select keeps
+    to the frame rate without holding any back; without, at most 2 more, and no select."""
+    assert (capture.gfx_rate(60, True), capture.gfx_rate(30, True)) == (70, 40)
+    assert (capture.gfx_rate(60, False), capture.gfx_rate(30, False)) == (62, 32)
+    assert capture.gfx_input("hmonitor=65537", (1920, 1080), 60, True, True) == [
         "-f", "lavfi", "-i", "gfxcapture=hmonitor=65537:width=1920:height=1080:resize_mode=scale_aspect"
-        ":scale_mode=bilinear:max_framerate=70:capture_cursor=1"]
-    assert capture.gfx_input("monitor_idx=0", (286, 1080), 30, False)[-1] == (
+        ":scale_mode=bilinear:max_framerate=70:dup_frames=1:capture_cursor=1"]
+    assert capture.gfx_input("hmonitor=65537", (1920, 1080), 60, True, False) == [
+        "-f", "lavfi", "-i", "gfxcapture=hmonitor=65537:width=1920:height=1080:resize_mode=scale_aspect"
+        ":scale_mode=bilinear:max_framerate=62:capture_cursor=1"]
+    assert capture.gfx_input("monitor_idx=0", (286, 1080), 30, False, True)[-1] == (
         "gfxcapture=monitor_idx=0:width=286:height=1080:resize_mode=scale_aspect:scale_mode=bilinear"
-        ":max_framerate=40:capture_cursor=0")
+        ":max_framerate=40:dup_frames=1:capture_cursor=0")
     # No display: no option for it, and FFmpeg ends at once ("No capture source specified").
-    assert capture.gfx_input("", (1920, 1080), 60, True)[-1].startswith("gfxcapture=width=1920:")
-    assert capture.gfx_filters(60) == [
+    assert capture.gfx_input("", (1920, 1080), 60, True, True)[-1].startswith("gfxcapture=width=1920:")
+    assert capture.gfx_filters(60, True) == [
         "select='isnan(prev_selected_t)+gt(floor(t*60+0.5),floor(prev_selected_t*60+0.5))'"]
-    # NVENC is told 70 fps: as much more bitrate gives each frame its share at 60, and the same VBV.
-    assert capture.gfx_kbps(8000, 60) == 9333 and capture.gfx_kbps(8000, 30) == 10667
-    assert "-bufsize" in (args := ffmpeg.mirror_encoder_args("h264_nvenc", 9333, 70))
-    assert args[args.index("-bufsize") + 1] == "133k" == ffmpeg.mirror_encoder_args("h264_nvenc", 8000, 60)[
-        ffmpeg.mirror_encoder_args("h264_nvenc", 8000, 60).index("-bufsize") + 1]
+    assert capture.gfx_filters(60, False) == []
+    # gfxcapture's first repeat comes 1.5 of its intervals after the last frame, so in a later slot
+    # of select's than the frame before that one: the last frame of a burst that select left out
+    # still reaches the TV, in its first repeat.
+    for fps in (30, 60):
+        assert 1.5 / capture.gfx_rate(fps, True) > 1 / fps
+    # NVENC is told 70 (or 62) fps: as much more bitrate gives each frame its share at 60, and the
+    # same VBV: one frame with repeats, GFX_STILL_VBV_FRAMES without.
+    assert capture.gfx_kbps(8000, 60, True) == 9333 and capture.gfx_kbps(8000, 30, True) == 10667
+    assert capture.gfx_kbps(8000, 60, False) == 8267 and capture.gfx_kbps(8000, 30, False) == 8533
+    one_frame = _bufsize(ffmpeg.mirror_encoder_args("h264_nvenc", 8000, 60))
+    assert _bufsize(ffmpeg.mirror_encoder_args("h264_nvenc", 9333, 70)) == "133k" == one_frame
+    assert capture.GFX_STILL_VBV_FRAMES == 4
+    assert _bufsize(ffmpeg.mirror_encoder_args("h264_nvenc", 8267, 62, vbv_frames=4)) == "533k" == _bufsize(
+        ffmpeg.mirror_encoder_args("h264_nvenc", 8000, 60, vbv_frames=4))
 
 
-def _gfx_pts(ff: str, source: str, tmp_path) -> list[int]:
+GFX_OPTIONS = """Filter gfxcapture
+  Capture graphics/screen content as a video source
+    Inputs:
+        none (source filter)
+    Outputs:
+       #0: default (video)
+gfxcapture AVOptions:
+   window_title      <string>     ..FV....... ECMAScript regular expression to match against the window title.
+   monitor_idx       <int>        ..FV....... index of the monitor to capture (from -1 to INT_MAX) (default -1)
+     window          -1           ..FV....... derive from selected window
+   capture_cursor    <boolean>    ..FV....... capture mouse cursor (default true)
+   max_framerate     <video_rate> ..FV....... set maximum capture frame rate (default "60")
+   hmonitor          <uint64>     ..FV....... pre-existing HMONITOR handle (from 0 to UINT64_MAX) (default 0)
+{dup}   resize_mode       <int>        ..FV....... capture source resize behavior (from 0 to 2) (default crop)
+     crop            0            ..FV....... crop or add black bars into frame
+     scale_aspect    2            ..FV....... scale source to fit initial size while preserving aspect ratio
+   scale_mode        <int>        ..FV....... scaling algorithm (from 0 to 2) (default bilinear)
+     bilinear        1            ..FV....... use bilinear scaling
+"""
+DUP_FRAMES = ("   dup_frames        <boolean>    ..FV....... repeat the last frame if the source delivers none in "
+              "time (default true)\n")
+
+
+def test_whether_gfxcapture_repeats_frames_is_asked_of_each_ffmpeg_once(monkeypatch):
+    """`ffmpeg -h filter=gfxcapture` lists dup_frames after FFmpeg 9.1, not in 8.1.1, and 7.1 has no
+    gfxcapture at all; each FFmpeg is asked once, and one that cannot be asked counts as without."""
+    answers = {"ffmpeg-9.2.exe": GFX_OPTIONS.format(dup=DUP_FRAMES), "ffmpeg-8.1.1.exe": GFX_OPTIONS.format(dup=""),
+               "ffmpeg-7.1.exe": "Unknown filter 'gfxcapture'.\n"}
+    asked = []
+
+    def run(args, timeout=15):
+        asked.append(args[0])
+        if args[0] not in answers:
+            raise FileNotFoundError(args[0])
+        assert args[1:] == ["-hide_banner", "-h", "filter=gfxcapture"]
+        return subprocess.CompletedProcess(args, 0, answers[args[0]], "")
+
+    monkeypatch.setattr(ffmpeg, "_run", run)
+    ffmpeg.filter_options.cache_clear()
+    try:
+        assert ffmpeg.filter_options("ffmpeg-8.1.1.exe", "gfxcapture") == {
+            "window_title", "monitor_idx", "capture_cursor", "max_framerate", "hmonitor", "resize_mode", "scale_mode"}
+        assert [capture.gfx_repeats(ff) for ff in ("ffmpeg-9.2.exe", "ffmpeg-8.1.1.exe", "ffmpeg-7.1.exe",
+                                                   "gone.exe")] == [True, False, False, False]
+        assert [capture.gfx_repeats(ff) for ff in ("ffmpeg-9.2.exe", "ffmpeg-8.1.1.exe", "ffmpeg-7.1.exe",
+                                                   "gone.exe")] == [True, False, False, False]
+        assert sorted(asked) == ["ffmpeg-7.1.exe", "ffmpeg-8.1.1.exe", "ffmpeg-9.2.exe", "gone.exe"]
+    finally:
+        ffmpeg.filter_options.cache_clear()
+
+
+def _gfx_pts(ff: str, source: str, tmp_path, repeats: bool = True) -> list[int]:
     """The frame times (ms) FFmpeg writes for a source like gfxcapture's (`source`: its times,
     on a link that says 70 frames a second, as gfxcapture's does for 60) through the GFX chain's
-    filters and output options, into FLV."""
+    filters (with repeats, or without) and output options, into FLV."""
     made = tmp_path / "vfr.flv"
-    output = capture.output_args(capture.chain_for(capture.GFX, (1920, 1080), CANVAS))
+    output = capture.output_args(capture.chain_for(capture.GFX, (1920, 1080), CANVAS, repeats))
+    filters = capture.gfx_filters(60, repeats)
     subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", source, "-t", "2",
-                    "-vf", ",".join(capture.gfx_filters(60)), "-c:v", "libx264", "-preset", "ultrafast", *output,
-                    "-f", "flv", str(made)], check=True, capture_output=True, timeout=60)
+                    *(["-vf", ",".join(filters)] if filters else []), "-c:v", "libx264", "-preset", "ultrafast",
+                    *output, "-f", "flv", str(made)], check=True, capture_output=True, timeout=60)
     return [t.pts_ms for t in flv.FlvReader().feed(made.read_bytes()) if t.kind == flv.FRAME]
 
 
-def test_gfxcapture_is_kept_to_the_frame_rate_without_repeats(tmp_path):
-    """gfx_filters on a source like gfxcapture's on a 200 Hz screen (a frame every 15 ms while the
-    screen changes, none while it does not): 60 a second at most, each at its own time, and
-    nothing while the screen is still (the fps filter fills that time with repeats of the frame
-    before, all at once when the next frame comes, and holds each frame back until then)."""
+def test_gfxcapture_is_kept_to_the_frame_rate_without_the_fps_filters_repeats(tmp_path):
+    """gfx_filters (with repeats) on a source like gfxcapture's on a 200 Hz screen (a frame every
+    15 ms while the screen changes, none while it does not): 60 a second at most, each at its own
+    time, and nothing while the screen is still (the fps filter fills that time with repeats of
+    the frame before, all at once when the next frame comes, and holds each frame back until
+    then)."""
     ff = _ffmpeg()
     pts = _gfx_pts(ff, "testsrc=size=160x90:rate=70,settb=1/10000000,setpts=N*150000,"
                        "select='lt(mod(t\\,1)\\,0.5)'", tmp_path)  # 0.5 s changing, 0.5 s still
@@ -265,6 +400,25 @@ def test_gfxcapture_on_a_60_hz_screen_keeps_every_frame_at_its_time(tmp_path):
     pts = _gfx_pts(ff, "testsrc=size=160x90:rate=70,settb=1/10000000,"
                        "setpts=N*166667+if(mod(N\\,2)\\,-500\\,500)", tmp_path)
     assert len(pts) == 120 and {b - a for a, b in zip(pts, pts[1:])} == {16, 17}
+
+
+@pytest.mark.parametrize("repeats", [True, False])
+def test_the_last_change_of_a_burst_reaches_the_encoder(tmp_path, repeats):
+    """A burst of changes on a 200 Hz screen (a frame every 15 ms), whose last frame (at 90 ms)
+    comes in select's slot of the one before, then a still screen. With repeats, select leaves
+    that frame out, but not gfxcapture's first repeat of it, 1.5 of its intervals later (at 70 a
+    second, as FFmpeg's vsrc_gfxcapture_winrt.cpp stamps it), then one every 1/70 s: the screen as
+    it ended comes 21 ms late. Without repeats nothing comes after it, so nothing is left out."""
+    ff = _ffmpeg()
+    times = "if(lt(N\\,7)\\,N*150000\\,900000+214286+(N-7)*142857)"  # in 100 ns, as gfxcapture's
+    source = f"testsrc=size=160x90:rate=70:duration=1,settb=1/10000000,setpts={times}"
+    if not repeats:
+        source += ",select='lt(n\\,7)'"
+    pts = _gfx_pts(ff, source, tmp_path, repeats)
+    if repeats:
+        assert pts[:8] == [0, 15, 30, 45, 60, 75, 111, 126] and 90 not in pts
+    else:
+        assert pts == [0, 15, 30, 45, 60, 75, 90]
 
 
 def test_the_size_of_what_a_gpu_chain_made_is_checked():

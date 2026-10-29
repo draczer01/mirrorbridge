@@ -21,16 +21,17 @@ past that, when the TV (or the network) takes the video slower than it comes, ar
 dropped up to the next keyframe, and the drop ends on a keyframe that is on time, so that the
 TV is back to real time. A TV that takes nothing for VIDEO_STALL_SECONDS ends the session. So
 does FFmpeg giving no picture (FIRST_FRAME_SECONDS, FRAME_GAP_SECONDS), but not gfxcapture's
-once it gave a frame: it gives one only when the screen changes, so a screen that stays as it
-is is no fault (FFmpeg ending is still seen to); setting up has START_SECONDS in all.
+without repeats once it gave a frame: it gives one only when the screen changes, so a screen
+that stays as it is is no fault (FFmpeg ending is still seen to); setting up has START_SECONDS
+in all.
 
 Keyframes come only when needed (ffmpeg.mirror_encoder_args): a keyframe made through the
 small buffer that keeps the delay down is a blur on text, so FFmpeg makes one when it starts
 and none after. When frames were dropped (or the TV took none for a while, FrameQueue), FFmpeg
 is started again (_restart): its first frame is a keyframe. That is at most once every
-KEYFRAME_RESTART_SECONDS, without waiting for another frame (gfxcapture gives none while the
-screen stays as it is), and the TV is told nothing: the frames' times go on from where they
-were (PtsMapper.restart) and the same picture settings need no new codec packet.
+KEYFRAME_RESTART_SECONDS, without waiting for another frame (gfxcapture without repeats gives
+none while the screen stays as it is), and the TV is told nothing: the frames' times go on from
+where they were (PtsMapper.restart) and the same picture settings need no new codec packet.
 
 FFmpeg is also started again when Windows took the screen capture away (a display or its driver
 changing, a UAC prompt, the lock screen: capture.capture_lost), after CAPTURE_RETRY_DELAYS,
@@ -38,11 +39,12 @@ with the display looked up again; a capture that does not come back within
 CAPTURE_LOST_SECONDS ends the session with its own error. FFmpeg ending before its first frame
 for another reason (the driver refuses ddagrab, the GPU encoder is out of sessions) goes on
 the next way, as a cast does: the graphics card's chain (capture.py: NVENC with ddagrab, or with
-gfxcapture when the screen must be scaled), then the processor's, then GDI capture, then the CPU
-encoder. A graphics card chain that ends so (but for Windows keeping the screen from it, which
-is no fault of the chain), or makes a picture of the wrong size (its first SPS), gives way to
-the processor's on that display for the rest of the run; one at the display's own size whose
-display comes back at a size to be scaled is chosen again (_rechoose_chain).
+gfxcapture when the screen must be scaled and it repeats frames, or Scaling says so), then the
+processor's, then GDI capture, then the CPU encoder. A graphics card chain that ends so (but
+for Windows keeping the screen from it, which is no fault of the chain), or makes a picture of
+the wrong size (its first SPS), gives way to the processor's on that display for the rest of
+the run; one at the display's own size whose display comes back at a size to be scaled is
+chosen again (_rechoose_chain).
 
 Mirror screen settings: Latency (MIRROR_LATENCIES, the TV's wait for each frame, the lead:
 Normal is the one saved for the TV) and Frame rate (choose_mirror_fps: Automatic is 60 with a
@@ -50,8 +52,9 @@ hardware encoder and a capture that keeps up, else 30, and 30 once the session f
 x264). More options > Debug has test switches for the sessions after they are set (lead_override,
 keyframes_on_demand, on_arrival, Settings.mirror_scaler): the TV's wait in place of the
 Latency's, which is never saved; a keyframe every 10 or 2 seconds (every 2 s, FFmpeg is not
-started again for one); the processor's chain in place of the graphics card's; and codec
-packets that ask the TV to show each frame as it comes, not at its time
+started again for one); the processor's chain in place of the graphics card's, or gfxcapture
+to scale even without repeats; and codec packets that ask the TV to show each frame as it
+comes, not at its time
 (packets.codec_packet). Test this TV and `mirror --probe` leave them out.
 
 A TV that drops the video connection within AT_ONCE_SECONDS of the first frame of a first
@@ -581,9 +584,23 @@ class MirrorSession:
                 self._use_fps(fps, fps_why)
         self.report.encoder = encoder
         if self._first_sent_ns is None:  # the TV is still waiting for its first frame
-            self._set(State.STARTING, Text("encoder_via", "{encoder} via {backend}", encoder=label, backend="testsrc"
-                                           if self.source == TEST_PATTERN else capture.capture_name(backend, kind)))
+            way = "testsrc" if self.source == TEST_PATTERN else capture.via(backend, self._chain_for(backend, kind),
+                                                                            encoder)
+            self._set(State.STARTING, Text("encoder_via", "{encoder} via {backend}", encoder=label, backend=way))
         self._launch(why)
+
+    def _chain_for(self, backend: str, kind: str) -> Optional[capture.Chain]:
+        """The desktop's chain of that kind for the display as it is now (the processor's when its
+        size is not known; gfxcapture repeating frames if this FFmpeg can); None for the test
+        pattern."""
+        if self.source != DESKTOP:
+            return None
+        ff, monitor, region = self._capture
+        size_in = capture.capture_size(backend, monitor, region)
+        if size_in is None:
+            kind = capture.CPU
+        return capture.chain_for(kind, size_in, self.report.canvas or FALLBACK_CANVAS,
+                                 repeats=kind == capture.GFX and capture.gfx_repeats(ff))
 
     def _use_fps(self, fps: int, why: str) -> None:
         """Another frame rate for the FFmpegs from now on, and what depends on it."""
@@ -607,12 +624,9 @@ class MirrorSession:
         backend, encoder, kind = self._using
         canvas = self.report.canvas or FALLBACK_CANVAS
         size_in = capture.capture_size(backend, monitor, region) if self.source == DESKTOP else None
-        chain = None
-        if self.source == DESKTOP:
-            chain = capture.chain_for(kind if size_in is not None else capture.CPU, size_in, canvas)
-        self._chain = chain
-        changes_only = chain is not None and chain.kind == capture.GFX and backend == "ddagrab"
-        self._stats.variable_rate = changes_only  # gfxcapture: frames only as the screen changes
+        chain = self._chain = self._chain_for(backend, kind)
+        changes_only = chain is not None and chain.changes_only and backend == "ddagrab"
+        self._stats.variable_rate = changes_only  # gfxcapture without repeats: frames only as the screen changes
         self.report.keyframes = keyframes_text(encoder, s)
         fps = self.report.fps
         cmd = build_command(ff, s, source=self.source, encoder=encoder, width=canvas[0], height=canvas[1], fps=fps,
@@ -645,17 +659,26 @@ class MirrorSession:
         est = self.report.established
         size = f"{size_in[0]}x{size_in[1]}" if size_in else "testsrc" if self.source == TEST_PATTERN else "?"
         made = chain.size_out if chain is not None and chain.size_out else canvas
-        vbv = round(s.video_bitrate_kbps * ffmpeg.MIRROR_VBV_FRAMES / max(1, fps)) * 1000 // 8
-        rate = f"VBV {vbv} bytes"
-        if changes_only:  # what NVENC is told (source.build_command), and the frames it gets
-            rate += (f"; NVENC told {capture.gfx_kbps(s.video_bitrate_kbps, fps)} kbit/s at {capture.gfx_rate(fps)} "
-                     f"fps, the same share a frame), frames only as the screen changes (gfxcapture up to "
-                     f"{capture.gfx_rate(fps)} a second, kept to {fps}")
-        _LOGGER.info("FFmpeg %d (%s): %s, %s -> %s%dx%d, %s at %s%d fps, %d kbit/s (%s), keyframes %s; lead %d ms (%s)",
+        vbv_frames = capture.vbv_frames(chain)
+        vbv = round(s.video_bitrate_kbps * vbv_frames / max(1, fps)) * 1000 // 8
+        rate, gfx_said = f"VBV {vbv} bytes", ""
+        if vbv_frames != ffmpeg.MIRROR_VBV_FRAMES:
+            rate += f", {vbv_frames:g} frames"
+        if chain is not None and chain.kind == capture.GFX and backend == "ddagrab":
+            # what NVENC is told (source.build_command), and the frames it gets
+            top = capture.gfx_rate(fps, chain.repeats)
+            rate += (f"; NVENC told {capture.gfx_kbps(s.video_bitrate_kbps, fps, chain.repeats)} kbit/s at {top} "
+                     "fps, the same share a frame")
+            gfx_said = (f", gfxcapture's frames as the screen changes and repeats of the last while it does not, up "
+                        f"to {top} a second (kept to {fps})" if chain.repeats else
+                        f", frames only as the screen changes, without repeats (gfxcapture up to {top} a second)")
+        _LOGGER.info("FFmpeg %d (%s): %s, %s -> %s%dx%d, %s at %s%d fps, %d kbit/s (%s)%s, keyframes %s; "
+                     "lead %d ms (%s)",
                      gen, why, capture.chain_label(chain, backend), size,
                      "" if chain is not None and chain.size_out else "within ", *made,
                      ffmpeg.ENCODER_LABELS.get(encoder, encoder), "up to " if changes_only else "", fps,
-                     s.video_bitrate_kbps, rate, self.report.keyframes, est.plan.lead_ms if est else 0, self._lead_why)
+                     s.video_bitrate_kbps, rate, gfx_said, self.report.keyframes, est.plan.lead_ms if est else 0,
+                     self._lead_why)
         _LOGGER.info("FFmpeg %d: %s", gen, subprocess.list2cmdline(cmd))
         self._ffmpeg = FFmpegSource(cmd, hand_over)
         self._gen_started_ns = now_ns()
@@ -745,8 +768,9 @@ class MirrorSession:
     async def _rechoose_chain(self) -> None:
         """The graphics card chain at the display's own size (GPU) for a display that came back
         at a size that has to be scaled now: the chain is chosen again as at the start
-        (capture.choose_chain: gfxcapture, else the processor's, never scale_d3d11 while it is
-        off), the ways after it staying as they were."""
+        (capture.choose_chain: gfxcapture where Scaling and this FFmpeg let it, else the
+        processor's, never scale_d3d11 while it is off), the ways after it staying as they
+        were."""
         backend, encoder, kind = self._using
         ff, monitor, region = self._capture
         canvas = self.report.canvas or FALLBACK_CANVAS
@@ -1054,10 +1078,10 @@ class MirrorSession:
         self._timing_quiet = quiet
 
     def _check_frames(self, now: int) -> None:
-        """FFmpeg must give a first frame, and then keep giving them; gfxcapture's gives them only
-        as the screen changes, so once it gave one, a gap is no fault (its end is _ended's). A
-        screen capture that was lost must come back within CAPTURE_LOST_SECONDS (the FFmpegs
-        started meanwhile give none)."""
+        """FFmpeg must give a first frame, and then keep giving them; gfxcapture's without repeats
+        gives them only as the screen changes, so once it gave one, a gap is no fault (its end is
+        _ended's). A screen capture that was lost must come back within CAPTURE_LOST_SECONDS (the
+        FFmpegs started meanwhile give none)."""
         assert self._frames is not None and self._ffmpeg is not None
         if self._recovering_since:
             if now - self._recovering_since > CAPTURE_LOST_SECONDS * NS:
@@ -1226,9 +1250,10 @@ class MirrorSession:
             dropped_at = now_ns()
 
         while True:
-            # A keyframe asked for is not left waiting for a frame: gfxcapture gives none while
-            # the screen stays as it is. Nor is it got for an FFmpeg that has ended: that end
-            # goes to _ended first (a lost capture, the next way), with the frames before it.
+            # A keyframe asked for is not left waiting for a frame: gfxcapture without repeats
+            # gives none while the screen stays as it is. Nor is it got for an FFmpeg that has
+            # ended: that end goes to _ended first (a lost capture, the next way), with the frames
+            # before it.
             due_in = self._keyframe_due_in()
             if due_in == 0 and not frames.ended() and self._ffmpeg.running():
                 _LOGGER.info("Starting FFmpeg again for a keyframe: %s", self._keyframe_wanted)

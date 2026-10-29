@@ -72,27 +72,32 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   never falls back to GDI capture for that. The log has FFmpeg's last 30 lines whenever it
   stops.
 - With NVENC and Desktop Duplication, the picture stays on the graphics card: at the size the TV
-  gets it goes from the capture to the encoder untouched, and otherwise Windows Graphics
-  Capture (FFmpeg's `gfxcapture`, which the FFmpeg 8.1.1 inside `MirrorBridge.exe` has) takes
-  the screen at that size, scaled on the graphics card (an FFmpeg without it scales on the
-  processor). In a test of FFmpeg's `gfxcapture` alone on an RTX 4080 SUPER (driver 621.01), it
-  made a 1440p screen into 1080p at 60 fps for 0.05 of a processor core, where the processor's
-  chain takes 1.3 cores; MirrorBridge's own command for it has not yet been tried on hardware.
-  FFmpeg's `scale_d3d11` is not used, because there it could not make its picture ("Could not
-  create the texture (80070057)"). The display is given to `gfxcapture` by its handle, since its
-  numbering is not Desktop Duplication's, and the capture is asked for 10 frames a second more
-  than the frame rate (in that test a 200 Hz monitor gave 51 fps for 60), then kept to the frame
-  rate without repeating any, each frame at the time it was captured (to the millisecond). It
-  gives a frame only when the screen changes: a screen that stays as it is sends no new frames,
-  which does not end the session, nor warns of a slow frame rate (how long the TV keeps a still
-  picture is still to be tried). NVENC is told the capture's top rate, with the bitrate raised to
-  match, so that a frame gets the share of bits it gets at the frame rate. A capture that ends
-  before its first picture (but for Windows keeping the screen from it), or a picture of another
-  size than asked for, sends that display back to the processor, at once and until MirrorBridge
-  quits; a capture that Windows closes (the display gone) is started again, as Desktop
-  Duplication's is, and a display that comes back at a size to be scaled gets its chain chosen
-  again. The log's line for each FFmpeg says that the frames come only as the screen changes
-  and what NVENC is told. Quick Sync, AMF and Media Foundation scale on the processor, as before.
+  gets it goes from the capture to the encoder untouched. A screen that has to be scaled is
+  scaled on the processor, unless the FFmpeg's Windows Graphics Capture (`gfxcapture`) can
+  repeat its last frame while the screen stays as it is (`dup_frames`, in FFmpeg after 9.1, not
+  in the FFmpeg 8.1.1 inside `MirrorBridge.exe`): then it takes the screen at the TV's size,
+  scaled on the graphics card. Without repeats it gives a frame only when the screen changes,
+  and a frame that changes all of it, such as a new slide, comes out blurred through
+  mirroring's small buffer and stays so until something on the screen moves; Desktop
+  Duplication repeats frames, so a still slide is sharp a few frames later. In a test of
+  FFmpeg's `gfxcapture` alone on an RTX 4080 SUPER (driver 621.01), it made a 1440p screen into
+  1080p at 60 fps for 0.05 of a processor core, where the processor's chain takes 1.3 cores;
+  MirrorBridge's own command for it has not yet been tried on hardware. FFmpeg's `scale_d3d11`
+  is not used, because there it could not make its picture ("Could not create the texture
+  (80070057)"). The display is given to `gfxcapture` by its handle, since its numbering is not
+  Desktop Duplication's, and the capture is asked for 10 frames a second more than the frame
+  rate (in that test a 200 Hz monitor gave 51 fps for 60), then kept to the frame rate without
+  the `fps` filter's repeats, each frame at the time it was captured (to the millisecond); a
+  frame left out so is still sent in `gfxcapture`'s first repeat of it, about 21 ms later.
+  NVENC is told the capture's top rate, with the bitrate raised to match, so that a frame gets
+  the share of bits it gets at the frame rate. A capture that ends before its first picture
+  (but for Windows keeping the screen from it), or a picture of another size than asked for,
+  sends that display back to the processor, at once and until MirrorBridge quits; a capture
+  that Windows closes (the display gone) is started again, as Desktop Duplication's is, and a
+  display that comes back at a size to be scaled gets its chain chosen again. The log's line
+  for each FFmpeg, and the tray as the session starts, say which chain runs and whether
+  `gfxcapture` repeats frames; the log also says what NVENC is told. Quick Sync, AMF and Media
+  Foundation scale on the processor, as before.
 - With *Extend screen* on, *Mirror screen* (and `mirror --extend`, with `--extend-mode`) sends
   the virtual screen, as a cast does, instead of the PC's main display: the TV works as a second
   screen a fraction of a second behind, for PowerPoint's Presenter View with the notes on the
@@ -124,10 +129,17 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   *Mirror screen* and `mirror`, which start from the defaults. *TV wait (test)*: 60, 100, 150,
   200 or 300 ms in place of the Latency's (*Automatic*, where choosing a Latency puts it back),
   and never saved for the TV; *Keyframes*: only when needed (the default), every 10 seconds or
-  every 2 seconds; *Scaling*: *Automatic (graphics card)* (the default) or *Processor (as
-  before)*; *Show frames on arrival (test)*: codec packets without RespectTimestamps, so that a
-  TV shows each frame as it comes. The log says, as each session starts, what it used, and
-  each time FFmpeg starts again, why. *Test this TV* and `mirror --probe` leave them out.
+  every 2 seconds; *Scaling*: *Automatic* (the default, as above), *Processor (as before)* or
+  *Windows capture on the graphics card (test)*, which scales with `gfxcapture` even without
+  repeats: then at most 2 frames a second over the frame rate, none left out (50 fps on a
+  200 Hz monitor, 48 on a 144 Hz one), and a buffer of 4 frames instead of 1 for a new
+  slide's frame (sharper after the mouse moved, not for slides changed one after the other; a
+  frame can reach the TV up to 50 ms later on a network no faster than the bitrate), and a
+  still screen, which then sends no frames, does not end the session nor warn of a slow frame
+  rate (how long a TV keeps a still picture is still to be tried); *Show frames on arrival
+  (test)*: codec packets without RespectTimestamps, so that a TV shows each frame as it comes.
+  The log says, as each session starts, what it used, and each time FFmpeg starts again, why.
+  *Test this TV* and `mirror --probe` leave them out.
 - Experimental, for testing: `mirror --timing ptp` (or `MIRRORBRIDGE_TIMING=ptp`) makes
   MirrorBridge the TV's PTP clock (IEEE 1588, UDP 319 and 320) instead of answering its NTP
   requests. The session waits for the TV to follow that clock and goes on with NTP, on a fresh

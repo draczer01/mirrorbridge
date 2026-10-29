@@ -161,8 +161,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     "debug_kf_needed": {"en": "Only when needed", "es": "Solo cuando hace falta"},
     "debug_kf_every": {"en": "Every {n} s", "es": "Cada {n} s"},
     "debug_scaler": {"en": "Scaling", "es": "Escalado"},
-    "debug_scaler_auto": {"en": "Automatic (graphics card)", "es": "Automático (tarjeta de video)"},
+    "debug_scaler_auto": {"en": "Automatic", "es": "Automático"},
     "debug_scaler_cpu": {"en": "Processor (as before)", "es": "Procesador (como antes)"},
+    "debug_scaler_gfx": {"en": "Windows capture on the graphics card (test)",
+                         "es": "Captura de Windows en la tarjeta de video (prueba)"},
     "debug_on_arrival": {"en": "Show frames on arrival (test)", "es": "Mostrar cuadros al llegar (prueba)"},
     "language_menu": {"en": "Language", "es": "Idioma"},
     "quit": {"en": "Quit", "es": "Salir"},
@@ -414,6 +416,13 @@ _STRINGS: dict[str, dict[str, str]] = {
     # the core module's own; {menu_...} is a menu path, as the menu names it (_menu_paths).
     "checking_ffmpeg": {"en": "Checking FFmpeg and encoders", "es": "Comprobando FFmpeg y los codificadores"},
     "encoder_via": {"en": "{encoder} via {backend}", "es": "{encoder} con {backend}"},
+    # Mirror screen's {backend} in encoder_via: the capture and its chain (mirror.capture.via)
+    "via_gpu": {"en": "{capture} on the graphics card", "es": "{capture} en la tarjeta de video"},
+    "via_cpu": {"en": "{capture} and the processor", "es": "{capture} y el procesador"},
+    "via_gfx_repeats": {"en": "gfxcapture on the graphics card, repeating frames",
+                        "es": "gfxcapture en la tarjeta de video, repitiendo cuadros"},
+    "via_gfx_changes": {"en": "gfxcapture on the graphics card, frames only on changes",
+                        "es": "gfxcapture en la tarjeta de video, cuadros solo con cambios"},
     "ffmpeg_not_found": {
         "en": "FFmpeg was not found. Use the MirrorBridge.exe build (FFmpeg included), run "
               "'pip install imageio-ffmpeg', or put ffmpeg.exe next to MirrorBridge.",

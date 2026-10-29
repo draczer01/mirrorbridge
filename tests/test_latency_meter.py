@@ -172,8 +172,9 @@ def test_the_menu_is_in_spanish_too(controller):
         "Automática (según la Latencia)", "60 ms", "100 ms", "150 ms", "200 ms", "300 ms"]
     assert list(_choices(items["Cuadros clave"])) == ["Solo cuando hace falta", "Cada 10 s", "Cada 2 s"]
     assert _checked(items["Cuadros clave"]) == ["Solo cuando hace falta"]
-    assert list(_choices(items["Escalado"])) == ["Automático (tarjeta de video)", "Procesador (como antes)"]
-    assert _checked(items["Escalado"]) == ["Automático (tarjeta de video)"]
+    assert list(_choices(items["Escalado"])) == ["Automático", "Procesador (como antes)",
+                                                 "Captura de Windows en la tarjeta de video (prueba)"]
+    assert _checked(items["Escalado"]) == ["Automático"]
 
 
 def test_mirror_screens_test_switches_are_next_to_the_latency_meter(controller):
@@ -192,8 +193,9 @@ def test_mirror_screens_test_switches_are_next_to_the_latency_meter(controller):
     assert _checked(waits) == ["Automatic (from Latency)"]
     assert list(_choices(keyframes)) == ["Only when needed", "Every 10 s", "Every 2 s"]
     assert _checked(keyframes) == ["Only when needed"]
-    assert list(_choices(scaling)) == ["Automatic (graphics card)", "Processor (as before)"]
-    assert _checked(scaling) == ["Automatic (graphics card)"]
+    assert list(_choices(scaling)) == ["Automatic", "Processor (as before)",
+                                       "Windows capture on the graphics card (test)"]
+    assert _checked(scaling) == ["Automatic"]
     assert arrival.isCheckable() and not arrival.isChecked()
 
     _choices(waits)["200 ms"].trigger()
@@ -210,7 +212,13 @@ def test_mirror_screens_test_switches_are_next_to_the_latency_meter(controller):
     items = _debug(tray)
     assert _checked(items["TV wait (test)"]) == ["200 ms"] and _checked(items["Keyframes"]) == ["Every 10 s"]
     assert _checked(items["Scaling"]) == ["Processor (as before)"]
-    _choices(items["Scaling"])["Automatic (graphics card)"].trigger()
+    # gfxcapture to scale even when it cannot repeat frames (FFmpeg 8.1.1): a test
+    _choices(items["Scaling"])["Windows capture on the graphics card (test)"].trigger()
+    assert s.mirror_scaler == "gfx" and Settings.load().mirror_scaler == "gfx"
+    tray._rebuild()  # pylint: disable=protected-access
+    items = _debug(tray)
+    assert _checked(items["Scaling"]) == ["Windows capture on the graphics card (test)"]
+    _choices(items["Scaling"])["Automatic"].trigger()
     assert s.mirror_scaler == "auto"
     assert items["Show frames on arrival (test)"].isChecked()
     _choices(items["TV wait (test)"])["Automatic (from Latency)"].trigger()
@@ -223,6 +231,6 @@ def test_mirror_screens_test_switches_are_next_to_the_latency_meter(controller):
     tray._rebuild()  # pylint: disable=protected-access
     items = _debug(tray)
     assert _checked(items["Keyframes"]) == ["Only when needed"]
-    assert _checked(items["Scaling"]) == ["Automatic (graphics card)"]
+    assert _checked(items["Scaling"]) == ["Automatic"]
     assert _checked(items["TV wait (test)"]) == ["Automatic (from Latency)"]
     assert not items["Show frames on arrival (test)"].isChecked()

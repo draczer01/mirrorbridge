@@ -188,8 +188,10 @@ le pide a la TV que espere de 60 a 300 ms después de capturar cada cuadro antes
 en lugar de lo que diga *Latencia* (*Automática*; elegir una Latencia la deja ahí, y un valor
 de prueba nunca se guarda); *Cuadros clave* manda un cuadro clave (una imagen completa) solo
 cuando hace falta (lo normal), cada 10 segundos o cada 2 segundos, como antes; *Escalado*
-cambia el tamaño de la imagen en la tarjeta de video cuando se puede (*Automático*, lo normal)
-o en el procesador (*Procesador (como antes)*); *Mostrar cuadros al llegar (prueba)* le pide a
+cambia el tamaño de la imagen como se explica abajo (*Automático*, lo normal), en el
+procesador (*Procesador (como antes)*) o con Windows Graphics Capture aunque no pueda repetir
+cuadros (*Captura de Windows en la tarjeta de video (prueba)*: una diapositiva quieta puede
+quedar borrosa hasta que algo se mueva); *Mostrar cuadros al llegar (prueba)* le pide a
 la TV que muestre cada cuadro en cuanto llega, en lugar de a su hora. Al empezar cada sesión,
 el registro dice cuáles usó, y cada vez que FFmpeg vuelve a arrancar, por qué.
 
@@ -223,19 +225,22 @@ Igual que `cast`, `mirror` parte de los ajustes de la app: sin `--monitor`, `--w
   Duplicar pantalla**. Todavía no hay sonido. Si FFmpeg no puede capturar o codificar al
   empezar (el controlador de video rechaza ddagrab, el codificador de la GPU está ocupado),
   sigue con la captura GDI y luego con x264 (CPU), igual que al transmitir.
-* Con NVENC y Desktop Duplication la imagen no sale de la tarjeta de video: al tamaño de la TV
-  va directo de la captura al codificador, y si no, Windows Graphics Capture (el `gfxcapture`
-  de FFmpeg, que tiene el FFmpeg 8.1.1 que viene dentro de `MirrorBridge.exe`) toma la
-  pantalla ya al tamaño de la TV, escalada en la tarjeta de video; otro FFmpeg sin él la escala
-  en el procesador. Esa captura da un cuadro solo cuando la pantalla cambia, como mucho a los
-  cuadros por segundo elegidos, así que una pantalla que no cambia no manda cuadros nuevos;
-  MirrorBridge no termina la sesión por eso, pero falta probar cuánto tiempo aguanta una TV una
-  imagen quieta. El comando que arma MirrorBridge para esta captura todavía no se probó en un
-  equipo real. (El `scale_d3d11` de FFmpeg no se usa: en una RTX 4080 SUPER con el controlador
-  621.01 no pudo hacer su imagen.) Si la captura termina antes de su primera imagen, o la
-  imagen sale de otro tamaño que el pedido, esa pantalla vuelve al procesador hasta que se
-  cierra MirrorBridge; si es Windows quien corta la captura, vuelve a arrancar como se explica
-  abajo. Quick Sync, AMF y Media Foundation escalan en el procesador.
+* Con NVENC y Desktop Duplication, al tamaño de la TV la imagen no sale de la tarjeta de video:
+  va directo de la captura al codificador. Una pantalla más grande se escala en el procesador,
+  salvo que el Windows Graphics Capture de FFmpeg (`gfxcapture`) pueda repetir su último
+  cuadro mientras la pantalla no cambia (`dup_frames`, en FFmpeg después de 9.1, no en el
+  FFmpeg 8.1.1 que viene dentro de `MirrorBridge.exe`): entonces toma la pantalla ya al tamaño
+  de la TV, escalada en la tarjeta de video. Sin repetir, esa captura da un cuadro solo cuando
+  la pantalla cambia, así que una diapositiva nueva, borrosa al principio como todo cuadro que
+  cambia toda la pantalla, seguiría borrosa hasta que algo se mueva; Desktop Duplication repite
+  cuadros y la deja nítida en pocos cuadros. **Más opciones** > **Depuración** > **Escalado**
+  permite probarla igual (una pantalla quieta no manda entonces cuadros, y eso no termina la
+  sesión; falta probar cuánto tiempo aguanta una TV una imagen quieta). El comando que arma MirrorBridge para esta captura todavía no se probó
+  en un equipo real. (El `scale_d3d11` de FFmpeg no se usa: en una RTX 4080 SUPER con el
+  controlador 621.01 no pudo hacer su imagen.) Si la captura termina antes de su primera
+  imagen, o la imagen sale de otro tamaño que el pedido, esa pantalla vuelve al procesador
+  hasta que se cierra MirrorBridge; si es Windows quien corta la captura, vuelve a arrancar como
+  se explica abajo. Quick Sync, AMF y Media Foundation escalan en el procesador.
 * Un cuadro clave (una imagen completa) se manda solo cuando hace falta: al empezar, y después
   de descartar cuadros, cuando FFmpeg vuelve a arrancar para dar uno enseguida (como mucho cada
   2 segundos), cambie o no la pantalla mientras tanto. Un cuadro clave cada 2 segundos hacía que

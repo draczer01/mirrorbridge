@@ -617,7 +617,7 @@ def test_an_older_settings_json_loads_with_mirror_screens_new_settings(tmp_path,
         for junk in ({"mirror_keyframes": 5}, {"mirror_keyframes": "10"}, {"mirror_keyframes": True},
                      {"mirror_keyframes": 10.0}, {"mirror_latency": "fast"}, {"mirror_latency": None},
                      {"mirror_framerate": 24}, {"mirror_framerate": "60"}, {"mirror_scaler": "gpu"},
-                     {"mirror_encoder_extra": 8}, {"mirror_encoder_extra": ["-ldkfs", "8"]}):
+                     {"mirror_scaler": "GFX"}, {"mirror_encoder_extra": 8}, {"mirror_encoder_extra": ["-ldkfs", "8"]}):
             path.write_text(json.dumps(junk), encoding="utf-8")
             assert Settings.load(path) == Settings(), junk
     assert "Ignoring mirror_keyframes=5" in caplog.text
@@ -626,6 +626,9 @@ def test_an_older_settings_json_loads_with_mirror_screens_new_settings(tmp_path,
     path.write_text(json.dumps(chosen), encoding="utf-8")
     settings = Settings.load(path)
     assert {key: getattr(settings, key) for key in chosen} == chosen
+    for scaler in ("auto", "cpu", "gfx"):  # Scaling's three, gfxcapture even without repeats too
+        path.write_text(json.dumps({"mirror_scaler": scaler}), encoding="utf-8")
+        assert Settings.load(path).mirror_scaler == scaler
 
 
 def test_frames_are_shown_on_arrival_only_when_settings_json_says_true():
@@ -937,47 +940,69 @@ def test_mirror_command_on_the_graphics_card(monkeypatch):
 
 # Humberto's main monitor (ddagrab's output 0), at 60 fps on a 1080p TV, as the session asks for it
 GFX_MAIN = ffmpeg.Monitor(0, 0, 0, 2560, 1440, True, 0, device=r"\\.\DISPLAY1")
+# With an FFmpeg whose gfxcapture repeats frames (dup_frames, after FFmpeg 9.1)
 GFX_COMMAND = [
     "ffmpeg.exe", "-hide_banner", "-nostats", "-loglevel", "warning", "-thread_queue_size", "2",
     "-f", "lavfi", "-i", "gfxcapture=hmonitor=65537:width=1920:height=1080:resize_mode=scale_aspect:scale_mode=bilinear"
-    ":max_framerate=70:capture_cursor=1",
+    ":max_framerate=70:dup_frames=1:capture_cursor=1",
     "-vf", "select='isnan(prev_selected_t)+gt(floor(t*60+0.5),floor(prev_selected_t*60+0.5))'",
     "-an", "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ll", "-rc", "cbr", "-profile:v", "high",
     "-zerolatency", "1", "-delay", "0", "-forced-idr", "1", "-b:v", "9333k", "-maxrate", "9333k", "-bufsize", "133k",
     "-g", "2147483647", "-bf", "0", "-enc_time_base", "1:1000",
     "-bsf:v", "h264_metadata=colour_primaries=1:transfer_characteristics=1",
     "-flush_packets", "1", "-flvflags", "no_duration_filesize+no_metadata", "-f", "flv", "pipe:1"]
+# With FFmpeg 8.1.1, whose gfxcapture does not (Scaling "gfx" only): frames only as the screen changes
+GFX_CHANGES_COMMAND = [
+    "ffmpeg.exe", "-hide_banner", "-nostats", "-loglevel", "warning", "-thread_queue_size", "2",
+    "-f", "lavfi", "-i", "gfxcapture=hmonitor=65537:width=1920:height=1080:resize_mode=scale_aspect:scale_mode=bilinear"
+    ":max_framerate=62:capture_cursor=1",
+    "-an", "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ll", "-rc", "cbr", "-profile:v", "high",
+    "-zerolatency", "1", "-delay", "0", "-forced-idr", "1", "-b:v", "8267k", "-maxrate", "8267k", "-bufsize", "533k",
+    "-g", "2147483647", "-bf", "0", "-enc_time_base", "1:1000",
+    "-bsf:v", "h264_metadata=colour_primaries=1:transfer_characteristics=1",
+    "-flush_packets", "1", "-flvflags", "no_duration_filesize+no_metadata", "-f", "flv", "pipe:1"]
 
 
-def test_mirror_command_with_gfxcapture(monkeypatch):
+@pytest.mark.parametrize("repeats", [True, False])
+def test_mirror_command_with_gfxcapture(monkeypatch, repeats):
     """A screen bigger than the TV's, with NVENC: Windows Graphics Capture scales it on the graphics
-    card, for the display found by its handle (not ddagrab's output index), up to 10 frames a second
-    more than are sent, kept to the frame rate by select; NVENC converts the RGB itself, told the
-    capture's 70 fps and as much more bitrate (the same 133 kbit a frame), and the stream says BT.709
-    primaries and transfer as at the screen's own size."""
+    card, for the display found by its handle (not ddagrab's output index); NVENC converts the RGB
+    itself, and the stream says BT.709 primaries and transfer as at the screen's own size. With
+    repeats, up to 10 frames a second more than are sent, kept to the frame rate by select, and
+    NVENC told the capture's 70 fps and as much more bitrate (the same 133 kbit a frame); without,
+    up to 62 a second and no select (it could leave out the last change of a burst), NVENC told
+    62 fps, and a VBV of 4 frames (533 kbit) for a still screen's last frame."""
     monkeypatch.setattr(capture, "gfx_monitor", lambda monitor: "hmonitor=65537" if monitor is GFX_MAIN else "")
     monkeypatch.setattr(source, "_version", lambda ff: (8, 1))
 
     def command(settings=Settings(), keyframes=0, backend="ddagrab", monitor=GFX_MAIN, fps=60):
-        chain = capture.chain_for(capture.GFX, (monitor.width, monitor.height), (1920, 1080))
+        chain = capture.chain_for(capture.GFX, (monitor.width, monitor.height), (1920, 1080), repeats)
         return build_command("ffmpeg.exe", settings, source=DESKTOP, encoder="h264_nvenc", width=1920, height=1080,
                              fps=fps, backend=backend, monitor=monitor, chain=chain, keyframe_seconds=keyframes)
 
-    assert command() == GFX_COMMAND
-    assert not any("ddagrab" in arg or "hwdownload" in arg for arg in GFX_COMMAND)
+    expected = GFX_COMMAND if repeats else GFX_CHANGES_COMMAND
+    assert command() == expected
+    assert not any("ddagrab" in arg or "hwdownload" in arg for arg in expected)
     assert _option(command(Settings(show_cursor=False)), "-i").endswith(":capture_cursor=0")
-    # Every 2 s (as for the other chains): the forced keyframes by time, -g only a bound at 70 fps.
+    # Every 2 s (as for the other chains): the forced keyframes by time, -g only a bound at 70 (62) fps.
     periodic = command(keyframes=2)
-    assert _option(periodic, "-force_key_frames") == "expr:gte(t,n_forced*2)" and _option(periodic, "-g") == "140"
+    assert _option(periodic, "-force_key_frames") == "expr:gte(t,n_forced*2)"
+    assert _option(periodic, "-g") == ("140" if repeats else "124")
     thirty = command(fps=30)
-    assert ":max_framerate=40:" in _option(thirty, "-i") and "floor(t*30+0.5)" in _option(thirty, "-vf")
-    assert (_option(thirty, "-b:v"), _option(thirty, "-bufsize")) == ("10667k", "267k")
+    if repeats:
+        assert ":max_framerate=40:dup_frames=1:" in _option(thirty, "-i")
+        assert "floor(t*30+0.5)" in _option(thirty, "-vf")
+        assert (_option(thirty, "-b:v"), _option(thirty, "-bufsize")) == ("10667k", "267k")
+    else:
+        assert ":max_framerate=32:capture_cursor=1" in _option(thirty, "-i") and "-vf" not in thirty
+        assert (_option(thirty, "-b:v"), _option(thirty, "-bufsize")) == ("8533k", "1067k")
     # The display gone since: no option for it, so FFmpeg ends at once, saying so.
     gone = dataclasses.replace(GFX_MAIN, device=r"\\.\DISPLAY9")
     assert _option(command(monitor=gone), "-i").startswith("gfxcapture=width=1920:height=1080:")
     # A gfxcapture chain is only in place of ddagrab: gdigrab gets the CPU one.
     gdi = command(backend="gdigrab")
     assert _option(gdi, "-vf").startswith("scale=w='min(1920,iw)'") and _option(gdi, "-b:v") == "8000k"
+    assert _option(gdi, "-bufsize") == "133k"
 
 
 def test_ffmpeg_versions_are_read_from_its_banner(monkeypatch):

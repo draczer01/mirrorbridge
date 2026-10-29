@@ -110,6 +110,7 @@ def build_command(
     """
     output: list[str] = []
     kbps, rate = settings.video_bitrate_kbps, fps  # what the encoder is told
+    vbv = ffmpeg.MIRROR_VBV_FRAMES
     gpu = chain is not None and backend == "ddagrab"
     if source == TEST_PATTERN:
         video_in = ["-re", "-f", "lavfi", "-i", f"testsrc=size={width}x{height}:rate={fps}"]
@@ -118,11 +119,15 @@ def build_command(
         if noise.isdigit() and int(noise) > 0:  # experiment: a pattern that fills the bitrate
             filters.insert(0, f"noise=alls={int(noise)}:allf=t")
     elif gpu and chain.kind == capture.GFX and chain.size_out is not None:
-        # Windows Graphics Capture scales the display on the graphics card; frames as it changes
-        video_in = capture.gfx_input(capture.gfx_monitor(monitor), chain.size_out, fps, settings.show_cursor)
-        filters = capture.gfx_filters(fps)
+        # Windows Graphics Capture scales the display on the graphics card; frames as it changes,
+        # and repeats of the last while it does not if this FFmpeg can (chain.repeats)
+        repeats = chain.repeats
+        video_in = capture.gfx_input(capture.gfx_monitor(monitor), chain.size_out, fps, settings.show_cursor,
+                                     repeats)
+        filters = capture.gfx_filters(fps, repeats)
         output = capture.output_args(chain)
-        kbps, rate = capture.gfx_kbps(kbps, fps), capture.gfx_rate(fps)
+        kbps, rate = capture.gfx_kbps(kbps, fps, repeats), capture.gfx_rate(fps, repeats)
+        vbv = capture.vbv_frames(chain)
     else:
         settings_in = dataclasses.replace(settings, framerate=fps)
         video_in, prefilters = ffmpeg._video_input(backend, settings_in, monitor, region)  # pylint: disable=protected-access
@@ -137,7 +142,7 @@ def build_command(
     if filters:
         cmd += ["-vf", ",".join(filters)]
     cmd += ["-an"]
-    cmd += ffmpeg.mirror_encoder_args(encoder, kbps, rate, keyframe_seconds=keyframe_seconds)
+    cmd += ffmpeg.mirror_encoder_args(encoder, kbps, rate, vbv_frames=vbv, keyframe_seconds=keyframe_seconds)
     cmd += output + _extra_args(extra)
     cmd += ["-flush_packets", "1", "-flvflags", "no_duration_filesize+no_metadata", "-f", "flv", "pipe:1"]
     return cmd

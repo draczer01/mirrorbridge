@@ -165,6 +165,22 @@ def has_filter(ffmpeg: str, name: str) -> bool:
     return any(line.split()[1:2] == [name] for line in out.splitlines() if line.strip())
 
 
+_OPTION_LINE = re.compile(r"\s+([\w-]+)\s+<")  # "   max_framerate     <video_rate> ..FV...", not a constant's line
+
+
+@functools.lru_cache(maxsize=None)
+def filter_options(ffmpeg: str, name: str) -> frozenset[str]:
+    """The options of the filter `name` in this FFmpeg, as `-h filter=` lists them: none for a
+    filter it does not have, or when FFmpeg could not be asked (kept for the run, as an answer
+    is)."""
+    try:
+        out = _run([ffmpeg, "-hide_banner", "-h", f"filter={name}"]).stdout
+    except (OSError, subprocess.SubprocessError) as ex:
+        _LOGGER.info("Could not ask %s for the options of %s: %s", ffmpeg, name, ex)
+        return frozenset()
+    return frozenset(found.group(1) for found in map(_OPTION_LINE.match, (out or "").splitlines()) if found)
+
+
 @functools.lru_cache(maxsize=None)
 def has_input_format(ffmpeg: str, name: str) -> bool:
     out = _run([ffmpeg, "-hide_banner", "-devices"]).stdout

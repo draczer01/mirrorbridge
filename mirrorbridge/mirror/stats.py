@@ -20,11 +20,11 @@ bitrate, the most bytes the video connection held unsent, keyframes, dropped fra
 late, how often the TV asked for the time and how often FFmpeg was started again (for a
 keyframe, a lost screen capture or another way of capturing: the picture stands still while it
 starts, so a window with one gives no warning about the frame rate; nor does an FFmpeg that
-gives frames only as the screen changes, gfxcapture's: variable_rate). The TV shows a frame
-its lead (latencyMs) after it was taken, so an age that comes near the lead means frames
-arrive too late to be shown smoothly; "late" counts the frames sent past their lead (a network
-that held the video up for a moment, ridden out instead of dropping frames up to the next
-keyframe).
+gives frames only as the screen changes, gfxcapture's without repeats: variable_rate). The TV
+shows a frame its lead (latencyMs) after it was taken, so an age that comes near the lead means
+frames arrive too late to be shown smoothly; "late" counts the frames sent past their lead (a
+network that held the video up for a moment, ridden out instead of dropping frames up to the
+next keyframe).
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ class StageTimes:
         self.late = 0  # frames sent past their lead
         self.slow_windows = 0  # windows in which FFmpeg delivered too few frames
         self.restarts = 0  # FFmpegs started after the first
-        self.variable_rate = False  # frames only as the screen changes (capture.GFX): fps is the most there are
+        self.variable_rate = False  # frames only as the screen changes (gfxcapture without repeats): fps is the most
         self._restarted_ns: Optional[int] = None  # when the last of them was
         self._window: dict[str, list[float]] = {stage: [] for stage in STAGES}
         self._all: dict[str, deque] = {stage: deque(maxlen=KEEP) for stage in STAGES}

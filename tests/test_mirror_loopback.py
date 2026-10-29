@@ -924,13 +924,16 @@ async def test_a_graphics_card_picture_of_the_wrong_size_gives_way_to_the_proces
     assert session.error is None and screen.ways()[2:] == [("ddagrab", capture.CPU)]
 
 
-def _gfxcapture(tv, monkeypatch) -> None:
-    """As on Windows with NVENC and FFmpeg 8.1 (x264 encodes here, the test source stands in for
-    gfxcapture): a 1080p display on a 720p TV, which gfxcapture scales."""
+def _gfxcapture(tv, monkeypatch, repeats: bool = True) -> None:
+    """As on Windows with NVENC and an FFmpeg whose gfxcapture repeats frames (after 9.1), or not
+    (8.1.1) (x264 encodes here, the test source stands in for gfxcapture): a 1080p display on a
+    720p TV, which gfxcapture scales."""
     tv.reconfigure(width=1280, height=720)
     monkeypatch.setattr(capture, "sys", SimpleNamespace(platform="win32"))
     monkeypatch.setattr(capture, "GPU_ENCODERS", ("libx264",))
     monkeypatch.setattr(ffmpeg, "has_filter", lambda ff, name: name == "gfxcapture")
+    monkeypatch.setattr(ffmpeg, "filter_options", lambda ff, name: frozenset(
+        {capture.GFX_REPEATS} if repeats and name == "gfxcapture" else ()))
     monkeypatch.setattr(capture, "gfx_monitor", lambda monitor: "hmonitor=65537")
 
 
@@ -951,8 +954,11 @@ async def test_gfxcapture_that_fails_before_its_first_frame_gives_way_to_the_pro
         await asyncio.wait_for(session.run(), 60)
     assert session.error is None and screen.ways() == [("ddagrab", capture.GFX), ("ddagrab", capture.CPU)]
     assert ("Capture chain: the graphics card's, through Windows Graphics Capture (gfxcapture scales from 1920x1080 "
-            "to 1280x720)") in caplog.text
-    assert "FFmpeg 1 (start): GPU gfxcapture, 1920x1080 -> 1280x720, x264 (CPU) at up to 30 fps" in caplog.text
+            "to 1280x720, repeating the last frame while the screen is still)") in caplog.text
+    assert ("FFmpeg 1 (start): GPU gfxcapture with repeats, 1920x1080 -> 1280x720, x264 (CPU) at 30 fps, 1500 kbit/s "
+            "(VBV 6250 bytes; NVENC told 2000 kbit/s at 40 fps, the same share a frame), gfxcapture's frames as the "
+            "screen changes and repeats of the last while it does not, up to 40 a second (kept to 30), keyframes "
+            "only when needed") in caplog.text
     assert (r"gfxcapture with libx264 on the graphics card failed on \\.\DISPLAY1 (not tried there again until "
             "MirrorBridge quits), trying the processor's chain. FFmpeg said:\n[Parsed_gfxcapture_0 @ 0x1] Failed to "
             "create D3D11VA device.") in caplog.text
@@ -967,21 +973,34 @@ async def test_gfxcapture_that_fails_before_its_first_frame_gives_way_to_the_pro
             "earlier in this run; scale_d3d11 is turned off (capture.GPU_SCALED_ENABLED))") in caplog.text
 
 
-@pytest.mark.parametrize("scaler, frames, ends", [("auto", 20, None), ("cpu", 20, "mirror_no_picture"),
-                                                  ("auto", 0, "mirror_no_picture")])
-async def test_a_still_screen_does_not_end_a_gfxcapture_session(tv, monkeypatch, caplog, scaler, frames, ends):
-    """gfxcapture gives frames only as the screen changes: once its FFmpeg gave one, no frame for
-    longer than FRAME_GAP_SECONDS is a screen that stays as it is while that FFmpeg runs, and the
-    frame rate is no warning. Not so for an FFmpeg that never gave a frame, nor for ddagrab's,
-    which gives frames whatever the screen does."""
+@pytest.mark.parametrize("scaler, repeats, frames, ends", [
+    ("gfx", False, 20, None), ("cpu", False, 20, "mirror_no_picture"), ("gfx", False, 0, "mirror_no_picture"),
+    ("auto", True, 20, "mirror_no_picture"), ("gfx", True, 20, "mirror_no_picture"),
+    ("auto", False, 20, "mirror_no_picture")])
+async def test_a_still_screen_does_not_end_a_gfxcapture_session(tv, monkeypatch, caplog, scaler, repeats, frames,
+                                                                 ends):
+    """gfxcapture without repeats (Scaling "gfx" with FFmpeg 8.1.1) gives frames only as the screen
+    changes: once its FFmpeg gave one, no frame for longer than FRAME_GAP_SECONDS is a screen that
+    stays as it is while that FFmpeg runs, and the frame rate is no warning. Not so for an FFmpeg
+    that never gave a frame, nor for gfxcapture that repeats frames or ddagrab's (Scaling "auto"
+    without repeats, "cpu"), which give frames whatever the screen does."""
     _ffmpeg()
-    _gfxcapture(tv, monkeypatch)
+    _gfxcapture(tv, monkeypatch, repeats)
     screen = Screen(monkeypatch, ends=[(frames, "", "stay")], size=(1280, 720))
     monkeypatch.setattr(mirror_session, "FRAME_GAP_SECONDS", 0.5)
-    monkeypatch.setattr(mirror_session, "FIRST_FRAME_SECONDS", 1)
+    # Time for the first frame: short only where none comes (an FFmpeg started under Wine while
+    # other tests run took more than 1 s), so that the others end, if at all, for the gap.
+    first = 1 if frames == 0 else 5
+    monkeypatch.setattr(mirror_session, "FIRST_FRAME_SECONDS", first)
     monkeypatch.setattr(mirror_session, "StageTimes", functools.partial(stats.StageTimes, interval=1.0))
     settings = dataclasses.replace(GFX_SETTINGS, mirror_scaler=scaler)
-    session = MirrorSession(tv.target(), settings, seconds=3, remember=False)
+    starting = []
+
+    def status(state, message) -> None:
+        if state == State.STARTING:
+            starting.append(str(message))
+
+    session = MirrorSession(tv.target(), settings, status, seconds=3, remember=False)
     with caplog.at_level(logging.INFO):
         if ends is None:
             await asyncio.wait_for(session.run(), 60)
@@ -989,7 +1008,21 @@ async def test_a_still_screen_does_not_end_a_gfxcapture_session(tv, monkeypatch,
             with pytest.raises(MirrorError) as caught:
                 await asyncio.wait_for(session.run(), 60)
             assert caught.value.args[0].key == ends
-    assert screen.ways() == [("ddagrab", capture.GFX if scaler == "auto" else capture.CPU)]
+            assert caught.value.args[0].values["seconds"] == (first if frames == 0 else 0.5)
+    gfx = scaler == "gfx" or (scaler == "auto" and repeats)
+    assert screen.ways() == [("ddagrab", capture.GFX if gfx else capture.CPU)]
+    # The tray and the log say which chain runs, and whether gfxcapture repeats frames.
+    way = ("gfxcapture on the graphics card, repeating frames" if repeats else
+           "gfxcapture on the graphics card, frames only on changes") if gfx else "ddagrab and the processor"
+    assert starting[-1] == f"x264 (CPU) via {way}"
+    if gfx and not repeats:
+        assert ("FFmpeg 1 (start): GPU gfxcapture without repeats, 1920x1080 -> 1280x720, x264 (CPU) at up to 30 fps, "
+                "1500 kbit/s (VBV 25000 bytes, 4 frames; NVENC told 1600 kbit/s at 32 fps, the same share a frame), "
+                "frames only as the screen changes, without repeats (gfxcapture up to 32 a second), keyframes") in (
+            caplog.text)
+    elif gfx:
+        assert "FFmpeg 1 (start): GPU gfxcapture with repeats, 1920x1080 -> 1280x720, x264 (CPU) at 30 fps" in (
+            caplog.text)
     if ends is None:
         assert session.error is None and session.report.frames_sent == frames and session.report.restarts == []
         assert "cannot keep up" not in caplog.text and "fps (of up to 30)" in caplog.text
@@ -1017,11 +1050,12 @@ async def test_gfxcapture_ending_its_video_is_a_lost_capture(tv, monkeypatch, ca
 
 
 async def test_a_keyframe_asked_for_on_a_still_gfxcapture_screen_comes_without_another_frame(tv, monkeypatch):
-    """gfxcapture: the last frame of a burst of changes is dropped (here as if the network held it),
-    and the screen then stays as it is, so no frame comes after it: FFmpeg is started again for a
-    keyframe all the same, and the TV gets the screen as it is now, not the frame before."""
+    """gfxcapture without repeats: the last frame of a burst of changes is dropped (here as if the
+    network held it), and the screen then stays as it is, so no frame comes after it: FFmpeg is
+    started again for a keyframe all the same, and the TV gets the screen as it is now, not the
+    frame before."""
     _ffmpeg()
-    _gfxcapture(tv, monkeypatch)
+    _gfxcapture(tv, monkeypatch, repeats=False)
     Screen(monkeypatch, size=(1280, 720))
     builds, stand_in = [], mirror_session.build_command
 
@@ -1041,7 +1075,8 @@ async def test_a_keyframe_asked_for_on_a_still_gfxcapture_screen_comes_without_a
         return "the network held it" if len(calls) == 21 else real(self, *args)
 
     monkeypatch.setattr(MirrorSession, "_drop_reason", drop)
-    session = MirrorSession(tv.target(), GFX_SETTINGS, seconds=2.5, remember=False)
+    session = MirrorSession(tv.target(), dataclasses.replace(GFX_SETTINGS, mirror_scaler="gfx"), seconds=2.5,
+                            remember=False)
     await asyncio.wait_for(session.run(), 60)
     assert session.error is None and len(builds) == 2
     assert session.report.restarts == ["a keyframe: the network held it"]

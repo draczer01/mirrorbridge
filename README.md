@@ -238,9 +238,11 @@ TV* or `mirror --probe`:
 *TV wait (test)* asks the TV to wait 60 to 300 ms after a frame was captured before it shows
 it, instead of what *Latency* says (*Automatic*; choosing a Latency puts it back there, and a
 test value is never saved); *Keyframes* sends a complete picture only when needed (the
-default), every 10 seconds or every 2 seconds, as before; *Scaling* resizes the picture on the
-graphics card when it can (*Automatic*, the default) or on the processor (*Processor (as
-before)*); *Show frames on arrival (test)* asks the TV to show each frame as soon as it comes
+default), every 10 seconds or every 2 seconds, as before; *Scaling* resizes the picture as
+described below (*Automatic*, the default), on the processor (*Processor (as before)*), or
+with Windows Graphics Capture even when it cannot repeat frames (*Windows capture on the
+graphics card (test)*: a still slide can stay blurred until something moves); *Show frames on
+arrival (test)* asks the TV to show each frame as soon as it comes
 instead of at its time. The log says, as each session starts, which ones it used, and each
 time FFmpeg starts again, why.
 
@@ -274,19 +276,21 @@ included.
   settings*. There is no sound yet. If FFmpeg cannot capture or encode at the start (the
   graphics driver refuses ddagrab, the GPU encoder is busy), it goes on with GDI capture, then
   with x264 (CPU), as a cast does.
-* With NVENC and Desktop Duplication the picture stays on the graphics card: at the TV's size
-  it goes from the capture to the encoder untouched, and otherwise Windows Graphics Capture
-  (FFmpeg's `gfxcapture`, which the FFmpeg 8.1.1 inside `MirrorBridge.exe` has) takes the
-  screen at the TV's size, scaled on the graphics card; another FFmpeg without it scales on the
-  processor. That capture gives a frame only when the screen changes, at most at the frame
-  rate, so a screen that stays as it is sends no new frames; MirrorBridge does not end the
-  session for that, but how long a TV keeps a still picture is still to be tried. MirrorBridge's
-  own command for this capture has not yet run on real hardware. (FFmpeg's `scale_d3d11` is not
-  used: on an RTX 4080 SUPER with driver 621.01 it could not make its picture.) If the capture
-  ends before its first picture, or the picture comes out at another size than asked for, that
-  display goes back to the processor until MirrorBridge quits; when Windows takes the capture
-  away instead, it is started again as below. Quick Sync, AMF and Media Foundation scale on the
-  processor.
+* With NVENC and Desktop Duplication the picture stays on the graphics card at the TV's size:
+  it goes from the capture to the encoder untouched. A bigger screen is scaled on the
+  processor, unless FFmpeg's Windows Graphics Capture (`gfxcapture`) can repeat its last frame
+  while the screen stays as it is (`dup_frames`, in FFmpeg after 9.1, not in the FFmpeg 8.1.1
+  inside `MirrorBridge.exe`): then it takes the screen at the TV's size, scaled on the graphics
+  card. Without repeats that capture gives a frame only when the screen changes, so a new slide,
+  blurred at first as every frame that changes the whole screen is, would stay blurred until
+  something moves; Desktop Duplication's repeats sharpen it within a few frames. **More options >
+  Debug > Scaling** can try it anyway (a still screen then sends no frames, which does not end
+  the session; how long a TV keeps a still picture is still to be tried). MirrorBridge's own
+  command for this capture has not yet run on real hardware. (FFmpeg's `scale_d3d11` is not used: on an RTX 4080 SUPER with driver
+  621.01 it could not make its picture.) If the capture ends before its first picture, or the
+  picture comes out at another size than asked for, that display goes back to the processor
+  until MirrorBridge quits; when Windows takes the capture away instead, it is started again as
+  below. Quick Sync, AMF and Media Foundation scale on the processor.
 * A keyframe (a complete picture) goes only when it is needed: at the start, and after frames
   were dropped, when FFmpeg is started again for a fresh one at once (at most every 2 seconds),
   whether or not the screen changes meanwhile. A keyframe every 2 seconds made text blur every 2

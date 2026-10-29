@@ -30,7 +30,7 @@ BITRATES = [4, 8, 12, 20, 30]
 MIRROR_LEVELS = CHOICES["mirror_latency"]  # Mirror screen settings > Latency: low, normal, smooth
 MIRROR_FRAMERATES = CHOICES["mirror_framerate"]  # Mirror screen settings > Frame rate: 0 = Automatic, 30, 60
 DEBUG_LEADS = [0, 60, 100, 150, 200, 300]  # More options > Debug > TV wait, in ms; 0 = what is saved for the TV
-SCALERS = CHOICES["mirror_scaler"]  # More options > Debug > Scaling: auto (the graphics card when it can), cpu
+SCALERS = CHOICES["mirror_scaler"]  # More options > Debug > Scaling: auto, cpu, gfx (Settings.mirror_scaler)
 
 
 def display_label(mon: ffmpeg.Monitor) -> str:
@@ -328,7 +328,7 @@ class TrayMenu(QObject):
         self._radio(debug, tr("debug_keyframes"), keyframes, ffmpeg.mirror_keyframe_seconds(s.mirror_keyframes),
                     "mirror_keyframes")
         self._radio(debug, tr("debug_scaler"), [(tr("debug_scaler_" + scaler), scaler) for scaler in SCALERS],
-                    "cpu" if s.mirror_scaler == "cpu" else "auto", "mirror_scaler")
+                    s.mirror_scaler if s.mirror_scaler in SCALERS else "auto", "mirror_scaler")
         self._action(debug, tr("debug_on_arrival"), lambda on: self.c.update_settings(mirror_on_arrival=on),
                      checkable=True, checked=on_arrival(s))
 
