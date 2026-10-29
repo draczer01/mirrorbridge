@@ -260,7 +260,9 @@ class MainWindow(QMainWindow):
             af.addRow(self._row_labels[key], field)
         self.audio_cb = QCheckBox()
         self.cursor_cb = QCheckBox()
+        self.mute_pc_cb = QCheckBox()
         af.addRow(self.audio_cb)
+        af.addRow(self.mute_pc_cb)
         af.addRow(self.cursor_cb)
         self.advanced_section.content.addLayout(af)
         layout.addWidget(self.advanced_section)
@@ -291,6 +293,7 @@ class MainWindow(QMainWindow):
         self.window_combo.lineEdit().editingFinished.connect(self._source_changed)
         self.audio_cb.toggled.connect(lambda on: self._save(capture_audio=on))
         self.cursor_cb.toggled.connect(lambda on: self._save(show_cursor=on))
+        self.mute_pc_cb.toggled.connect(lambda on: self._save(mute_pc_audio=on))
         self.res_combo.currentIndexChanged.connect(lambda _i: self._save(output_height=int(self.res_combo.currentData())))
         self.fps_combo.currentIndexChanged.connect(lambda _i: self._save(framerate=int(self.fps_combo.currentData())))
         self.bitrate.valueChanged.connect(self._bitrate_changed)
@@ -310,7 +313,8 @@ class MainWindow(QMainWindow):
         for button, key in ((self.refresh_btn, "refresh"), (self.add_ip_btn, "add_ip"), (self.pair_btn, "pair"),
                             (self.forget_btn, "forget"), (self.rb_display, "ui_show_display"),
                             (self.rb_window, "ui_show_window"), (self.rb_extend, "ui_show_extend"),
-                            (self.audio_cb, "audio"), (self.cursor_cb, "cursor"), (self.file_btn, "play_file"),
+                            (self.audio_cb, "audio"), (self.cursor_cb, "cursor"), (self.mute_pc_cb, "ui_mute_pc"),
+                            (self.file_btn, "play_file"),
                             (self.cast_btn, "ui_cast_instead"), (self.another_btn, "ui_try_another")):
             button.setText(tr(key))
         self.refresh_win.setToolTip(tr("ui_refresh_windows"))
@@ -422,6 +426,7 @@ class MainWindow(QMainWindow):
             self.extend_combo.setCurrentIndex(max(0, self.extend_combo.findData(s.extend_mode)))
             self.audio_cb.setChecked(s.capture_audio)
             self.cursor_cb.setChecked(s.show_cursor)
+            self.mute_pc_cb.setChecked(s.mute_pc_audio)
             self.res_combo.setCurrentIndex(max(0, self.res_combo.findData(s.output_height)))
             self.fps_combo.setCurrentIndex(max(0, self.fps_combo.findData(s.framerate)))
             self.bitrate.setValue(max(2, s.video_bitrate_kbps // 1000))
@@ -545,6 +550,8 @@ class MainWindow(QMainWindow):
         first = steps[0]
         if first == routes.AIRPLAY_MIRROR and not screen.airplay.is_paired:
             return tr("ui_hint_mirror_first") + " " + tr("ui_hint_mirror")
+        if first == routes.CAST_MIRROR:
+            return tr("ui_hint_cast_mirror")
         if first in routes.MIRRORING:
             return tr("ui_hint_mirror")
         dev = screen.airplay

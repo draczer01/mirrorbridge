@@ -1033,6 +1033,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Nothing on the TV? Try another way",
         "es": "¿No se ve en la TV? Probar otra forma",
     },
+    "ui_mute_pc": {
+        "en": "Mute this PC while the TV plays the sound",
+        "es": "Silenciar la PC mientras la TV tiene el sonido",
+    },
+    "ui_hint_cast_mirror": {
+        "en": "Your screen and its sound appear on the TV almost at once.",
+        "es": "Tu pantalla y su sonido aparecen en la TV casi al instante.",
+    },
     "ui_advanced": {"en": "Advanced settings", "es": "Ajustes avanzados"},
     "ui_cast_latency": {"en": "Delay when casting", "es": "Retraso al transmitir"},
     "ui_details": {"en": "Technical details (for reporting a problem)",
