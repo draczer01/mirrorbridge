@@ -165,6 +165,45 @@ async def test_mirrors_a_test_pattern(tv, tmp_path):
     assert session.frames_reported
 
 
+def _keep_awake(monkeypatch, tv: FakeCastTV) -> list:
+    """What the session asks of KeepAwake, with how many frames the TV had when it asked."""
+    calls = []
+
+    class Recorder:
+        def __init__(self, reason, display=True):
+            calls.append(("new", reason, display))
+
+        def start(self):
+            calls.append(("start", len(tv.frames)))
+
+        def stop(self):
+            calls.append(("stop", len(tv.frames) > 0))
+
+    monkeypatch.setattr(gc_session, "KeepAwake", Recorder)
+    return calls
+
+
+async def test_the_pc_is_kept_awake_while_it_mirrors(tv, monkeypatch):
+    _ffmpeg()
+    calls = _keep_awake(monkeypatch, tv)
+    await _mirror(tv, seconds=1)
+    # A test pattern needs no screen; the PC is let go after the TV has had the picture
+    assert calls == [("new", "MirrorBridge is showing this screen on Sala familiar", False), ("start", 0),
+                     ("stop", True)]
+
+
+async def test_the_pc_may_sleep_again_when_the_receiver_cannot_launch(monkeypatch):
+    _ffmpeg()
+    tv = await FakeCastTV(launch=False).start()
+    calls = _keep_awake(monkeypatch, tv)
+    try:
+        with pytest.raises(CastMirrorError):
+            await _mirror(tv)
+    finally:
+        await tv.stop()
+    assert [call[0] for call in calls] == ["new", "start", "stop"]
+
+
 async def test_lost_packets_are_sent_again(tmp_path):
     ff = _ffmpeg()
     tv = await FakeCastTV(drop_every=4).start()
