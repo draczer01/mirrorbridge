@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import airplay_patch, audio, extended, ffmpeg, vdisplay
+from .awake import KeepAwake
 from .config import Settings
 from .devices import Device, DeviceManager
 from .hls_server import Activity, HlsServer
@@ -110,6 +111,8 @@ class CastSession:
         self.virtual_device = ""  # \\.\DISPLAYn of the virtual screen while there is one
         self.error: Exception | None = None  # why the cast failed
         self.finished = threading.Event()
+        self._awake = KeepAwake(f"MirrorBridge is casting this screen to {device.name or 'a TV'}",
+                                display=settings.capture_backend != "test")
 
     # -- helpers -----------------------------------------------------------
 
@@ -159,6 +162,7 @@ class CastSession:
                 self._set(State.STOPPED, "Cancelled")
                 return
             self._starting = True
+            self._awake.start()
             try:
                 await self._start()
             finally:
@@ -178,6 +182,7 @@ class CastSession:
             try:
                 await asyncio.shield(self._cleanup())
             finally:
+                self._awake.stop()
                 self.finished.set()
 
     async def stop(self) -> None:

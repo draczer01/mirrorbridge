@@ -8,6 +8,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ### Added
 
+- While the screen is on a TV (*Mirror screen* or a cast), the PC does not go to sleep and its
+  screen does not turn off, as with a video player: a slide show, a PDF or a still desktop used
+  to let Windows turn the screen off after its idle time, and a screen that is off gives the
+  capture no picture. MirrorBridge asks Windows with a power request (`powercfg /requests` shows
+  it, with the TV's name) and lets it go when the session ends. A test pattern keeps only the PC
+  awake.
 - TVs that have no `POST /play`, the first AirPlay video request (TCL, LG and others built on
   Apple's AirPlay SDK for TVs, which answer it with 404), get the stream through the play queue
   (AirPlay video v2), as an iPhone sends it: chosen from the feature bits the TV advertises

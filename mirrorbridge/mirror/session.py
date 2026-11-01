@@ -103,6 +103,7 @@ from typing import Callable, Optional
 
 from .. import audio as system_audio
 from .. import extended, ffmpeg, vdisplay
+from ..awake import KeepAwake
 from ..config import Settings
 from ..session import State, StatusCallback
 from ..speakers import MutedSpeakers
@@ -367,6 +368,9 @@ class MirrorSession:
         self.report = SessionReport(trailer=self.profile.trailer)
         self.error: Optional[Exception] = None
         self.finished = threading.Event()
+        # The PC awake while the session runs, and its screen on when it is the screen that goes
+        self._awake = KeepAwake(f"MirrorBridge is showing this screen on {target.name or 'a TV'}",
+                                display=source == DESKTOP)
         self._stop = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
         self._starting = False
@@ -463,6 +467,7 @@ class MirrorSession:
             if self._stop.is_set():
                 self._set(State.STOPPED, "Cancelled")
                 return
+            self._awake.start()
             try:
                 ended = await self._attempts()
             except MirrorError:
@@ -483,6 +488,7 @@ class MirrorSession:
             try:
                 await asyncio.shield(self._cleanup())
             finally:
+                self._awake.stop()
                 if switch is not None:
                     sys.setswitchinterval(before)
                 self.finished.set()

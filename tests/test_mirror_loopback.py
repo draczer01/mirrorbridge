@@ -428,6 +428,28 @@ async def test_saved_profile_is_asked_for_first(tv):
     assert tv.videos[0].codec_packets[0][3].endswith(bytes.fromhex("fdf8f800"))
 
 
+async def test_the_pc_is_kept_awake_while_the_session_runs_and_only_then(tv, monkeypatch):
+    _ffmpeg()
+    calls = []
+
+    class Recorder:
+        def __init__(self, reason, display=True):
+            calls.append(("new", reason, display))
+
+        def start(self):
+            calls.append(("start", len(tv.videos)))
+
+        def stop(self):
+            calls.append(("stop", len(tv.videos)))
+
+    monkeypatch.setattr(mirror_session, "KeepAwake", Recorder)
+    session = MirrorSession(tv.target(), SETTINGS, source=TEST_PATTERN, seconds=1, remember=False)
+    await asyncio.wait_for(session.run(), 60)
+    assert session.report.picture  # the TV had the picture in between
+    # A test pattern needs no screen; the PC is let go after the TV has had it all
+    assert calls == [("new", "MirrorBridge is showing this screen on TCL 55QM7L", False), ("start", 0), ("stop", 1)]
+
+
 async def test_the_debug_switches_reach_the_tv_and_a_test_lead_is_not_saved(tv, caplog):
     """More options > Debug: a TV wait of 300 ms (in SETUP, the frames' times and the stats), a
     keyframe every 10 s and frames shown as they come; mirroring.json keeps the TV's own lead."""
