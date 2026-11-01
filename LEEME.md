@@ -222,9 +222,10 @@ Igual que `cast`, `mirror` parte de los ajustes de la app: sin `--monitor`, `--w
   desaparece al terminarla; si desaparece antes (al suspender el equipo), la sesión termina y
   lo dice. *Probar esta TV* y `mirror --probe` nunca la crean. Todo se envía con el
   codificador y la tasa de bits de **Calidad**, a los cuadros por segundo de **Ajustes de
-  Duplicar pantalla**. Todavía no hay sonido. Si FFmpeg no puede capturar o codificar al
-  empezar (el controlador de video rechaza ddagrab, el codificador de la GPU está ocupado),
-  sigue con la captura GDI y luego con x264 (CPU), igual que al transmitir.
+  Duplicar pantalla**. No lleva sonido, salvo que lo pruebes (más abajo). Si FFmpeg no puede
+  capturar o codificar al empezar (el controlador de video rechaza ddagrab, el codificador de
+  la GPU está ocupado), sigue con la captura GDI y luego con x264 (CPU), igual que al
+  transmitir.
 * Con NVENC y Desktop Duplication, al tamaño de la TV la imagen no sale de la tarjeta de video:
   va directo de la captura al codificador. Una pantalla más grande se escala en el procesador,
   salvo que el Windows Graphics Capture de FFmpeg (`gfxcapture`) pueda repetir su último cuadro
@@ -261,6 +262,19 @@ Igual que `cast`, `mirror` parte de los ajustes de la app: sin `--monitor`, `--w
   que MirrorBridge es el reloj PTP de la TV, necesita además UDP 319 y 320 de entrada; si la
   TV no sigue ese reloj en unos segundos (`MIRRORBRIDGE_PTP_LOCK_S`), la sesión sigue con NTP
   y el registro dice por qué. Nada de PTP se guarda para la sesión siguiente.
+* **Probar el sonido** (experimental, apagado si no lo pides; todavía no se oyó en una TV
+  real): `mirror --sound` manda el sonido del equipo con la imagen en esa sesión, `mirror
+  --beep` un pitido cada segundo en su lugar (la imagen de prueba siempre pita), y
+  `MIRRORBRIDGE_MIRROR_SOUND=1` lo enciende en todas las sesiones, también en *Duplicar
+  pantalla* (`=0` lo deja apagado, igual que **Incluir el sonido del equipo** desmarcado o
+  `--no-audio`). `mirror --sound-trial` manda el pitido de hasta 12 formas, 12 segundos cada
+  una, y después de cada una pregunta si la TV pitó: si se oyó con la primera, se recuerda que
+  la TV reproduce el sonido, y desde entonces el equipo se silencia mientras lo hace (con
+  `--keep-pc-sound`, no; hasta entonces suenan los dos). `doctor --sound` revisa solo la parte
+  del equipo, y `--log archivo.log` guarda el registro completo para avisar de un problema. La
+  TV pide los paquetes de sonido perdidos por los mismos puertos UDP 7880-7889. Con
+  `MIRRORBRIDGE_MIRROR_SOUND=1`, si la TV corta la sesión cuando empieza el sonido, se vuelve a
+  armar una vez sin sonido, y se recuerda para esa TV.
 * `mirror --probe` prueba las formas en que las TVs difieren, muestra qué contestó la TV y
   guarda lo que funcionó en `%APPDATA%\MirrorBridge\mirroring.json`, que *Duplicar pantalla* y
   cada `mirror` piden primero. La última prueba de *Probar esta TV* hace lo mismo en 75

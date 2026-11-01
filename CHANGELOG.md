@@ -34,11 +34,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   a cast's seconds. Each frame goes as soon as FFmpeg has encoded it, encrypted, over a
   connection of its own, timed by MirrorBridge's own clock that the TV asks over UDP (allow
   inbound UDP 7880-7889 in Windows Firewall). Apple TVs and Macs need FairPlay and are not
-  supported. No sound yet. When the network or the TV cannot keep up for more than about a
-  second, frames are dropped up to a keyframe that is on time instead of piling up; a TV that
-  takes no video for 5 seconds ends the session with an error, and ending mirroring on the TV
-  stops it. If FFmpeg cannot capture or encode at the start (the driver refuses ddagrab, the
-  GPU encoder is busy), it goes on with GDI capture, then with x264, as a cast does.
+  supported. Sound only as a test so far (below). When the network or the TV cannot keep up
+  for more than about a second, frames are dropped up to a keyframe that is on time instead of
+  piling up; a TV that takes no video for 5 seconds ends the session with an error, and ending
+  mirroring on the TV stops it. If FFmpeg cannot capture or encode at the start (the driver
+  refuses ddagrab, the GPU encoder is busy), it goes on with GDI capture, then with x264, as a
+  cast does.
 - *Show my screen on (your TV)*, the tray menu's main item, right under the status line, does
   what the window's big button does: Mirror screen on a TV that takes it (pairing first, with
   the PIN the TV shows, when MirrorBridge is not paired with it yet), the cast on an Apple TV or
@@ -148,6 +149,21 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   requests. The session waits for the TV to follow that clock and goes on with NTP, on a fresh
   connection, when it does not; the log says which, with what the TV sent. Without it, NTP timing
   is exactly as before, and a session with PTP timing is never saved in `mirroring.json`.
+- Screen mirroring's sound, to try (experimental, off unless asked for, not yet heard on a real
+  TV): `mirror --sound` sends the PC's sound with the picture over the audio stream every
+  session already sets up (ALAC, or PCM when that is all the TV's `/info` lists, encrypted with
+  the key the SETUP gives the TV), with the picture's lead and kept in step with it;
+  `mirror --beep` sends a beep every second instead (the test pattern always beeps), and
+  `MIRRORBRIDGE_MIRROR_SOUND=1` turns it on for every session, Mirror screen's included.
+  Without them nothing changes, and *Test this TV* never sends sound. `mirror --sound-trial`
+  sends the beep up to 12 ways (`MIRRORBRIDGE_MIRROR_SOUND_*`, the test switches) and asks after
+  each whether the TV beeped; heard the first way, the TV is remembered as playing the sound,
+  and only then is the PC muted while the TV plays it (`--keep-pc-sound` keeps it on).
+  `doctor --sound` checks the PC's side alone: 10 seconds of what it plays, recorded as a
+  session would. Whatever goes wrong with the sound stops the sound, never the picture, and
+  says so once; with `MIRRORBRIDGE_MIRROR_SOUND=1`, a TV that ends the session as the sound
+  starts gets it once more without sound, and `mirroring.json` remembers that. `--log PATH`
+  writes the whole log to a file as well.
 
 ### Changed
 

@@ -771,8 +771,13 @@ class Controller(QObject):
         device = self.selected_device
         if self.is_active or device is None or not self.can_mirror(device) or not device.is_paired:
             return
+
+        def on_notice(text: Text) -> None:  # on the asyncio loop: what the person should know of the sound
+            self.bridge.call(lambda: self.notify.emit(tr("mirror_sound_note"), say(text), False))
+
         self._run_mirror(device, lambda on_status: mirror.MirrorSession(mirror.Target.from_device(device),
-                                                                        self.settings, on_status))
+                                                                        self.settings, on_status,
+                                                                        on_notice=on_notice))
 
     def _cast_mirror(self, screen: routes.Screen) -> None:
         """Google Cast screen mirroring (experimental), to a TV with Chromecast built-in."""
