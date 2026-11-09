@@ -8,6 +8,23 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ### Added
 
+- An installer, `MirrorBridge-Setup-<version>.exe`, in every release: it installs MirrorBridge for
+  the current user only (in `%LOCALAPPDATA%\Programs\MirrorBridge`, with no administrator rights
+  and no UAC prompt), adds it to the Start menu (and, if chosen, the desktop), and uninstalls from
+  Windows' *Apps* settings. Settings and TV pairings stay where they were, in
+  `%APPDATA%\MirrorBridge`, so the portable `MirrorBridge.exe` and the installed one share them.
+  When *Start with Windows* was on for a copy elsewhere, the installed one starts instead.
+- Updates: MirrorBridge looks for a newer version in its GitHub Releases a minute after it starts
+  and then once a day, and says so in a notification and at the top of its tray menu (*Update to
+  MirrorBridge X.Y.Z*). Choosing it downloads the new installer, checks it against the release's
+  `SHA256SUMS` (and its size, and that it is a Windows program), and runs it: the installer waits
+  for MirrorBridge to quit, replaces it and starts the new version. A broken download resumes
+  where it stopped; one that does not check out is deleted and never run; no network, or GitHub's
+  limit on requests, leaves everything as it is until the next check. *More options* > *Updates*
+  has *Check for updates now*, the release notes, and switches for the daily check and for test
+  versions (pre-releases, on at first: every release is one until it has been tried on TVs).
+  `MirrorBridge.exe update [--check] [--stable]` does the same from the command line.
+
 - While the screen is on a TV (*Mirror screen* or a cast), the PC does not go to sleep and its
   screen does not turn off, as with a video player: a slide show, a PDF or a still desktop used
   to let Windows turn the screen off after its idle time, and a screen that is off gives the

@@ -12,12 +12,13 @@ from PySide6.QtCore import QLockFile, QTimer
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 
-from .. import APP_NAME, __version__, migration
+from .. import APP_NAME, __version__, migration, update
 from ..config import Settings, app_data_dir
 from .controller import Controller, setup_file_logging
 from .i18n import set_language, tr
 from .theme import app_icon, apply_dark_theme
 from .tray import TrayMenu
+from .updates import Updates
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -45,8 +46,10 @@ class MirrorBridgeApp:
         self.listen()  # before building the UI, so a second launch always finds us
         app.aboutToQuit.connect(self._shutdown)  # also covers Windows logoff/shutdown
 
+        self.updates = Updates(self.controller, self.quit)
         if QSystemTrayIcon.isSystemTrayAvailable():
-            self.tray = TrayMenu(self.controller, self.open_window, self.quit)
+            self.tray = TrayMenu(self.controller, self.open_window, self.quit, self.updates)
+            self.updates.changed.connect(self.tray._refresh_status)  # pylint: disable=protected-access
             self.tray.show()
             # Also on the first start after the rename: Windows hides a new program's tray icon under ^.
             if not self.settings.tray_hint_shown or migration.copied():
@@ -117,6 +120,7 @@ class MirrorBridgeApp:
         if self._quitting:
             return
         self._quitting = True
+        self.updates.stop()
         if self.server:  # first, so a launch from now on starts a fresh copy
             self.server.close()
         try:
@@ -162,6 +166,7 @@ def run_gui(open_window: bool = False) -> int:
         else:
             return 0
 
+    update.hold_app_mutex()  # the installer waits for this to go before it replaces the exe
     log_path = setup_file_logging()
     _LOGGER.info("%s %s starting (log: %s)", APP_NAME, __version__, log_path)
     for path in migration.copied():  # copied before there was a log to say so

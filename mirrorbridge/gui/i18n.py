@@ -168,6 +168,41 @@ _STRINGS: dict[str, dict[str, str]] = {
     "debug_on_arrival": {"en": "Show frames on arrival (test)", "es": "Mostrar cuadros al llegar (prueba)"},
     "language_menu": {"en": "Language", "es": "Idioma"},
     "quit": {"en": "Quit", "es": "Salir"},
+    # Updates (gui/updates.py)
+    "update_menu": {"en": "Updates", "es": "Actualizaciones"},
+    "update_install": {"en": "Update to MirrorBridge {version}", "es": "Actualizar a MirrorBridge {version}"},
+    "update_downloading": {"en": "Downloading the update… {percent}%", "es": "Descargando la actualización… {percent}%"},
+    "update_checking": {"en": "Looking for updates…", "es": "Buscando actualizaciones…"},
+    "update_check_now": {"en": "Check for updates now", "es": "Buscar actualizaciones ahora"},
+    "update_auto": {"en": "Check for updates every day", "es": "Buscar actualizaciones cada día"},
+    "update_prereleases": {
+        "en": "Include test versions (pre-releases)",
+        "es": "Incluir versiones de prueba (pre-releases)",
+    },
+    "update_notes": {"en": "What is new (release notes)", "es": "Novedades (notas de la versión)"},
+    "update_version": {"en": "This is version {version}", "es": "Esta es la versión {version}"},
+    "update_title": {"en": "MirrorBridge {version} is out", "es": "Salió MirrorBridge {version}"},
+    "update_ready_hint": {
+        "en": "To install it, open the MirrorBridge menu next to the clock and choose Update.",
+        "es": "Para instalarla, abre el menú de MirrorBridge junto al reloj y elige Actualizar.",
+    },
+    "update_none": {
+        "en": "You have the newest version ({version}).",
+        "es": "Tienes la versión más reciente ({version}).",
+    },
+    "update_check_failed": {
+        "en": "Could not look for updates: {reason}",
+        "es": "No se pudo buscar actualizaciones: {reason}",
+    },
+    "update_failed": {
+        "en": "The update did not install, and this version keeps working: {reason}",
+        "es": "La actualización no se instaló y esta versión sigue funcionando: {reason}",
+    },
+    "update_stops_session": {
+        "en": "Updating stops what is on the TV now. MirrorBridge starts again on its own in a minute.",
+        "es": "Actualizar detiene lo que se ve en la TV ahora. MirrorBridge vuelve a abrirse solo en un minuto.",
+    },
+    "update_now": {"en": "Update now", "es": "Actualizar ahora"},
     # Notifications
     "tray_hint": {
         "en": "MirrorBridge is running here. Click the icon for the menu.",

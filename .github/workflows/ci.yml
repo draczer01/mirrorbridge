@@ -33,7 +33,7 @@ jobs:
           python-version: "3.12"
       - run: pip install -r packaging/requirements-build.txt pytest pytest-asyncio
       - run: pip install --no-deps -e .
-      - run: pytest -q tests/test_ffmpeg.py tests/test_hls_server.py tests/test_patch.py tests/test_vdisplay.py tests/test_migration.py tests/test_session.py tests/test_devices.py tests/test_release.py tests/test_i18n.py tests/test_probe.py tests/test_mirror.py tests/test_mirror_loopback.py tests/test_mirror_gui.py tests/test_mirror_extend.py tests/test_latency_meter.py tests/test_googlecast.py tests/test_capture.py tests/test_ptp.py tests/test_mirror_sound.py tests/test_mirror_sound_loopback.py tests/test_awake.py
+      - run: pytest -q tests/test_ffmpeg.py tests/test_hls_server.py tests/test_patch.py tests/test_vdisplay.py tests/test_migration.py tests/test_session.py tests/test_devices.py tests/test_release.py tests/test_i18n.py tests/test_probe.py tests/test_mirror.py tests/test_mirror_loopback.py tests/test_mirror_gui.py tests/test_mirror_extend.py tests/test_latency_meter.py tests/test_googlecast.py tests/test_capture.py tests/test_ptp.py tests/test_mirror_sound.py tests/test_mirror_sound_loopback.py tests/test_awake.py tests/test_update.py
       # The FFmpeg inside the exe (packaging/ffmpeg_pin.json), checked by size and SHA-256; build_exe.ps1
       # finds it in place and checks that it is 8.1.1 with scale_d3d11 before it builds.
       - name: Fetch the pinned FFmpeg
@@ -47,7 +47,7 @@ jobs:
           Write-Host $out
           if ($out -notmatch "MirrorBridge") { throw "MirrorBridge.exe --version printed nothing" }
       # The release package as release.yml makes it, less FFmpeg's source, so every change proves it still builds.
-      - name: Third-party notices and the release zip
+      - name: Third-party notices, the installer (installed, updated and uninstalled) and the release zip
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
@@ -55,7 +55,9 @@ jobs:
           $ffmpeg = python packaging/third_party_notices.py --ffmpeg-version
           $pinned = (Get-Content -Raw packaging/ffmpeg_pin.json | ConvertFrom-Json).version
           if ($ffmpeg -ne $pinned) { throw "MirrorBridge.exe has FFmpeg '$ffmpeg', not the pinned $pinned" }
-          python packaging/package_release.py --exe dist/MirrorBridge.exe --notices build/notices --out release
+          $setup = .\packaging\build_installer.ps1 | Select-Object -Last 1
+          .\packaging\test_installer.ps1 "$setup"
+          python packaging/package_release.py --exe dist/MirrorBridge.exe --notices build/notices --installer "$setup" --out release
           Get-Content release/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
@@ -64,5 +66,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: MirrorBridge-windows-zip
-          path: release/*.zip
+          path: |
+            release/*.zip
+            release/MirrorBridge-Setup-*.exe
           if-no-files-found: error

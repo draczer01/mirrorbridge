@@ -100,6 +100,12 @@ class Settings:
     extend_tip_shown: bool = False
     old_autostart_checked: bool = False  # the old name's Start with Windows entry was moved over
 
+    # Updates (mirrorbridge.update): checked once a day from GitHub Releases
+    check_updates: bool = True
+    update_prereleases: bool = True  # test versions too (every release is one until it is tried on TVs)
+    update_checked_at: float = 0.0  # time.time() of the last check
+    update_notified: str = ""  # the version the last "update available" notification was for
+
     # Misc
     ffmpeg_path: str = ""
     last_device_id: str = ""
