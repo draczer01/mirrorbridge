@@ -250,6 +250,7 @@ def test_mirror_screens_test_switches_are_next_to_the_latency_meter(controller):
     assert h264.isChecked()
     h264.trigger()
     assert s.cast_codec == "vp8"
+    items = _debug(tray)  # the menu was built again
     _choices(items["Scaling"])["Automatic"].trigger()
     assert s.mirror_scaler == "auto"
     assert items["Show frames on arrival (test)"].isChecked()
