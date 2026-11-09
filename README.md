@@ -217,6 +217,11 @@ are greyed out until it stops. The full window's big button does the same.
   delay are the cast's. On a Google Cast TV the main item mirrors by Google Cast, which these
   two do not change yet: it has the PC's sound (*Include computer sound*) and *Quality*'s frame
   rate, so while one is chosen they are named without "when transmitting".
+* *PC sound on the TV with Mirror screen (experimental)*, also in the window's *Advanced
+  settings*: off until you tick it. Ticked, Mirror screen sends the PC's sound with the
+  picture (heard on a TCL TV; not yet tried on an Apple TV); it needs *Include computer sound*
+  on too, and is greyed out without it. A TV that ends the session as the sound starts gets it
+  once more without sound, and is remembered for that.
 
 **What to send back** after trying it on your TV:
 
@@ -273,7 +278,8 @@ included.
   stays for the whole session and goes when the session ends; if it goes away first (sleep),
   the session ends and says so. *Test this TV* and `mirror --probe` never add it. Each is sent
   with the encoder and bitrate of the *Quality* menu, at the frame rate of *Mirror screen
-  settings*. It has no sound unless you try it (below). If FFmpeg cannot capture or encode at
+  settings*. It has no sound unless *PC sound on the TV* is ticked (experimental,
+  below). If FFmpeg cannot capture or encode at
   the start (the graphics driver refuses ddagrab, the GPU encoder is busy), it goes on with GDI
   capture, then with x264 (CPU), as a cast does.
 * With NVENC and Desktop Duplication the picture stays on the graphics card at the TV's size: it
@@ -311,16 +317,17 @@ included.
   MirrorBridge is the TV's PTP clock, also needs inbound UDP 319 and 320; if the TV does not
   follow that clock within a few seconds (`MIRRORBRIDGE_PTP_LOCK_S`), the session goes on with
   NTP, and says why in the log. Nothing about PTP is saved for the next session.
-* **Trying the sound** (experimental, off unless asked for, not yet heard on a real TV): `mirror
-  --sound` sends the PC's sound with the picture for that run, `mirror --beep` a beep every
-  second instead (the test pattern always beeps), and `MIRRORBRIDGE_MIRROR_SOUND=1` turns it on
-  for every session, Mirror screen's too (`=0` keeps it off, as do *Include computer sound* off
-  and `--no-audio`). `mirror --sound-trial` sends the beep up to 12 ways, 12 seconds each, and
+* **The sound** (experimental, off unless turned on; heard on a TCL TV): *Mirror screen
+  settings* > *PC sound on the TV* turns it on for every session; `mirror --sound` sends the
+  PC's sound with the picture for that run and `mirror --no-sound` leaves it out, `mirror
+  --beep` a beep every second instead (the test pattern always beeps), and
+  `MIRRORBRIDGE_MIRROR_SOUND=1` turns it on for every session too (`=0` keeps it off, as do
+  *Include computer sound* off and `--no-audio`). `mirror --sound-trial` sends the beep up to 12 ways, 12 seconds each, and
   asks after each whether the TV beeped: heard the first way, the TV is remembered as playing
   the sound, and the PC is then muted while it does (not with `--keep-pc-sound`; until then
   both play). `doctor --sound` checks the PC's side alone, and `--log file.log` keeps the whole
   log for a bug report. The TV asks for lost sound packets on the same UDP ports 7880-7889.
-  With `MIRRORBRIDGE_MIRROR_SOUND=1`, a TV that ends the session as the sound starts gets it
+  Turned on in the app or with `MIRRORBRIDGE_MIRROR_SOUND=1`, a TV that ends the session as the sound starts gets it
   once more without sound, and is remembered for that.
 * TVs differ in the order they want the session set up in, whether they need an audio stream
   (silent unless the sound is tried), whether they offer PTP timing, and how they want the
@@ -561,8 +568,9 @@ CI (`.github/workflows/ci.yml`) runs the tests on Linux and builds the exe on Wi
 2. **Audio-only casting to HomePods and AirPlay speakers** (RAOP), which pyatv supports.
 3. **Multi-room**: send the same stream to several Apple TVs.
 4. **Screen mirroring for Apple TVs, and with sound**: *Mirror screen* sends TVs of other
-   brands the screen with about 100 ms of delay (experimental), with the sound only to try so
-   far (`mirror --sound`); Apple TVs and Macs also need the FairPlay setup step. See the
+   brands the screen with about 100 ms of delay (experimental), with the sound as an
+   experimental switch (*PC sound on the TV*, heard on a TCL TV); Apple TVs and Macs also need the FairPlay
+   setup step. See the
    research report in the project files (`research/airplay-mirroring-windows.html`).
 5. **Lower CPU use with Quick Sync and AMF**: keep ddagrab frames on the GPU for them too,
    as Mirror screen does for NVENC.

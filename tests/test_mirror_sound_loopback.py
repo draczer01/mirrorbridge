@@ -325,7 +325,8 @@ async def test_a_tv_that_names_no_port_for_the_sound_gets_the_picture_alone(tv, 
 async def test_without_the_opt_in_the_sound_is_off_and_the_audio_stream_as_it_was(tv, caplog):
     caplog.set_level(logging.INFO, "mirrorbridge")
     run = await _mirror(tv, 1.5, sound=None)
-    assert run.report.sound == "off: not turned on yet (mirror --sound, or MIRRORBRIDGE_MIRROR_SOUND=1)"
+    assert run.report.sound == ("off: not turned on (Mirror screen settings > PC sound on the TV, mirror --sound, "
+                                 "or MIRRORBRIDGE_MIRROR_SOUND=1)")
     assert run.keys == [] and all(audio.datagrams == 0 for audio in tv.audios)
     stream = dict(tv.audios[-1].stream)
     assert len(stream.pop("shk")) == 32 and isinstance(stream.pop("controlPort"), int)
@@ -385,6 +386,23 @@ async def test_the_environment_turns_the_sound_on_without_forcing_it(tv, monkeyp
     assert run.report.sound.startswith("sent: ") and _streamed(tv).packets
     assert run.session._sound_forced is False  # pylint: disable=protected-access
     assert "Sound knobs: MIRRORBRIDGE_MIRROR_SOUND=1" in caplog.text
+
+
+async def test_the_apps_switch_turns_the_sound_on_without_forcing_it(tv):
+    """Mirror screen settings > PC sound on the TV (experimental) is as MIRRORBRIDGE_MIRROR_SOUND=1."""
+    run = await _mirror(tv, 1.5, sound=None, settings=dataclasses.replace(SETTINGS, mirror_sound=True))
+    assert run.report.sound.startswith("sent: ") and _streamed(tv).packets
+    assert run.session._sound_forced is False  # pylint: disable=protected-access
+
+
+@pytest.mark.parametrize("settings", [
+    dataclasses.replace(SETTINGS, mirror_sound=True, capture_audio=False),  # Include computer sound off
+    dataclasses.replace(SETTINGS, mirror_sound=True),  # mirror --no-sound (sound=False)
+])
+async def test_the_apps_switch_gives_way_to_include_computer_sound_and_no_sound(tv, settings):
+    run = await _mirror(tv, 1, sound=None if not settings.capture_audio else False, settings=settings)
+    why = "Include computer sound is off" if not settings.capture_audio else "off for this session"
+    assert run.report.sound == f"off: {why}" and all(audio.datagrams == 0 for audio in tv.audios)
 
 
 # -- the video's own ways ---------------------------------------------------------------------------

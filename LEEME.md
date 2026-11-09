@@ -44,13 +44,15 @@ español, elige una vez **Language / Idioma** > **Español** en su menú.
 6. Todo lo demás también está en el menú:
    * **Qué transmitir**: la pantalla, una sola ventana, o **Extender pantalla** (la TV
      como segunda pantalla), y si se ve el puntero.
-   * **Ajustes de Duplicar pantalla**: **Latencia** y **Cuadros por segundo** al duplicar
-     (ver *Duplicar la pantalla*).
+   * **Ajustes de Duplicar pantalla**: **Latencia** y **Cuadros por segundo** al duplicar,
+     y **Sonido del PC en la TV** (experimental, apagado hasta que lo marques; ver *Duplicar
+     la pantalla*).
    * **Calidad**: resolución, calidad del video y codificador; su retraso es solo para
      transmitir, y sus cuadros por segundo para transmitir y para una TV con Google Cast.
-   * **Incluir el sonido del equipo (solo al transmitir)**: la duplicación todavía no lleva
-     sonido, salvo en una TV con Google Cast; con una elegida se llama **Incluir el sonido del
-     equipo**.
+   * **Incluir el sonido del equipo (solo al transmitir)**: el sonido de una transmisión y de
+     una TV con Google Cast (con una elegida se llama **Incluir el sonido del equipo**); la
+     duplicación AirPlay lleva sonido solo con **Sonido del PC en la TV** marcado, y este
+     también necesita esta opción marcada.
    * **Reproducir un archivo de video** en la TV.
    * **Más opciones**: **Transmitir (modo anterior, 3-7 s de retraso)**, para una TV que no
      muestra la pantalla de la otra forma; iniciar con Windows, crear acceso directo en el
@@ -166,6 +168,12 @@ demás queda en gris hasta que termine. El botón grande de la ventana completa 
   el elemento principal duplica por Google Cast, que estos dos ajustes todavía no cambian: lleva
   el sonido del equipo (**Incluir el sonido del equipo**) y los cuadros por segundo de
   **Calidad**, que con una de esas TVs elegida no dicen "al transmitir".
+* *Sonido del PC en la TV al duplicar la pantalla (experimental)*, también en **Ajustes
+  avanzados** de la ventana: apagado hasta que lo marques. Marcado, la duplicación manda el
+  sonido del equipo con la imagen (se oyó en una TV TCL; todavía no se probó en un Apple TV);
+  necesita también **Incluir el sonido del equipo**, y sin él queda en gris. Si la TV corta la
+  sesión cuando empieza el sonido, se vuelve a armar una vez sin sonido, y se recuerda para
+  esa TV.
 
 **Qué mandar** después de probarlo con tu TV:
 
@@ -222,7 +230,8 @@ Igual que `cast`, `mirror` parte de los ajustes de la app: sin `--monitor`, `--w
   desaparece al terminarla; si desaparece antes (al suspender el equipo), la sesión termina y
   lo dice. *Probar esta TV* y `mirror --probe` nunca la crean. Todo se envía con el
   codificador y la tasa de bits de **Calidad**, a los cuadros por segundo de **Ajustes de
-  Duplicar pantalla**. No lleva sonido, salvo que lo pruebes (más abajo). Si FFmpeg no puede
+  Duplicar pantalla**. No lleva sonido, salvo con **Sonido del PC en la TV** marcado
+  (experimental, más abajo). Si FFmpeg no puede
   capturar o codificar al empezar (el controlador de video rechaza ddagrab, el codificador de
   la GPU está ocupado), sigue con la captura GDI y luego con x264 (CPU), igual que al
   transmitir.
@@ -262,18 +271,19 @@ Igual que `cast`, `mirror` parte de los ajustes de la app: sin `--monitor`, `--w
   que MirrorBridge es el reloj PTP de la TV, necesita además UDP 319 y 320 de entrada; si la
   TV no sigue ese reloj en unos segundos (`MIRRORBRIDGE_PTP_LOCK_S`), la sesión sigue con NTP
   y el registro dice por qué. Nada de PTP se guarda para la sesión siguiente.
-* **Probar el sonido** (experimental, apagado si no lo pides; todavía no se oyó en una TV
-  real): `mirror --sound` manda el sonido del equipo con la imagen en esa sesión, `mirror
-  --beep` un pitido cada segundo en su lugar (la imagen de prueba siempre pita), y
-  `MIRRORBRIDGE_MIRROR_SOUND=1` lo enciende en todas las sesiones, también en *Duplicar
-  pantalla* (`=0` lo deja apagado, igual que **Incluir el sonido del equipo** desmarcado o
+* **El sonido** (experimental, apagado hasta que lo actives; se oyó en una TV TCL):
+  **Ajustes de Duplicar pantalla** > **Sonido del PC en la TV** lo enciende en todas las
+  sesiones; `mirror --sound` manda el sonido del equipo con la imagen en esa sesión y `mirror
+  --no-sound` lo deja fuera, `mirror --beep` un pitido cada segundo en su lugar (la imagen de
+  prueba siempre pita), y `MIRRORBRIDGE_MIRROR_SOUND=1` también lo enciende en todas las
+  sesiones (`=0` lo deja apagado, igual que **Incluir el sonido del equipo** desmarcado o
   `--no-audio`). `mirror --sound-trial` manda el pitido de hasta 12 formas, 12 segundos cada
   una, y después de cada una pregunta si la TV pitó: si se oyó con la primera, se recuerda que
   la TV reproduce el sonido, y desde entonces el equipo se silencia mientras lo hace (con
   `--keep-pc-sound`, no; hasta entonces suenan los dos). `doctor --sound` revisa solo la parte
   del equipo, y `--log archivo.log` guarda el registro completo para avisar de un problema. La
-  TV pide los paquetes de sonido perdidos por los mismos puertos UDP 7880-7889. Con
-  `MIRRORBRIDGE_MIRROR_SOUND=1`, si la TV corta la sesión cuando empieza el sonido, se vuelve a
+  TV pide los paquetes de sonido perdidos por los mismos puertos UDP 7880-7889. Encendido en
+  la app o con `MIRRORBRIDGE_MIRROR_SOUND=1`, si la TV corta la sesión cuando empieza el sonido, se vuelve a
   armar una vez sin sonido, y se recuerda para esa TV.
 * `mirror --probe` prueba las formas en que las TVs difieren, muestra qué contestó la TV y
   guarda lo que funcionó en `%APPDATA%\MirrorBridge\mirroring.json`, que *Duplicar pantalla* y

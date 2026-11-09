@@ -311,8 +311,12 @@ async def cmd_mirror(args) -> int:
             print(_cli_words(line, device))
         return 0 if result.worked else 1
 
-    # The sound, for this run (off unless asked for, for now): the test switches of
+    # The sound, for this run (experimental: as Mirror screen settings > PC sound on the TV says,
+    # unless --sound or --no-sound): the test switches of
     # MIRRORBRIDGE_MIRROR_SOUND_*, with --beep and --sound-delay over them.
+    if args.no_sound and (args.beep or args.sound_trial):
+        print("--no-sound cannot go with --beep or --sound-trial, which send sound.")
+        return 2
     knobs = mirror_sound.SoundKnobs.from_env()
     if args.beep or args.sound_trial:
         knobs = knobs.replace(tone=True)
@@ -324,7 +328,8 @@ async def cmd_mirror(args) -> int:
     source = mirror.TEST_PATTERN if args.test_pattern else mirror.DESKTOP
     session = mirror.MirrorSession(target, settings, _printer(device), source=source, seconds=args.seconds,
                                    timing=args.timing, fps=fps if fps > 0 else None,
-                                   sound=True if args.sound or args.beep else None, sound_knobs=knobs,
+                                   sound=True if args.sound or args.beep else False if args.no_sound else None,
+                                   sound_knobs=knobs,
                                    on_notice=_noticer(device))
     print("Press Ctrl+C to stop mirroring.")
     try:
@@ -762,10 +767,13 @@ def build_parser() -> argparse.ArgumentParser:
                            help="how the TV gets the time, for this run only (default: MIRRORBRIDGE_TIMING, else "
                                 "NTP). ptp is an experiment: MirrorBridge as the TV's PTP clock, which needs inbound "
                                 "UDP 319-320; NTP if the TV does not follow it")
-    # The sound (experimental, off unless asked for), for this run only.
-    mirroring.add_argument("--sound", action="store_true",
-                           help="send this PC's sound with the picture (experimental; MIRRORBRIDGE_MIRROR_SOUND=1 "
-                                "turns it on for every session)")
+    # The sound (experimental, off unless turned on in the app or asked for), for this run only.
+    said = mirroring.add_mutually_exclusive_group()
+    said.add_argument("--sound", action="store_true",
+                      help="send this PC's sound with the picture (experimental; the app's Mirror screen settings > "
+                           "PC sound on the TV, or MIRRORBRIDGE_MIRROR_SOUND=1, turn it on for every session)")
+    said.add_argument("--no-sound", action="store_true",
+                      help="no sound for this run, even when the app's PC sound on the TV is on")
     mirroring.add_argument("--beep", action="store_true",
                            help="send a beep every second instead of this PC's sound (implies --sound)")
     mirroring.add_argument("--sound-delay", type=_sound_delay, metavar="MS",

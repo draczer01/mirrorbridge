@@ -44,7 +44,7 @@ CHOICES: dict[str, tuple] = {
     "mirror_keyframes": (0, 10, 2),  # in the Debug menu's order (ffmpeg.MIRROR_KEYFRAME_CHOICES)
     "mirror_scaler": ("auto", "cpu", "gfx"),  # in the Debug menu's order (gui.tray.SCALERS)
 }
-CHECKED = set(CHOICES) | {"mirror_encoder_extra"}
+CHECKED = set(CHOICES) | {"mirror_encoder_extra", "mirror_sound"}
 
 
 @dataclass
@@ -82,6 +82,9 @@ class Settings:
     # Mirror screen settings (framerate above is for casts only)
     mirror_latency: str = "normal"  # low | normal | smooth: how long the TV waits to show a frame
     mirror_framerate: int = 0  # 0 = automatic (60 when this PC can), 30 or 60
+    # The PC's sound with the picture (experimental, off until turned on: Mirror screen settings >
+    # PC sound on the TV); Include computer sound off still keeps it off
+    mirror_sound: bool = False
 
     # Mirror screen's test switches (More options > Debug), for the sessions after they are set;
     # Test this TV and mirror --probe leave them out
