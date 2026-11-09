@@ -202,7 +202,7 @@ class TrayMenu(QObject):
             first = steps[0] == routes.AIRPLAY_MIRROR and not screen.airplay.is_paired
             return (tr("ui_hint_mirror_first") + " " if first else "") + tr("ui_hint_mirror")
         dev = screen.airplay
-        hint = tr("ui_hint_apple") if c.is_apple(dev) else tr("ui_hint_cast")
+        hint = c.apple_hint() if c.is_apple(dev) else tr("ui_hint_cast")
         return (tr("ui_hint_cast_first") + " " if dev.needs_pairing or dev.needs_password else "") + hint
 
     def _device_menu(self, sub: QMenu) -> None:
@@ -326,7 +326,7 @@ class TrayMenu(QObject):
         """Mirror screen's test switches, for the sessions after they are set (the mirror command
         too; Test this TV and mirror --probe leave them out): how long the TV waits to show a
         frame, how often a keyframe comes, where the picture is scaled, and frames shown as they
-        come instead of at their time. Each shows what a session would use, whatever a
+        come instead of at their time; and mirroring to Apple TVs with FairPlay. Each shows what a session would use, whatever a
         hand-edited settings.json holds."""
         s = self.c.settings
         debug.addSeparator()
@@ -340,6 +340,8 @@ class TrayMenu(QObject):
                     s.mirror_scaler if s.mirror_scaler in SCALERS else "auto", "mirror_scaler")
         self._action(debug, tr("debug_on_arrival"), lambda on: self.c.update_settings(mirror_on_arrival=on),
                      checkable=True, checked=on_arrival(s))
+        self._action(debug, tr("debug_apple_tv"), lambda on: self.c.update_settings(mirror_apple_tv=on),
+                     checkable=True, checked=s.mirror_apple_tv)
 
     # -- actions -----------------------------------------------------------
 

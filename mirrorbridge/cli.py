@@ -45,6 +45,8 @@ SOUND_TRIAL = [
 SOUND_TRIAL_SECONDS = 12  # each try, unless --seconds says otherwise
 SOUND_CHECK_SECONDS = 10  # doctor --sound records this long
 SOUND_RATE_TOLERANCE = 0.01  # and the capture must give 44100 frames a second within this
+APPLE_TV_HELP = ("mirror to Apple TVs and Macs with FairPlay, for this run (experimental, not yet seen working on "
+                 "one; the app's More options > Debug > Mirror to Apple TVs, or MIRRORBRIDGE_APPLE_TV=1, for every run)")
 
 
 _QT_APP = None
@@ -87,6 +89,7 @@ def _cli_words(message: str, device: Device) -> str:
         "Quality > Encoder > x264 (CPU)": "--encoder libx264",
         "What to cast > Extended screen size > 720p": "--extend-mode 720p",
         "More options > Test this TV": f'probe -d "{device.name}"',
+        "More options > Debug > Mirror to Apple TVs": "--apple-tv",
         "Show my screen should work": f'mirror -d "{device.name}" should work',
         "Show my screen did not work": f'mirror -d "{device.name}" did not work',
         "Choose Show my screen again": f'Run mirror -d "{device.name}" again',
@@ -239,6 +242,7 @@ def _file_cast(device: Device) -> airplay_patch.CastContext:
 async def cmd_probe(args) -> int:
     args.device = args.device or args.name
     settings = Settings.load()
+    mirror.allow_apple_tv(settings.mirror_apple_tv or args.apple_tv)
     manager = DeviceManager(asyncio.get_running_loop())
     device = await _choose(manager, args)
     if not device.can_cast_video:
@@ -287,6 +291,7 @@ def _noticer(device: Device):
 async def cmd_mirror(args) -> int:
     """Screen mirroring (experimental), or with --probe, how the TV takes it."""
     settings = Settings.load()
+    mirror.allow_apple_tv(settings.mirror_apple_tv or args.apple_tv)
     _what_to_send(settings, args)
     if args.no_audio:
         settings.capture_audio = False
@@ -752,11 +757,13 @@ def build_parser() -> argparse.ArgumentParser:
                       help="how long each test watches the TV once it took the video (default "
                            f"{probe.DEFAULT_SECONDS}; the screen mirroring test, {probe.MIRROR_SECONDS} at most)")
     test.add_argument("--url", default=probe.PUBLIC_STREAM, help="the public HLS video of the first two tests")
+    test.add_argument("--apple-tv", action="store_true", help=APPLE_TV_HELP)
 
     mirroring = common(sub.add_parser("mirror", help="mirror the screen with a fraction of a second of delay "
                                                      "(experimental; AirPlay 2 TVs of other brands)"))
     mirroring.add_argument("-d", "--device", help="name, IP or id")
     what_to_send(mirroring, "mirror")
+    mirroring.add_argument("--apple-tv", action="store_true", help=APPLE_TV_HELP)
     mirroring.add_argument("--probe", action="store_true",
                            help="find out how the TV takes screen mirroring and remember what works")
     mirroring.add_argument("--no-video", action="store_true", help="with --probe: send no test pattern")

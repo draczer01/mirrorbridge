@@ -14,6 +14,22 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   greyed out while *Include computer sound* is off. Before, it could only be turned on with
   `MIRRORBRIDGE_MIRROR_SOUND=1` or `mirror --sound`. `mirror --no-sound` leaves it out for one
   run. The texts that said Mirror screen has no sound are updated.
+- The PC's sound to Apple TVs and Macs in Mirror screen (with *Mirror to Apple TVs* on, so
+  still experimental): sealed with ChaCha20-Poly1305 and the stream's `shk`, as doubletake seals
+  it on a pair-verified connection, in the `streamConnections` layout for receivers with feature
+  bit 59 (asked again with `controlPort` if refused). Test switches: `MIRRORBRIDGE_FP_AUDIO=cbc`
+  (FairPlay's AES-128-CBC key, ekey/eiv in the SETUP) and `MIRRORBRIDGE_FP_AUDIO_LAYOUT`.
+- Screen mirroring to Apple TVs and Macs with FairPlay, **experimental and off by default**
+  (not yet tried on a real Apple TV): turn it on with *More options > Debug > Mirror to Apple
+  TVs*, `mirror --apple-tv` / `probe --apple-tv`, or `MIRRORBRIDGE_APPLE_TV=1`. Receivers that
+  advertise FairPlay (feature bit 14) then get the FairPlay SAP handshake (`POST /fp-setup`, m1
+  to m4) right after pair-verify, and the video stream's `shk` is FairPlay's key mixed with the
+  pair-verify secret, as doubletake sends it. The handshake is a Python port of doubletake's Go
+  code (`mirrorbridge/fairplay`, LGPL-3.0, named in THIRD-PARTY-NOTICES.txt), checked against
+  doubletake's own test vectors and pyatv's receiver. An Apple TV that turns the saved pairing
+  down for mirroring gets one more try with transient pairing; one whose handshake fails is cast
+  to first from then on. `MIRRORBRIDGE_FP_ROOT=1` also sends the
+  ekey and eiv in the SETUP.
 - *Mirror screen settings* > *Sharp slides (experimental)* (also in the window's advanced
   settings, and `mirror --sharp`), off by default, for slides and text that looked soft on the
   TV: up to 2560x1440 when the TV's screen is bigger than 1080p (a 1440p monitor then goes
@@ -252,6 +268,17 @@ A pre-release: not yet tried on a real TV.
 
 ### Added
 
+- Screen mirroring to Apple TVs and Macs with FairPlay, **experimental and off by default**
+  (not yet tried on a real Apple TV): turn it on with *More options > Debug > Mirror to Apple
+  TVs*, `mirror --apple-tv` / `probe --apple-tv`, or `MIRRORBRIDGE_APPLE_TV=1`. Receivers that
+  advertise FairPlay (feature bit 14) then get the FairPlay SAP handshake (`POST /fp-setup`, m1
+  to m4) right after pair-verify, and the video stream's `shk` is FairPlay's key mixed with the
+  pair-verify secret, as doubletake sends it. The handshake is a Python port of doubletake's Go
+  code (`mirrorbridge/fairplay`, LGPL-3.0, named in THIRD-PARTY-NOTICES.txt), checked against
+  doubletake's own test vectors and pyatv's receiver. An Apple TV that turns the saved pairing
+  down for mirroring gets one more try with transient pairing; one whose handshake fails is cast
+  to first from then on. No sound to an Apple TV yet. `MIRRORBRIDGE_FP_ROOT=1` also sends the
+  ekey and eiv in the SETUP.
 - *Language / Idioma* in the tray menu and at the bottom of the window: English or Español. The
   menu, the window, and every dialog and notification after that switch at once, and the choice is
   kept for the next start. Another language needs only its strings and one entry in
@@ -294,6 +321,17 @@ The first version, as AirCast.
 
 ### Added
 
+- Screen mirroring to Apple TVs and Macs with FairPlay, **experimental and off by default**
+  (not yet tried on a real Apple TV): turn it on with *More options > Debug > Mirror to Apple
+  TVs*, `mirror --apple-tv` / `probe --apple-tv`, or `MIRRORBRIDGE_APPLE_TV=1`. Receivers that
+  advertise FairPlay (feature bit 14) then get the FairPlay SAP handshake (`POST /fp-setup`, m1
+  to m4) right after pair-verify, and the video stream's `shk` is FairPlay's key mixed with the
+  pair-verify secret, as doubletake sends it. The handshake is a Python port of doubletake's Go
+  code (`mirrorbridge/fairplay`, LGPL-3.0, named in THIRD-PARTY-NOTICES.txt), checked against
+  doubletake's own test vectors and pyatv's receiver. An Apple TV that turns the saved pairing
+  down for mirroring gets one more try with transient pairing; one whose handshake fails is cast
+  to first from then on. No sound to an Apple TV yet. `MIRRORBRIDGE_FP_ROOT=1` also sends the
+  ekey and eiv in the SETUP.
 - A tray app and a command line for Windows 10 and 11 that find AirPlay receivers, pair with the
   PIN the TV shows, and cast a display or a single window, with system audio, as a live HLS
   stream encoded on the GPU (NVENC, Quick Sync, AMF, Media Foundation, with x264 as fallback).

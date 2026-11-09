@@ -259,7 +259,7 @@ class _Probe:
 
     async def run(self) -> ProbeResult:
         result = self.result
-        if result.fairplay:
+        if self.target.fairplay_off:
             result.error = message_of(needs_fairplay(self.target.name))
             return result
         try:

@@ -7,13 +7,21 @@ NTP requests to the sender's timing port, RECORD, /feedback, TEARDOWN, and a vid
 whose frames it decrypts and turns back into an H.264 stream FFmpeg can decode. Its TvProfile
 also makes it slow, forgetful or stubborn in the ways real TVs can be.
 
+An Apple TV (TvProfile.fairplay) answers POST /fp-setup as pyatv's receiver does (one of the
+four replies UxPlay's playfair gives, then m3's last 20 bytes back), checks m3 with
+mirrorbridge.fairplay the way a receiver can, and takes no session SETUP on a connection without
+the handshake. An ekey in the SETUP is unwrapped, so that a test can check the video's shk.
+
 Under PTP timing it answers SETUP as Apple's SDK for receivers does (a timingPeerInfo without a
 ClockID, and no NTP), takes SETPEERS with the SDK's answers, and then starts a PTP clock of the
 kind TvProfile.ptp names (fake_ptp.py) on the ports ptp_ports() gives.
 
 A type-96 (screen audio) stream gets two UDP ports of its own (AudioReceiver): the data port
 opens each packet as shairport-sync does, with the SETUP's shk, decodes it (ALAC verbatim frames
-or PCM), and asks for lost ones on the control port, where the syncs come in.
+or PCM), and asks for lost ones on the control port, where the syncs come in. A fake Apple TV
+also opens packets sealed with FairPlay's AES-CBC (no shk: the key from the session's ekey,
+mixed with the pair-verify secret, and its eiv), as UxPlay does, and takes the stream in the
+streamConnections layout (TvProfile.audio_layouts), answering its ports in the same layout.
 
 It reads the wire on its own (struct offsets, HKDF with pyatv's hkdf_expand, cryptography's
 ChaCha20-Poly1305), not with mirrorbridge.mirror.packets or audiopackets, so that the two sides
@@ -35,6 +43,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from pyatv.auth.hap_channel import AbstractHAPChannel
 from pyatv.auth.hap_session import HAPSession
@@ -46,6 +55,7 @@ from pyatv.support.chacha20 import Chacha20Cipher8byteNonce
 from pyatv.support.http import BasicHttpServer, HttpRequest, HttpResponse, http_server, parse_response
 
 from fake_ptp import FakePtp
+from mirrorbridge.fairplay import core as fairplay
 from mirrorbridge.mirror.control import Target
 
 _LOGGER = logging.getLogger(__name__)
@@ -95,6 +105,10 @@ class TvProfile:
     setpeers_status: int = 200  # what a SETPEERS the SDK would take is answered with (400: SetPeers failed)
     ptp_video_status: Optional[int] = None  # the video stream's SETUP in a PTP session is answered with this
     ptp_info: Optional[dict] = None  # GET /info's PTPInfo
+    fairplay: bool = False  # an Apple TV: no session SETUP on a connection without POST /fp-setup
+    fp_status: int = 200  # what POST /fp-setup is answered with
+    fp_refuse_saved: bool = False  # POST /fp-setup after pair-verify with a saved pairing: 403 (transient: 200)
+
     screen_formats: int = 0x1C0000  # GET /info's supportedFormats.screenStream
     audio_ports: bool = True  # name the type-96 stream's dataPort and controlPort in the SETUP answer
     audio_control_port: bool = True  # (the controlPort alone)
@@ -105,10 +119,15 @@ class TvProfile:
     record_headers: dict = field(default_factory=dict)  # more headers in RECORD's answer, e.g. Audio-Latency
     feedback_body: Optional[dict] = None  # POST /feedback's answer (None: empty, as TCL's TVs answer)
     answer_volume: bool = True  # answer SET_PARAMETER (False: never)
+    # The type-96 layouts taken ("controlPort", "streamConnections"); another one is refused with 400.
+    audio_layouts: tuple = ("controlPort", "streamConnections")
 
 
 TCL = TvProfile()
 TCL_CONTROL_FIRST = TvProfile(refuse=())  # a TCL that takes the session's SETUP alone first, as Apple's do
+# An Apple TV 4K (tvOS 17): FairPlay (bit 14), and it takes the control-first SETUP.
+APPLE_TV = TvProfile(name="Apple TV", model="AppleTV11,1", features=0x4A7FDFD5 | (0xBC157FDE << 32),
+                     srcvers="775.3.1", refuse=(), audio_first=False, fairplay=True)
 
 
 @dataclass
@@ -237,7 +256,7 @@ class AudioReceiver:
     """The TV's end of one type-96 stream: a data port and a control port on 127.0.0.1."""
 
     def __init__(self, profile: TvProfile, stream: dict, session: Optional[dict] = None,
-                 on_first: Optional[Callable[[], None]] = None) -> None:
+                 on_first: Optional[Callable[[], None]] = None, aes: Optional[tuple[bytes, bytes]] = None) -> None:
         self.profile = profile
         self.received = AudioReceived(stream, dict(session or {}))
         self._on_first = on_first
@@ -246,6 +265,7 @@ class AudioReceiver:
         self._transports: list = []
         key = stream.get("shk")
         self._aead = ChaCha20Poly1305(key) if isinstance(key, bytes) and len(key) == 32 else None
+        self._aes = aes if self._aead is None else None  # (key, iv) from the session's ekey and eiv
 
     async def open(self, host: str = "127.0.0.1") -> AudioReceived:
         loop = asyncio.get_running_loop()
@@ -271,16 +291,22 @@ class AudioReceiver:
             return
         seq, rtp, ssrc = struct.unpack_from(">HII", data, 2)
         index = seq if self._highest is None else self._highest + ((seq - self._highest + 32768) & 0xFFFF) - 32768
-        if self._aead is None:
+        if self._aes is not None:  # as UxPlay: the whole blocks from the eiv each time, the rest in the clear
+            body = data[12:]
+            whole = len(body) // 16 * 16
+            decryptor = Cipher(algorithms.AES(self._aes[0]), modes.CBC(self._aes[1])).decryptor()
+            plain = decryptor.update(body[:whole]) + decryptor.finalize() + body[whole:]
+        elif self._aead is None:
             r.errors.append("no shk in the stream's SETUP to open packets with")
             return
-        try:  # as shairport-sync: the nonce is 4 zero bytes and the last 8, the additional data [4:12]
-            plain = self._aead.decrypt(b"\0" * 4 + data[-8:], data[12:-8], data[4:12])
-        except Exception:  # pylint: disable=broad-except
-            r.errors.append(f"packet {index} does not open")
-            return
-        if data[-8:] != struct.pack("<Q", index):
-            r.errors.append(f"packet {index} has the nonce {data[-8:].hex()}")
+        else:
+            try:  # as shairport-sync: the nonce is 4 zero bytes and the last 8, the additional data [4:12]
+                plain = self._aead.decrypt(b"\0" * 4 + data[-8:], data[12:-8], data[4:12])
+            except Exception:  # pylint: disable=broad-except
+                r.errors.append(f"packet {index} does not open")
+                return
+            if data[-8:] != struct.pack("<Q", index):
+                r.errors.append(f"packet {index} has the nonce {data[-8:].hex()}")
         try:
             pcm = parse_alac(plain) if r.stream.get("ct") == 2 else plain
         except ValueError as ex:
@@ -447,6 +473,10 @@ class _Handler(AirPlayServerAuth):
         self.tasks: list[asyncio.Task] = []
         self.servers: list[asyncio.AbstractServer] = []
         self.ntp: Optional[_NtpClient] = None
+        self.fp_m3: Optional[bytes] = None  # this connection's FairPlay m3, once checked
+        self.fp_sap = b""  # the receiver SAP its m2 carried
+        self.fp_mode = -1  # and the mode it chose
+        self.transient = False  # paired the transient way (X-Apple-HKP 4), not pair-verified
         self.receivers: list[AudioReceiver] = []
         self.add_route("SETUP", ".*", self.handle_setup)
         self.add_route("RECORD", ".*", self.handle_record)
@@ -463,6 +493,36 @@ class _Handler(AirPlayServerAuth):
         if self.tv.profile.verify_delay and read_tlv(body).get(TlvValue.SeqNo) == b"\x01":
             return asyncio.ensure_future(self._late(self.tv.profile.verify_delay, super().handle_pair_verify, request))
         return super().handle_pair_verify(request)
+
+    def handle_fp_setup(self, request: HttpRequest):  # pylint: disable=arguments-differ
+        body = request.body if isinstance(request.body, bytes) else str(request.body).encode()
+        p = self.tv.profile
+        self.tv.fp_requests.append((request.headers.get("X-Apple-ET", ""), body))
+        if p.fp_status != 200:
+            return self._answer(request, p.fp_status)
+        if p.fp_refuse_saved and not self.transient:
+            return self._answer(request, 403)
+        answer = super().handle_fp_setup(request)
+        reply = answer.body
+        if len(body) == 16:
+            self.fp_mode = reply[13]
+            self.fp_sap = fairplay._decrypt_body(reply[13], reply[14:142])  # pylint: disable=protected-access
+        elif len(body) == 164:
+            # What a receiver can check: m3 carries a SAP in m2's mode, and ends with the exchange of
+            # the two SAPs.
+            if body[12] != self.fp_mode or body[144:] != fairplay.exchange(fairplay.decrypt_message(body), self.fp_sap):
+                self.tv.fp_errors.append(f"m3 {body.hex()}")
+                return self._answer(request, 400)
+            self.fp_m3 = body
+        self.tv.requests.append((request.method, request.path, 200))
+        return HttpResponse("RTSP", "1.0", 200, "OK", {"CSeq": request.headers.get("CSeq", "0"),
+                                                       "Content-Type": "application/octet-stream"}, reply)
+
+    def handle_pair_setup(self, request: HttpRequest):
+        if request.headers.get("X-Apple-HKP") == "4" and not self.transient:
+            self.transient = True
+            self.tv.transient_pairings += 1
+        return super().handle_pair_setup(request)
 
     def handle_info(self, request: HttpRequest):
         if self.tv.profile.info_delay:
@@ -535,6 +595,11 @@ class _Handler(AirPlayServerAuth):
         types = [stream.get("type") for stream in streams]
         if "sessionUUID" not in body and not self.mirror:
             return self._answer(request, 455)
+        if p.fairplay and self.fp_m3 is None:
+            return self._answer(request, 400)
+        if "ekey" in body:
+            self.tv.fp_raw_keys.append(fairplay.unwrap_key(self.fp_sap, self.fp_m3, body["ekey"]))
+            self.tv.fp_shared = self.shared_key
         if p.audio_first and 110 in types and not self.audio and 96 not in types[:types.index(110)]:
             return self._answer(request, 400)
         if p.ptp_video_status and 110 in types and (body if "sessionUUID" in body else self.mirror).get(
@@ -575,9 +640,15 @@ class _Handler(AirPlayServerAuth):
         answered = []
         for stream in streams:
             if stream.get("type") == 96:
+                layout = "streamConnections" if "streamConnections" in stream else "controlPort"
+                if layout not in p.audio_layouts:
+                    return self._answer(request, 400)
                 self.audio = True
+                aes = None
+                if self.tv.fp_raw_keys and "eiv" in self.mirror:
+                    aes = (fairplay.stream_key(self.tv.fp_raw_keys[-1], self.shared_key), self.mirror["eiv"])
                 receiver = AudioReceiver(p, stream, {k: v for k, v in self.mirror.items() if k != "streams"},
-                                         self._audio_started)
+                                         self._audio_started, aes)
                 audio = await receiver.open()
                 self.receivers.append(receiver)
                 self.tv.audios.append(audio)
@@ -588,6 +659,12 @@ class _Handler(AirPlayServerAuth):
                     del answer["controlPort"]
                 if not p.audio_answer_type:
                     del answer["type"]
+                if layout == "streamConnections" and "dataPort" in answer:
+                    connections = {"streamConnectionTypeRTP": {"streamConnectionKeyPort": answer.pop("dataPort")}}
+                    if "controlPort" in answer:
+                        connections["streamConnectionTypeRTCP"] = {
+                            "streamConnectionKeyPort": answer.pop("controlPort")}
+                    answer["streamConnections"] = connections
                 answered.append(answer)
             elif stream.get("type") == 110:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -841,6 +918,11 @@ class FakeMirrorTV:
         self.peers: list = []  # what the last SETPEERS it took named
         self.ptp: Optional[FakePtp] = None  # its PTP clock, once ptp_ports() opened it
         self.event_ports: list[int] = []  # the port of each event channel the sender opened
+        self.fp_requests: list[tuple[str, bytes]] = []  # (X-Apple-ET, body) of each POST /fp-setup
+        self.fp_errors: list[str] = []
+        self.transient_pairings = 0
+        self.fp_raw_keys: list[bytes] = []  # the key in each SETUP's ekey
+        self.fp_shared: Optional[bytes] = None  # the pair-verify secret of the connection that sent it
         self.audios: list[AudioReceived] = []  # each type-96 stream set up, with what came over it
         self.parameters: list[tuple[bytes, int]] = []  # each SET_PARAMETER's body, and when it came
 

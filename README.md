@@ -42,7 +42,7 @@ Spanish again, choose **Language / Idioma** > **Español** in its menu once.
 | Extend screen: the TV as a second monitor | Experimental, not yet tested with the real driver; needs a free driver from Parsec, installed the first time |
 | Hardware encoding: NVIDIA NVENC, Intel Quick Sync, AMD AMF, Media Foundation, x264 fallback | Auto-detected |
 | Play a local video file on the TV | Works |
-| Real-time screen mirroring like a Mac or iPhone (under 0.5 s delay) | Experimental, for AirPlay 2 TVs of other brands: *Show my screen on (your TV)* in the tray menu, or `mirror` (see [Screen mirroring](#screen-mirroring-experimental)); not possible with Apple TV yet |
+| Real-time screen mirroring like a Mac or iPhone (under 0.5 s delay) | Experimental, for AirPlay 2 TVs of other brands: *Show my screen on (your TV)* in the tray menu, or `mirror` (see [Screen mirroring](#screen-mirroring-experimental)); Apple TV: experimental, off by default ([how to turn it on](#apple-tv-mirroring-experimental-off-by-default)) |
 
 ### Why there is a delay, and why this is not "true" mirroring
 
@@ -50,8 +50,11 @@ When a Mac or iPhone mirrors its screen, it uses a private AirPlay mirroring str
 is protected with Apple's FairPlay encryption. Projects like UxPlay and RPiPlay only
 implement the **receiving** side. Commercial Windows apps such as AirParrot have licensed
 or reverse-engineered the sender. In 2026 a young open-source sender, doubletake (Go,
-Linux only), reports mirroring working with Apple TV; porting that approach to Windows is
-on the roadmap, but MirrorBridge does not do it today.
+Linux only), reports mirroring working with Apple TV. MirrorBridge now carries a Python port
+of doubletake's FairPlay handshake (`mirrorbridge/fairplay`, LGPL-3.0 like doubletake). It is
+**experimental and off by default**, because it has not been tried on a real Apple TV yet: turn
+it on (see [Apple TV mirroring](#apple-tv-mirroring-experimental-off-by-default)) and *Show my
+screen* tries real mirroring on Apple TVs too, and casts as below if that fails.
 
 MirrorBridge uses the part of AirPlay that is open: **AirPlay video**, the same feature the
 YouTube app uses to send a video to the TV. MirrorBridge turns your screen into a live HLS
@@ -199,8 +202,8 @@ tried on a real TV.
    why if it fails. **Stop mirroring**, in the same place, or **Quit** ends it.
 
 The item's tooltip says what it will do. A receiver that does not offer screen mirroring gets
-the cast, and so do Apple TVs and Macs, whose screen mirroring needs FairPlay (coming in a later
-version). If screen mirroring fails before the picture reaches the TV, the next way is tried
+the cast, and so do Apple TVs and Macs, whose screen mirroring needs FairPlay (experimental and
+off by default: see [Apple TV mirroring](#apple-tv-mirroring-experimental-off-by-default)). If screen mirroring fails before the picture reaches the TV, the next way is tried
 without asking. The cast is also under *More options > Transmit (old way, 3-7 s delay)*, with
 sound. One thing runs at a time: while a cast, Mirror screen or *Test this TV* runs, the others
 are greyed out until it stops. The full window's big button does the same.
@@ -276,8 +279,8 @@ included.
 
 ### What it needs, and what it does
 
-* Pair the TV first (`pair`), as for a cast. Apple TVs and Macs need FairPlay for screen
-  mirroring, which MirrorBridge does not have, so they are turned down at once.
+* Pair the TV first (`pair`), as for a cast. Apple TVs and Macs are cast to unless FairPlay
+  mirroring is turned on ([Apple TV mirroring](#apple-tv-mirroring-experimental-off-by-default)).
 * It mirrors what *What to cast* names: a display or a window at the TV's screen size, up to
   1080p or the *Quality > Resolution* setting, or with *Extend screen* the virtual screen. That
   is added as for a cast (the tray says *Creating the virtual screen…*, and a missing driver
@@ -357,6 +360,44 @@ included.
   when it falls short, except with Windows Graphics Capture, which gives frames only as the
   screen changes), what was waiting to go to the TV, how many frames were dropped or sent
   late, and how often the TV asked for the time.
+
+### Apple TV mirroring (experimental, off by default)
+
+Apple TVs and Macs (AirPlay feature bit 14) only take screen mirroring after Apple's FairPlay
+handshake. MirrorBridge has it, ported from doubletake and checked against its test vectors,
+but it has not been seen working on a real Apple TV yet, so it is off. Turn it on with any of:
+
+* the app: *More options > Debug (for testing) > Mirror to Apple TVs (FairPlay, experimental)*
+  (saved, as `mirror_apple_tv` in settings.json);
+* the command line, for one run: `mirror --apple-tv` or `probe --apple-tv`;
+* the environment: `MIRRORBRIDGE_APPLE_TV=1`, for every run.
+
+Then *Show my screen* and *Test this TV* treat an Apple TV like any other TV that mirrors: after
+pair-verify comes the FairPlay handshake (`POST /fp-setup`, m1 to m4), and the video key is
+FairPlay's key mixed with the pair-verify secret. An Apple TV that turns the saved pairing down
+for mirroring gets one more try with transient pairing (no PIN, where the Apple TV lets everyone
+on the network AirPlay to it). If it fails, the main button casts to that Apple TV from then on.
+The PC's sound goes too, whenever it would to another TV (*Include computer sound*, and the
+sound switch for Mirror screen). It is sealed as doubletake, the one open-source sender seen
+mirroring to real Apple TVs, seals it on a pair-verified connection: ChaCha20-Poly1305 with a
+random key in the audio stream's `shk`, the stream described in the `streamConnections` layout
+when the Apple TV advertises feature bit 59 (and asked again with `controlPort` if it says no).
+If the Apple TV closes the session when the sound starts, MirrorBridge goes on without sound
+and remembers it for that TV, as for any other. Test switches for the first tries:
+`MIRRORBRIDGE_FP_AUDIO=cbc` seals the sound with FairPlay's AES-128-CBC key instead (with
+ekey/eiv in the SETUP, as older senders do), and `MIRRORBRIDGE_FP_AUDIO_LAYOUT=controlPort` or
+`=streamConnections` picks the layout. `MIRRORBRIDGE_FP_ROOT=1` also puts the FairPlay key
+(ekey, eiv) in the SETUP, a test switch for receivers that want it there. Please send
+`mirrorbridge.log` after trying it.
+
+Known limitations for now:
+
+* **Sound not yet heard on a real Apple TV**: it follows doubletake's way of sending it, and
+  the fake Apple TV in the tests opens and decodes it, but no Apple TV has played it yet.
+* **No AirPlay password**: an Apple TV that asks for a password (*Require Password* in its
+  AirPlay settings, answered with 470) is not supported. MirrorBridge tries transient pairing
+  once and then casts. Use *Allow Access: Everyone on the Same Network* or *Anyone on the Same
+  Network* without a password.
 
 ## How it works
 
@@ -439,7 +480,8 @@ the Parsec app, keeps the driver awake). The downloaded driver installer stays i
   cast of MirrorBridge's own test pattern from this PC, and last screen mirroring with a
   moving test pattern for about 10 seconds (nothing from your screen in any of them). Watch
   the TV for that moving pattern when a notification says *Watch the TV now*; a TV that needs
-  FairPlay (an Apple TV), or that MirrorBridge is not paired with, skips that test. Then
+  FairPlay (an Apple TV) while Apple TV mirroring is off, or that MirrorBridge is not paired
+  with, skips that test. Then
   MirrorBridge says what each one did (for screen mirroring, whether the TV accepted the
   session and kept the video open, and which SETUP order, H.264 header ending and timing
   worked, which it saves for Mirror screen), whether Mirror screen should work, and

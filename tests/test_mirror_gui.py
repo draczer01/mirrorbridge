@@ -274,6 +274,27 @@ def test_an_apple_tv_is_cast_to(controller, monkeypatch):
     assert not controller.is_active
 
 
+def test_mirroring_to_apple_tvs_is_turned_on_in_the_debug_menu(controller):
+    """FairPlay mirroring is experimental and off: More options > Debug turns it on (and saves it),
+    and then the Apple TV's main item mirrors, casting if that fails."""
+    from mirrorbridge import mirror
+
+    _choose(controller, _device(txt=APPLE_TV_TXT, name="Living Room"))
+    tray = _tray(controller)
+    debug = _choices(_submenu(_submenu(tray.menu, "More options"), "Debug (for testing)"))
+    item = debug["Mirror to Apple TVs (FairPlay, experimental)"]
+    assert item.isCheckable() and not item.isChecked() and not mirror.apple_tv_allowed()
+    assert controller.mirror_tip(controller.selected_device) == (
+        "Screen mirroring to Apple TVs and Macs is experimental and off: turn it on with More options > Debug > "
+        "Mirror to Apple TVs. For now, cast to them with Start casting.")
+    item.trigger()
+    assert controller.settings.mirror_apple_tv and mirror.apple_tv_allowed()
+    assert controller.primary_action() == "mirror"
+    assert _main(_tray(controller)).toolTip() == MIRRORING_HINT
+    controller.update_settings(mirror_apple_tv=False)
+    assert not mirror.apple_tv_allowed() and controller.primary_action() == "cast"
+
+
 @pytest.mark.parametrize("txt", [NO_SCREEN_TXT, SPEAKER_TXT], ids=["no-bit-7", "speaker"])
 def test_a_receiver_that_does_not_mirror_is_cast_to_or_left_out(controller, txt):
     from mirrorbridge.gui.window import MainWindow

@@ -608,7 +608,7 @@ class MainWindow(QMainWindow):
         if first in routes.MIRRORING:
             return tr("ui_hint_mirror")
         dev = screen.airplay
-        hint = tr("ui_hint_apple") if c.is_apple(dev) else tr("ui_hint_cast")
+        hint = c.apple_hint() if c.is_apple(dev) else tr("ui_hint_cast")
         if dev.needs_pairing or dev.needs_password:
             hint = tr("ui_hint_cast_first") + " " + hint
         return hint

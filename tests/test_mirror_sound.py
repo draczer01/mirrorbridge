@@ -1136,6 +1136,7 @@ class _StubChannel:
 
     local_ip, remote_ip = "192.168.1.10", "192.168.1.20"
     closed = out_of_step = False
+    fairplay = None  # not an Apple TV
 
     def __init__(self, answers=(), headers=None) -> None:
         self.answers = list(answers)
@@ -1588,3 +1589,108 @@ def test_doctor_sounds_figures_are_the_lines():
     figures = cli._line_figures(fast)  # pylint: disable=protected-access
     assert figures["rate"] == pytest.approx(R * 1.01, rel=1e-4) and figures["deleted"] > 0
     assert cli._line_figures([])["rate"] == 0  # pylint: disable=protected-access
+
+
+# -- the sound to an Apple TV ---------------------------------------------------------------------------
+
+
+def _chacha_64x64_seal(key: bytes, nonce8: bytes, payload: bytes, aad: bytes) -> bytes:
+    """ChaCha20-Poly1305 with a 64-bit counter and a 64-bit nonce, the MAC as RFC 7539 pads it:
+    github.com/aead/chacha20poly1305's NewCipher, which doubletake seals an Apple TV's sound with."""
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
+    from cryptography.hazmat.primitives.poly1305 import Poly1305
+
+    def stream(counter: int, data: bytes) -> bytes:
+        return Cipher(algorithms.ChaCha20(key, struct.pack("<Q", counter) + nonce8), None).encryptor().update(data)
+
+    mac_key = stream(0, bytes(64))[:32]
+    sealed = stream(1, payload)
+    pad = lambda data: data + bytes(-len(data) % 16)  # noqa: E731
+    tag = Poly1305.generate_tag(mac_key, pad(aad) + pad(sealed) + struct.pack("<QQ", len(aad), len(sealed)))
+    return sealed + tag
+
+
+def test_chacha_shk_is_doubletakes_apple_tv_cipher():
+    key = bytes(range(1, 33))
+    cipher = ap.ChaChaShk(key)
+    for index, frame in zip((0, 1, 77, 70000), _random_frames(4)):
+        payload, head = ap.alac_verbatim(frame), ap.rtp_header(index)
+        nonce8 = struct.pack("<Q", index)
+        assert cipher.seal(index, head, payload) == _chacha_64x64_seal(key, nonce8, payload, head[4:12]) + nonce8
+
+
+def test_fairplay_cbc_seals_whole_blocks_from_the_same_iv_and_leaves_the_rest():
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    key, iv = bytes(range(16)), bytes(range(16, 32))
+    cipher = ap.FairPlayCbc(key, iv, b"e" * 72)
+    payload = ap.alac_verbatim(_ramp())  # 1412 bytes: 88 blocks and 4 in the clear
+    assert len(payload) == 1412 and cipher.overhead == 0
+    for index in (0, 1):
+        sealed = cipher.seal(index, ap.rtp_header(index), payload)
+        assert len(sealed) == 1412 and sealed[1408:] == payload[1408:] and sealed[:16] != payload[:16]
+        opened = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor().update(sealed[:1408])
+        assert opened == payload[:1408]
+    assert cipher.seal(2, ap.rtp_header(2), b"short") == b"short"
+    assert cipher.stream_fields() == {} and cipher.session_fields() == {"ekey": b"e" * 72, "eiv": iv, "et": 32}
+    with pytest.raises(ValueError):
+        ap.FairPlayCbc(bytes(32), iv)
+    with pytest.raises(ValueError):
+        ap.FairPlayCbc.for_channel(_StubChannel())  # no FairPlay on it
+    keys = SimpleNamespace(shk=key, iv=iv, ekey=b"k" * 72)
+    made = ap.FairPlayCbc.for_channel(SimpleNamespace(fairplay=keys))
+    assert (made.key, made.iv, made.ekey) == (key, iv, b"k" * 72)
+
+
+def test_the_audio_stream_in_the_stream_connections_layout():
+    from mirrorbridge.mirror.negotiation import CONNECTIONS_LAYOUT, AudioOffer, Plan
+
+    negotiator = _negotiator(AudioOffer(layout=CONNECTIONS_LAYOUT))
+    cipher = ap.ChaChaShk(bytes(32))
+    stream = negotiator._audio_stream(5, Plan(), cipher)  # pylint: disable=protected-access
+    assert "controlPort" not in stream and stream["shk"] == bytes(32) and stream["usingScreen"] is True
+    assert stream["isMedia"] is False and stream["supportsDynamicStreamID"] is True
+    assert stream["streamConnections"] == {
+        "streamConnectionTypeRTCP": {"streamConnectionKeyPort": 7881},
+        "streamConnectionTypeRTP": {"streamConnectionKeyUseStreamEncryptionKey": True}}
+    legacy = negotiator._audio_stream(5, Plan(), cipher, "controlPort")  # pylint: disable=protected-access
+    assert legacy["controlPort"] == 7881 and "streamConnections" not in legacy
+    cbc = negotiator._audio_stream(5, Plan(), ap.FairPlayCbc(bytes(16), bytes(16)))  # pylint: disable=protected-access
+    assert "shk" not in cbc and cbc["streamConnections"]["streamConnectionTypeRTP"] == {
+        "streamConnectionKeyUseStreamEncryptionKey": False}
+
+
+def test_the_audio_answer_in_the_stream_connections_layout():
+    from mirrorbridge.mirror.negotiation import audio_answer
+
+    answer = {"type": 96, "streamConnections": {"streamConnectionTypeRTP": {"streamConnectionKeyPort": 6001},
+                                                "streamConnectionTypeRTCP": {"streamConnectionKeyPort": 6002}}}
+    entry, ports, note = audio_answer([{"streams": [answer]}], 0)
+    assert ports == (6001, 6002) and note == "" and "dataPort" not in answer
+    _, ports, note = audio_answer([{"streams": [{"type": 96, "streamConnections": {
+        "streamConnectionTypeRTP": {"streamConnectionKeyPort": 6001}}}]}], 0)
+    assert ports is None and note == "the TV named no control port for the sound"
+
+
+@pytest.mark.parametrize("features, env, layout, cbc", [
+    ((1 << 14) | (1 << 59), {}, "streamConnections", False),
+    (1 << 14, {}, "controlPort", False),
+    ((1 << 14) | (1 << 59), {"MIRRORBRIDGE_FP_AUDIO": "cbc"}, "streamConnections", True),
+    ((1 << 14) | (1 << 59), {"MIRRORBRIDGE_FP_AUDIO_LAYOUT": "controlPort"}, "controlPort", False),
+    (1 << 14, {"MIRRORBRIDGE_FP_AUDIO_LAYOUT": "streamConnections", "MIRRORBRIDGE_FP_AUDIO": "chacha"},
+     "streamConnections", False),
+    (1 << 14, {"MIRRORBRIDGE_FP_AUDIO_LAYOUT": "nonsense"}, "controlPort", False),
+])
+def test_an_apple_tvs_sound_offer(monkeypatch, features, env, layout, cbc):
+    from mirrorbridge.mirror.control import Target
+    from mirrorbridge.mirror.negotiation import AudioOffer, apple_tv_offer
+
+    for name in ("MIRRORBRIDGE_FP_AUDIO", "MIRRORBRIDGE_FP_AUDIO_LAYOUT"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    base = AudioOffer(ap.ALAC_44100, gap=4410)
+    offer = apple_tv_offer(base, Target("Apple TV", "192.168.1.30", features=features))
+    assert offer.layout == layout and offer.format == base.format and offer.gap == 4410
+    assert offer.cipher_factory == (ap.FairPlayCbc.for_channel if cbc else ap.ChaChaShk.for_channel)
+    assert base.layout == "controlPort"  # left as it was

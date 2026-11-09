@@ -3,8 +3,9 @@ fraction of a second behind, as an iPhone mirrors it, instead of a cast's few se
 
 A cast (session.py) sends HLS that the TV buffers; mirroring sends each H.264 frame as soon as
 FFmpeg has encoded it, over a connection of its own, with the time the TV should show it.
-It works with TVs that pair the HomeKit way and do not need FairPlay (feature bit 14 clear),
-such as TCL, Roku, Samsung and LG TVs; Apple TVs and Macs need FairPlay and are refused.
+It works with TVs that pair the HomeKit way, such as TCL, Roku, Samsung and LG TVs. Apple TVs and
+Macs (feature bit 14) first want the FairPlay handshake (..fairplay): experimental, and off unless
+turned on (control.allow_apple_tv, MIRRORBRIDGE_APPLE_TV=1).
 
     control.py      the encrypted RTSP connection (pair-verify) and GET /info
     negotiation.py  SETUP in the shapes TVs take, RECORD, /feedback, TEARDOWN
@@ -22,7 +23,7 @@ such as TCL, Roku, Samsung and LG TVs; Apple TVs and Macs need FairPlay and are 
     profiles.py     what worked, saved per device
 """
 
-from .control import ReceiverInfo, Target
+from .control import ReceiverInfo, Target, allow_apple_tv, apple_tv_allowed
 from .errors import MirrorError
 from .probe import ALL_VARIANTS, ProbeResult, probe_mirroring
 from .profiles import MirrorProfile
@@ -41,5 +42,7 @@ __all__ = [
     "SessionReport",
     "TEST_PATTERN",
     "Target",
+    "allow_apple_tv",
+    "apple_tv_allowed",
     "probe_mirroring",
 ]
