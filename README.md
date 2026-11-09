@@ -366,6 +366,16 @@ No sound yet on an Apple TV (its audio needs FairPlay's cipher too). `MIRRORBRID
 also puts the FairPlay key (ekey, eiv) in the SETUP, a test switch for receivers that want it
 there. Please send `mirrorbridge.log` after trying it.
 
+Known limitations for now:
+
+* **No sound** on an Apple TV: its mirroring audio is encrypted with FairPlay's AES-CBC key,
+  which MirrorBridge does not do yet, so the session goes on without sound even with
+  `mirror --sound`.
+* **No AirPlay password**: an Apple TV that asks for a password (*Require Password* in its
+  AirPlay settings, answered with 470) is not supported. MirrorBridge tries transient pairing
+  once and then casts. Use *Allow Access: Everyone on the Same Network* or *Anyone on the Same
+  Network* without a password.
+
 ## How it works
 
 ```
