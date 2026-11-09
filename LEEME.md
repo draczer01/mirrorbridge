@@ -166,6 +166,14 @@ demás queda en gris hasta que termine. El botón grande de la ventana completa 
   el elemento principal duplica por Google Cast, que estos dos ajustes todavía no cambian: lleva
   el sonido del equipo (**Incluir el sonido del equipo**) y los cuadros por segundo de
   **Calidad**, que con una de esas TVs elegida no dicen "al transmitir".
+* *Diapositivas nítidas (experimental)*, apagado de forma predeterminada (también en los ajustes
+  avanzados de la ventana, y `mirror --sharp` para una sola vez): para texto y diapositivas.
+  Cuando la pantalla de la TV es mayor que 1080p se manda hasta 2560x1440, así un monitor 1440p
+  llega a una TV 4K a su propio tamaño, sin escalar en la PC; la tasa de bits sube según los
+  píxeles de más (8 Mbit/s pasan a unos 14 en 1440p); y una pantalla que aún hay que reducir se
+  escala con lanczos en vez de bilinear, que deja los bordes del texto tan nítidos como texto
+  dibujado a ese tamaño (bilinear perdía un 9 %). Usa más Wi-Fi y un poco más de procesador;
+  una TV que dice que su pantalla es 1080p recibe 1080p como antes.
 
 **Qué mandar** después de probarlo con tu TV:
 

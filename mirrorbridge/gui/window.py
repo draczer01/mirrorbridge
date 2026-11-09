@@ -273,6 +273,9 @@ class MainWindow(QMainWindow):
             af.addRow(self._row_labels[key], field)
             if key == "ui_mirror_latency":
                 af.addRow("", self.mirror_latency_hint)
+            if key == "ui_mirror_framerate":  # Sharp slides (experimental), Mirror screen's too
+                self.mirror_sharp_cb = QCheckBox()
+                af.addRow("", self.mirror_sharp_cb)
         self.audio_cb = QCheckBox()
         self.cursor_cb = QCheckBox()
         self.mute_pc_cb = QCheckBox()
@@ -309,6 +312,7 @@ class MainWindow(QMainWindow):
         self.audio_cb.toggled.connect(lambda on: self._save(capture_audio=on))
         self.cursor_cb.toggled.connect(lambda on: self._save(show_cursor=on))
         self.mute_pc_cb.toggled.connect(lambda on: self._save(mute_pc_audio=on))
+        self.mirror_sharp_cb.toggled.connect(lambda on: self._save(mirror_sharp=on))
         self.res_combo.currentIndexChanged.connect(lambda _i: self._save(output_height=int(self.res_combo.currentData())))
         self.fps_combo.currentIndexChanged.connect(lambda _i: self._save(framerate=int(self.fps_combo.currentData())))
         self.bitrate.valueChanged.connect(self._bitrate_changed)
@@ -333,11 +337,13 @@ class MainWindow(QMainWindow):
                             (self.forget_btn, "forget"), (self.rb_display, "ui_show_display"),
                             (self.rb_window, "ui_show_window"), (self.rb_extend, "ui_show_extend"),
                             (self.audio_cb, "audio"), (self.cursor_cb, "cursor"), (self.mute_pc_cb, "ui_mute_pc"),
+                            (self.mirror_sharp_cb, "mirror_sharp"),
                             (self.file_btn, "play_file"),
                             (self.cast_btn, "ui_cast_instead"), (self.another_btn, "ui_try_another")):
             button.setText(tr(key))
         self.refresh_win.setToolTip(tr("ui_refresh_windows"))
         self.window_combo.setToolTip(tr("window_moved_hint"))
+        self.mirror_sharp_cb.setToolTip(tr("mirror_sharp_hint"))
         self.extend_hint.setText(tr("ui_extend_hint") if vdisplay.available() else tr("vdd_unsupported"))
         self.cast_hint.setText(tr("ui_cast_hint"))
         self.other_section.set_title(tr("ui_other_ways"))
@@ -466,6 +472,7 @@ class MainWindow(QMainWindow):
             self.mirror_latency_combo.setCurrentIndex(max(0, self.mirror_latency_combo.findData(mirror_latency(s))))
             self._show_mirror_latency_hint()
             self.mirror_fps_combo.setCurrentIndex(max(0, self.mirror_fps_combo.findData(s.mirror_framerate)))
+            self.mirror_sharp_cb.setChecked(s.mirror_sharp is True)
             self.encoder_combo.setCurrentIndex(max(0, self.encoder_combo.findData(s.encoder)))
             self.monitor_combo.setEnabled(not s.window_title and not s.extend_screen)
             self.window_combo.setEnabled(bool(s.window_title) and not s.extend_screen)

@@ -19,6 +19,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   down for mirroring gets one more try with transient pairing; one whose handshake fails is cast
   to first from then on. No sound to an Apple TV yet. `MIRRORBRIDGE_FP_ROOT=1` also sends the
   ekey and eiv in the SETUP.
+- *Mirror screen settings* > *Sharp slides (experimental)* (also in the window's advanced
+  settings, and `mirror --sharp`), off by default, for slides and text that looked soft on the
+  TV: up to 2560x1440 when the TV's screen is bigger than 1080p (a 1440p monitor then goes
+  unscaled, straight from the graphics card to the encoder), the bitrate raised by the extra
+  pixels, and lanczos instead of bilinear where the PC still shrinks the screen. *Test this TV*
+  leaves it out.
 - While the screen is on a TV (*Mirror screen* or a cast), the PC does not go to sleep and its
   screen does not turn off, as with a video player: a slide show, a PDF or a still desktop used
   to let Windows turn the screen off after its idle time, and a screen that is off gives the
