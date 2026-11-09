@@ -274,8 +274,10 @@ def verify_signature(data: Path, signature: Path, fingerprint: str, key: Path = 
     with tempfile.TemporaryDirectory() as home:
         keyring = Path(home) / "ffmpeg-release-key.gpg"
         keyring.write_bytes(dearmor(key.read_text(encoding="ascii")))
-        # Forward slashes: Git for Windows' gpg takes C:/... as well as the shell's own paths.
-        args = [gpg, "--homedir", Path(home).as_posix(), "--status-fd", "1", "--keyring", keyring.as_posix()]
+        # Forward slashes: Git for Windows' gpg takes C:/... as well as the shell's own paths, but not
+        # as a --keyring: GnuPG reads "C:/..." there as a URL with the scheme "C" ("invalid key resource
+        # URL"). A bare file name is looked up in --homedir, where the keyring is.
+        args = [gpg, "--homedir", Path(home).as_posix(), "--status-fd", "1", "--keyring", keyring.name]
         if not Path(gpg).name.lower().startswith("gpgv"):  # gpg: only that keyring, which is trusted as pinned
             args += ["--batch", "--no-default-keyring", "--trust-model", "always", "--verify"]
         result = subprocess.run(args + [signature.as_posix(), data.as_posix()], capture_output=True,
