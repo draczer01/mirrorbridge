@@ -246,6 +246,13 @@ arrival (test)* asks the TV to show each frame as soon as it comes
 instead of at its time. The log says, as each session starts, which ones it used, and each
 time FFmpeg starts again, why.
 
+Below them, *Google Cast: H.264 video (experimental)* sends Google Cast mirroring as H.264
+(Constrained Baseline, encoded by the graphics card when it can) instead of VP8 (the default,
+encoded by the processor). Google Cast receivers set their decoder up for H.264 Baseline; the
+High profile that AirPlay mirroring sends left a TCL Google TV black. `googlecast --codec h264`
+does the same for one run, and `--h264-profile main` or `high` tries another profile. Google Cast
+mirroring also follows the *Keyframes* switch, with "only when needed" meaning every 2 seconds.
+
 ### From the command line
 
 ```text

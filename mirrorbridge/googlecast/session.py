@@ -73,6 +73,11 @@ STOP_SECONDS = 3
 AUDIO_QUEUE = 100  # Opus frames (a second) waiting to be sent, at most
 DELAY_ENV = "MIRRORBRIDGE_CAST_DELAY_MS"  # a test value for the delay, from a .bat
 CODEC_ENV = "MIRRORBRIDGE_CAST_CODEC"  # h264 or vp8, from a .bat
+PROFILE_ENV = "MIRRORBRIDGE_CAST_H264_PROFILE"  # baseline, main or high, from a .bat
+# The receiver sets its decoder up for H.264 Baseline whatever comes (Chromium's
+# components/cast_streaming/public/config_conversions.cc, ToVideoDecoderConfig): High, which
+# AirPlay mirroring sends, decodes on the TCL and stays black, so Cast sends Constrained Baseline.
+H264_PROFILE = "baseline"
 AUDIO_DELAY_ENV = "MIRRORBRIDGE_CAST_AUDIO_DELAY_MS"  # a test value for the sound's own delay
 # The sound's own targetDelay. The TCL shows the picture at once whatever its delay, but plays
 # the sound at its delay plus about 0.4 s of its own: 100 ms brings it nearest the picture.
@@ -96,11 +101,17 @@ def choose_delay(wanted: Optional[int]) -> int:
     return max(MIN_DELAY_MS, min(MAX_DELAY_MS, wanted or DEFAULT_DELAY_MS))
 
 
-def choose_codec(wanted: Optional[str]) -> str:
-    """The codec to send: `wanted`, the test value in CODEC_ENV, or VP8: the TCL's receiver takes
-    H.264, says it decodes and shows every frame, and leaves the screen black."""
-    wanted = (wanted or os.environ.get(CODEC_ENV, "") or VP8).strip().lower()
+def choose_codec(wanted: Optional[str], saved: str = VP8) -> str:
+    """The codec to send: `wanted`, the test value in CODEC_ENV, `saved` (Settings.cast_codec,
+    H.264 being experimental), or VP8, which every receiver shows."""
+    wanted = (wanted or os.environ.get(CODEC_ENV, "") or saved or VP8).strip().lower()
     return wanted if wanted in CODECS else VP8
+
+
+def choose_profile(wanted: Optional[str] = None) -> str:
+    """The H.264 profile: `wanted`, the test value in PROFILE_ENV, or H264_PROFILE."""
+    wanted = (wanted or os.environ.get(PROFILE_ENV, "") or H264_PROFILE).strip().lower()
+    return wanted if wanted in ffmpeg.H264_PROFILES else H264_PROFILE
 
 
 def find_app(status: dict) -> Optional[dict]:
@@ -120,6 +131,7 @@ class GoogleCastMirror:
         seconds: Optional[float] = None,
         delay_ms: Optional[int] = None,
         codec: Optional[str] = None,
+        profile: Optional[str] = None,
         audio: Optional[bool] = None,
         max_canvas: tuple[int, int] = MAX_CANVAS,
     ) -> None:
@@ -129,7 +141,8 @@ class GoogleCastMirror:
         self.source = source
         self.seconds = seconds
         self.delay_ms = choose_delay(delay_ms)
-        self.codec = choose_codec(codec)
+        self.codec = choose_codec(codec, getattr(settings, "cast_codec", VP8))
+        self.profile = choose_profile(profile)  # H.264's
         self.max_canvas = max_canvas
         self.audio = settings.capture_audio if audio is None else audio  # wanted
         self.sound = False  # being sent
@@ -176,8 +189,9 @@ class GoogleCastMirror:
     @property
     def frames_shown(self) -> int:
         """Frames the receiver's own event log says it showed: with VP8, the proof the picture is
-        on the TV (frames sent, even acknowledged, can still leave it black). With H.264 the TCL
-        reports every frame shown on a black screen."""
+        on the TV (frames sent, even acknowledged, can still leave it black). The receiver logs a
+        frame as played when it hands it to its player, so a decoder that shows nothing still
+        counts: with H.264 in High profile the TCL counted every frame on a black screen."""
         sender = self._sender
         return sender.stats.played if sender is not None else self._shown
 
@@ -353,8 +367,8 @@ class GoogleCastMirror:
         if answer.max_kbps and answer.max_kbps < s.video_bitrate_kbps:
             _LOGGER.info("The receiver takes at most %d kbps", answer.max_kbps)
             self.settings = s = dataclasses.replace(s, video_bitrate_kbps=max(300, answer.max_kbps))
-        _LOGGER.info("Sending %s %dx%d at %d fps, %d kbps, shown %d ms after capture", self.codec, width, height,
-                     self.fps, s.video_bitrate_kbps, self.delay_ms)
+        _LOGGER.info("Sending %s %dx%d at %d fps, %d kbps, shown %d ms after capture",
+                     self.codec if self.codec == VP8 else f"{self.codec} ({self.profile})", width, height, self.fps, s.video_bitrate_kbps, self.delay_ms)
 
         clock, cipher = Clock(), FrameCipher(offer.key, offer.iv_mask)
         sender = StreamSender(cipher, Packetizer(offer.ssrc, VIDEO_PAYLOAD_TYPE), answer.receiver_ssrc, clock,
@@ -396,7 +410,7 @@ class GoogleCastMirror:
         width, height = self.canvas
         cmd = build_command(ff, self.settings, source=self.source, encoder="libx264" if encoder == VP8_ENCODER
                             else encoder, width=width, height=height, fps=self.fps, backend=backend, monitor=monitor,
-                            region=region)
+                            region=region, keyframe_seconds=self._keyframe_seconds(), profile=self.profile)
         if encoder == VP8_ENCODER:
             cmd = vp8_command(cmd, self.settings.video_bitrate_kbps, self.fps, self.settings.mirror_keyframes)
         self.encoder = encoder
@@ -414,6 +428,11 @@ class GoogleCastMirror:
 
         self._ffmpeg = (IvfSource if encoder == VP8_ENCODER else FFmpegSource)(cmd, hand_over)
         self._ffmpeg.start()
+
+    def _keyframe_seconds(self) -> int:
+        """Seconds between keyframes: the Debug menu's, but never "only when needed", since the
+        receiver's requests for one are not passed on to FFmpeg (as vp8_command)."""
+        return ffmpeg.mirror_keyframe_seconds(self.settings.mirror_keyframes) or ffmpeg.MIRROR_KEYFRAME_SECONDS
 
     @staticmethod
     def _stop_ffmpeg(source: FFmpegSource) -> None:

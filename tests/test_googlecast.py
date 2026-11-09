@@ -22,6 +22,7 @@ from mirrorbridge.googlecast.rtp import (CAST, LAST_PACKET, PT_PSFB, PT_RR, Fram
 from mirrorbridge.googlecast.sender import Clock
 from mirrorbridge.mirror.clock import NS
 from mirrorbridge.mirror import TEST_PATTERN
+from mirrorbridge.mirror.h264 import parse_sps
 from mirrorbridge.session import State
 
 SETTINGS = Settings(encoder="libx264", framerate=30, video_bitrate_kbps=1500, output_height=360)
@@ -163,6 +164,9 @@ async def test_mirrors_a_test_pattern(tv, tmp_path):
     assert session.canvas == (640, 360)
     assert session.frames_shown == len(tv.frames)  # from the receiver's event log
     assert session.frames_reported
+    # Constrained Baseline: the receiver sets its decoder up for Baseline (High stayed black on the TCL)
+    sps = parse_sps(tv.frames[0][2][4:tv.frames[0][2].index(b"\x00\x00\x00\x01", 4)])
+    assert sps.profile_idc == 66 and sps.constraints & 0x40, sps
 
 
 def _keep_awake(monkeypatch, tv: FakeCastTV) -> list:
@@ -320,6 +324,20 @@ def test_codec_from_environment(monkeypatch):
     assert gc_session.choose_codec(None) == "vp8"
     monkeypatch.delenv(gc_session.CODEC_ENV)
     assert gc_session.choose_codec(None) == "vp8"
+    assert gc_session.choose_codec(None, "h264") == "h264"  # Settings.cast_codec, the Debug menu's switch
+    assert gc_session.choose_codec(None, "av1") == "vp8"
+    assert GoogleCastMirror(CastDevice("TV", "192.0.2.1"), Settings(cast_codec="h264")).codec == "h264"
+    assert GoogleCastMirror(CastDevice("TV", "192.0.2.1"), Settings()).codec == "vp8"
+
+
+def test_h264_profile(monkeypatch):
+    monkeypatch.delenv(gc_session.PROFILE_ENV, raising=False)
+    assert gc_session.choose_profile() == "baseline"
+    assert gc_session.choose_profile("main") == "main"
+    monkeypatch.setenv(gc_session.PROFILE_ENV, "High")
+    assert gc_session.choose_profile() == "high"
+    monkeypatch.setenv(gc_session.PROFILE_ENV, "extended")
+    assert gc_session.choose_profile() == "baseline"
 
 
 # -- sound ----------------------------------------------------------------------------------------
