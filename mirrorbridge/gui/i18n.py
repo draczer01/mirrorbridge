@@ -174,6 +174,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     "debug_scaler_gfx": {"en": "Windows capture on the graphics card (test)",
                          "es": "Captura de Windows en la tarjeta de video (prueba)"},
     "debug_on_arrival": {"en": "Show frames on arrival (test)", "es": "Mostrar cuadros al llegar (prueba)"},
+    "debug_cast_h264": {"en": "Google Cast: H.264 video (experimental)",
+                        "es": "Google Cast: video H.264 (experimental)"},
     "language_menu": {"en": "Language", "es": "Idioma"},
     "quit": {"en": "Quit", "es": "Salir"},
     # Notifications

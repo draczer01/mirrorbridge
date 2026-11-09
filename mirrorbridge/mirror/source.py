@@ -105,6 +105,7 @@ def build_command(
     keyframe_seconds: int = ffmpeg.MIRROR_KEYFRAME_SECONDS,
     bt709: bool = False,
     sharp: bool = False,
+    profile: str = "",
 ) -> list[str]:
     """FFmpeg: the source, fitted into width x height, encoded for mirroring, FLV to stdout.
 
@@ -115,7 +116,8 @@ def build_command(
     every 2 s, for callers that do not start FFmpeg again for one, as Google Cast mirroring),
     bt709 the CPU chain's pixels in BT.709 and tagged so (capture.cpu_filters; the default is
     the pixels from before, for callers that do not ask, as Google Cast's VP8), sharp the CPU
-    chain's sharper scaling (Sharp slides, capture.SHARP_SCALE_FLAGS).
+    chain's sharper scaling (Sharp slides, capture.SHARP_SCALE_FLAGS), profile the H.264
+    profile (ffmpeg.mirror_encoder_args; "" is AirPlay mirroring's).
     """
     output: list[str] = []
     kbps, rate = settings.video_bitrate_kbps, fps  # what the encoder is told
@@ -156,7 +158,8 @@ def build_command(
         if filters:
             cmd += ["-vf", ",".join(filters)]
     cmd += ["-an"]
-    cmd += ffmpeg.mirror_encoder_args(encoder, kbps, rate, vbv_frames=vbv, keyframe_seconds=keyframe_seconds)
+    cmd += ffmpeg.mirror_encoder_args(encoder, kbps, rate, vbv_frames=vbv, keyframe_seconds=keyframe_seconds,
+                                     profile=profile)
     cmd += output + _extra_args(extra)
     cmd += ["-flush_packets", "1", "-flvflags", "no_duration_filesize+no_metadata", "-f", "flv", "pipe:1"]
     return cmd

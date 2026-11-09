@@ -457,6 +457,12 @@ NO_PERIODIC_GOP = 2**31 - 1  # -g: in effect never
 MIRROR_PROFILE = os.environ.get("MIRRORBRIDGE_H264_PROFILE", "").strip().lower()
 MIRROR_PROFILE = MIRROR_PROFILE if MIRROR_PROFILE in ("baseline", "main", "high") else "high"
 MIRROR_VBV_FRAMES = 1.0
+H264_PROFILES = ("baseline", "main", "high")
+# AMF names Baseline differently, and turns "baseline" down (FFmpeg ends before its first frame).
+_AMF_PROFILES = {"baseline": "constrained_baseline"}
+# Media Foundation takes the profile as a number, and makes Baseline when it is given none
+# (libavcodec/mfenc.c): AirPlay mirroring has always had that; a caller naming one gets it.
+_MF_PROFILES = {"baseline": "66", "main": "77", "high": "100"}
 
 
 def mirror_keyframe_seconds(seconds: object) -> int:
@@ -479,9 +485,12 @@ def mirror_keyframe_interval(encoder: str, keyframe_seconds: int = MIRROR_KEYFRA
 
 
 def mirror_encoder_args(encoder: str, kbps: int, fps: int, vbv_frames: float = MIRROR_VBV_FRAMES,
-                        keyframe_seconds: int = MIRROR_KEYFRAME_SECONDS) -> list[str]:
+                        keyframe_seconds: int = MIRROR_KEYFRAME_SECONDS, profile: str = "") -> list[str]:
     """The encoder's options for mirroring at kbps and fps, with a keyframe every
-    keyframe_seconds (0: at the start only; mirror_keyframe_interval)."""
+    keyframe_seconds (0: at the start only; mirror_keyframe_interval), in H.264 `profile`
+    (one of H264_PROFILES; anything else is MIRROR_PROFILE, AirPlay mirroring's)."""
+    named = profile in H264_PROFILES
+    profile = profile if named else MIRROR_PROFILE
     seconds = mirror_keyframe_interval(encoder, keyframe_seconds)
     bufsize = max(1, round(kbps * vbv_frames / max(1, fps)))
     rate = ["-b:v", f"{kbps}k", "-maxrate", f"{kbps}k", "-bufsize", f"{bufsize}k"]
@@ -499,19 +508,21 @@ def mirror_encoder_args(encoder: str, kbps: int, fps: int, vbv_frames: float = M
         keyint = "keyint=infinite:scenecut=0"
     if encoder == "h264_nvenc":
         # -delay 0: NVENC otherwise keeps about 3 frames in flight (50 ms at 60 fps).
-        specific = ["-preset", "p4", "-tune", "ll", "-rc", "cbr", "-profile:v", MIRROR_PROFILE, "-zerolatency", "1",
+        specific = ["-preset", "p4", "-tune", "ll", "-rc", "cbr", "-profile:v", profile, "-zerolatency", "1",
                     "-delay", "0", "-forced-idr", "1"]
     elif encoder == "h264_qsv":
         # -async_depth 1: Quick Sync works 4 frames ahead by default.
         specific = ["-preset", "veryfast", "-look_ahead", "0", "-async_depth", "1", "-low_delay_brc", "1",
-                    "-forced_idr", "1", "-profile:v", MIRROR_PROFILE]
+                    "-forced_idr", "1", "-profile:v", profile]
     elif encoder == "h264_amf":
         specific = ["-usage", "ultralowlatency", "-quality", "speed", "-rc", "cbr", "-latency", "1",
-                    "-enforce_hrd", "1", "-profile:v", MIRROR_PROFILE]
+                    "-enforce_hrd", "1", "-profile:v", _AMF_PROFILES.get(profile, profile)]
     elif encoder == "h264_mf":
         specific = ["-rate_control", "cbr", "-scenario", "display_remoting", "-hw_encoding", "1"]
+        if named:
+            specific += ["-profile:v", _MF_PROFILES[profile]]
     else:
-        specific = ["-preset", "veryfast", "-tune", "zerolatency", "-profile:v", MIRROR_PROFILE, "-x264-params", keyint]
+        specific = ["-preset", "veryfast", "-tune", "zerolatency", "-profile:v", profile, "-x264-params", keyint]
     return ["-c:v", encoder] + specific + rate + common
 
 

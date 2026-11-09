@@ -353,3 +353,23 @@ def test_stream_for_other_tvs_declares_codecs_and_program_date_time(tmp_path):
     assert served.endswith(f",FRAME-RATE=30.000,AVERAGE-BANDWIDTH={average}") and average <= peak
     assert "#EXT-X-PROGRAM-DATE-TIME:" in media
     assert b"#EXT-X-TARGETDURATION:2\n" in fix_target_duration(media.encode())
+
+
+def test_mirror_profile_per_caller():
+    def profile(encoder, **kw):
+        args = ffmpeg.mirror_encoder_args(encoder, 8000, 30, **kw)
+        return args[args.index("-profile:v") + 1]
+    assert profile("h264_nvenc") == ffmpeg.MIRROR_PROFILE  # AirPlay mirroring's
+    assert profile("h264_nvenc", profile="baseline") == "baseline"
+    assert profile("libx264", profile="main") == "main"
+    assert profile("h264_qsv", profile="nonsense") == ffmpeg.MIRROR_PROFILE
+    assert profile("h264_amf", profile="baseline") == "constrained_baseline"  # AMF's name for it
+    assert profile("h264_amf", profile="high") == "high"
+
+
+def test_media_foundation_profile_only_when_named():
+    # AirPlay mirroring names none: MF's own Baseline, as before
+    assert "-profile:v" not in ffmpeg.mirror_encoder_args("h264_mf", 8000, 30)
+    for name, number in (("baseline", "66"), ("main", "77"), ("high", "100")):
+        args = ffmpeg.mirror_encoder_args("h264_mf", 8000, 30, profile=name)
+        assert args[args.index("-profile:v") + 1] == number

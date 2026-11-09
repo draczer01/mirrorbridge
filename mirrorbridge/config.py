@@ -43,6 +43,7 @@ CHOICES: dict[str, tuple] = {
     "mirror_framerate": (0, 30, 60),
     "mirror_keyframes": (0, 10, 2),  # in the Debug menu's order (ffmpeg.MIRROR_KEYFRAME_CHOICES)
     "mirror_scaler": ("auto", "cpu", "gfx"),  # in the Debug menu's order (gui.tray.SCALERS)
+    "cast_codec": ("vp8", "h264"),
 }
 CHECKED = set(CHOICES) | {"mirror_encoder_extra", "mirror_sharp"}
 
@@ -95,6 +96,9 @@ class Settings:
     mirror_scaler: str = "auto"
     mirror_on_arrival: bool = False  # ask the TV to show each frame as it comes, not at its time
     mirror_encoder_extra: str = ""  # settings.json only: FFmpeg options after the encoder's, for experiments
+    # Google Cast mirroring's video: vp8 (what the TCL shows), or h264 (More options > Debug, experimental:
+    # the graphics card encodes it, but the TCL showed it black)
+    cast_codec: str = "vp8"
 
     # App
     language: str = "en"  # a gui.i18n.LANGUAGES code; any other ("" once meant "as Windows") is English

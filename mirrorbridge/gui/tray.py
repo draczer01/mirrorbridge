@@ -336,6 +336,10 @@ class TrayMenu(QObject):
                     s.mirror_scaler if s.mirror_scaler in SCALERS else "auto", "mirror_scaler")
         self._action(debug, tr("debug_on_arrival"), lambda on: self.c.update_settings(mirror_on_arrival=on),
                      checkable=True, checked=on_arrival(s))
+        debug.addSeparator()
+        self._action(debug, tr("debug_cast_h264"),
+                     lambda on: self.c.update_settings(cast_codec="h264" if on else "vp8"),
+                     checkable=True, checked=s.cast_codec == "h264")
 
     # -- actions -----------------------------------------------------------
 

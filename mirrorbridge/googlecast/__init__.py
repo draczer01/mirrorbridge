@@ -3,7 +3,7 @@ any TV with Chromecast built-in, a fraction of a second behind, the way Chrome m
 
 It is Cast Streaming, the protocol of Chrome's mirroring: the receiver's own mirroring app is
 started over the Cast control connection, the video is agreed on in an OFFER and an ANSWER,
-and H.264 frames go over UDP, encrypted, as RTP, with the receiver asking for lost packets.
+and VP8 frames (or, experimental, H.264) go over UDP, encrypted, as RTP, with the receiver asking for lost packets.
 
     channel.py    the Cast control connection (TLS, protobuf, PING/PONG)
     discovery.py  _googlecast._tcp receivers on mDNS, or one by its IP address
@@ -15,7 +15,7 @@ and H.264 frames go over UDP, encrypted, as RTP, with the receiver asking for lo
 
 from .channel import ChannelError
 from .discovery import CastDevice, find, scan
-from .session import APP_ID, DEFAULT_DELAY_MS, CastMirrorError, GoogleCastMirror
+from .session import APP_ID, DEFAULT_DELAY_MS, H264_PROFILE, CastMirrorError, GoogleCastMirror
 
-__all__ = ["APP_ID", "CastDevice", "CastMirrorError", "ChannelError", "DEFAULT_DELAY_MS", "GoogleCastMirror",
+__all__ = ["APP_ID", "CastDevice", "CastMirrorError", "ChannelError", "DEFAULT_DELAY_MS", "GoogleCastMirror", "H264_PROFILE",
            "find", "scan"]
