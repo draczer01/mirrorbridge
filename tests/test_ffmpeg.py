@@ -365,3 +365,11 @@ def test_mirror_profile_per_caller():
     assert profile("h264_qsv", profile="nonsense") == ffmpeg.MIRROR_PROFILE
     assert profile("h264_amf", profile="baseline") == "constrained_baseline"  # AMF's name for it
     assert profile("h264_amf", profile="high") == "high"
+
+
+def test_media_foundation_profile_only_when_named():
+    # AirPlay mirroring names none: MF's own Baseline, as before
+    assert "-profile:v" not in ffmpeg.mirror_encoder_args("h264_mf", 8000, 30)
+    for name, number in (("baseline", "66"), ("main", "77"), ("high", "100")):
+        args = ffmpeg.mirror_encoder_args("h264_mf", 8000, 30, profile=name)
+        assert args[args.index("-profile:v") + 1] == number
