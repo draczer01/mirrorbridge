@@ -613,7 +613,7 @@ def _fake_gpg(monkeypatch, stdout: str = GOOD_SIGNATURE, returncode: int = 0) ->
         files = args[-2:]
         assert all(arg.startswith("./") and ":" not in arg and "\\" not in arg for arg in [name, home, *files]), args
         keyring = (Path(kwargs["cwd"]) / name).read_bytes()
-        calls.append({"args": args, "keyring": keyring})
+        calls.append({"args": args, "keyring": keyring, "cwd": kwargs["cwd"]})
         return subprocess.CompletedProcess(args, returncode, stdout, "gpgv: Signature made ...\n")
 
     monkeypatch.setattr(fetch_ffmpeg.subprocess, "run", run)
@@ -640,7 +640,9 @@ def test_the_source_is_downloaded_and_its_signature_checked(source_mirror, monke
     assert (source_mirror.folder / "ffmpeg-9.9.tar.xz.asc").is_file()
     [call] = calls
     args = call["args"]
-    assert args[0] == gpg and args[-2:] == [(path.parent / "ffmpeg-9.9.tar.xz.asc").as_posix(), path.as_posix()]
+    assert args[0] == gpg and args[-2:] == ["./ffmpeg-9.9.tar.xz.asc", "./ffmpeg-9.9.tar.xz"]
+    assert Path(call["cwd"]) == path.parent  # where those two are, and the keyring's folder
+    assert not list(path.parent.glob(".gpg-*"))  # which goes once the check is done
     assert call["keyring"] == fetch_ffmpeg.dearmor(fetch_ffmpeg.KEY.read_text(encoding="ascii"))  # binary, for gpgv
     if "gpgv" in gpg:
         assert "--verify" not in args
