@@ -16,7 +16,9 @@ is tried again later. A download that breaks off is resumed where it stopped, an
 already downloaded and checked is not downloaded again.
 
 The installer (packaging/installer.iss) is started with /UPDATE: it waits for this copy of
-MirrorBridge to quit, replaces the exe, and with /RELAUNCH starts the new one.
+MirrorBridge to quit, replaces the exe, and with /RELAUNCH starts the new one. A copy run from
+elsewhere (the exe in Downloads) updates into the installed one: the installer moves Start with
+Windows over to it, so the old copy does not come back at the next logon.
 """
 
 from __future__ import annotations
@@ -50,7 +52,7 @@ TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)")
 CHECK_EVERY = 24 * 3600
 # The installer's own mutex name (installer.iss waits while a MirrorBridge holds it).
 APP_MUTEX = "MirrorBridgeAppMutex"
-# The uninstall entry Inno Setup writes for the AppId in installer.iss.
+# The uninstall entry Inno Setup writes for the AppId in installer.iss (test_installer.ps1 checks it).
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{8F1C2D7A-4B3E-4E59-9C1A-6D2B5E7F9A10}_is1"
 
 MAX_LIST_BYTES = 4_000_000  # the release list (JSON)
@@ -304,31 +306,6 @@ def clean(folder: Optional[Path] = None, keep: str = "") -> None:
 
 
 # -- install -----------------------------------------------------------------
-
-
-def install_location() -> Optional[Path]:
-    """Where the installer put MirrorBridge, from its uninstall entry; None when it is not installed."""
-    if sys.platform != "win32":
-        return None
-    import winreg
-
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as key:
-            value, _ = winreg.QueryValueEx(key, "InstallLocation")
-    except OSError:
-        return None
-    return Path(value) if isinstance(value, str) and value else None
-
-
-def is_installed() -> bool:
-    """This is MirrorBridge.exe in the folder the installer put it in (not a copy elsewhere)."""
-    where = install_location()
-    if not where or not getattr(sys, "frozen", False):
-        return False
-    try:
-        return Path(sys.executable).resolve().parent == where.resolve()
-    except OSError:
-        return False
 
 
 def can_install() -> bool:

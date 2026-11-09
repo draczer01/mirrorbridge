@@ -284,7 +284,7 @@ def test_the_installer_is_started_as_an_update(tmp_path):
 
 @pytest.mark.skipif(sys.platform == "win32", reason="not the Windows exe")
 def test_from_source_nothing_is_installed():
-    assert not update.can_install() and not update.is_installed()
+    assert not update.can_install()
 
 
 # -- the installer script and the release agree -------------------------------
@@ -302,7 +302,12 @@ def test_the_installer_script_and_the_app_use_the_same_names():
     assert "PrivilegesRequired=lowest" in script
     for switch in ("/UPDATE", "/RELAUNCH"):
         assert f"'{switch}'" in script
+    # A portable copy that updates itself must not come back at the next logon: the installer points
+    # Start with Windows (the Run value the app writes, gui/winintegration.py) at the installed exe.
+    post = script[script.index("procedure CurStepChanged"):script.index("function InitializeUninstall")]
+    assert "ssPostInstall" in post and "RegWriteStringValue" in post and "{app}\\MirrorBridge.exe" in post
     test = (ROOT / "packaging" / "test_installer.ps1").read_text(encoding="utf-8")
+    assert "Run value" in test
     assert update.APP_MUTEX in test and app_id in test
 
 

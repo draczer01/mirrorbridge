@@ -37,7 +37,12 @@ if ((Resolve-Path $entry.InstallLocation).Path.TrimEnd('\') -ne (Resolve-Path $d
 }
 Write-Host "1. Installed MirrorBridge $version in $dir"
 
-# 2. An update while MirrorBridge runs: the installer waits for it (its mutex and its exe).
+# 2. An update while MirrorBridge runs: the installer waits for it (its mutex and its exe). Start
+#    with Windows points at a copy in Downloads first, as for someone who ran the portable exe:
+#    the update must point that Run value at the installed exe, or the old copy comes back at logon.
+$run = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+$hadRun = (Get-ItemProperty -Path $run -Name MirrorBridge -ErrorAction SilentlyContinue).MirrorBridge
+Set-ItemProperty -Path $run -Name MirrorBridge -Value '"C:\Users\someone\Downloads\MirrorBridge.exe"'
 $app = Start-Process -FilePath $exe -ArgumentList "gui" -PassThru
 $deadline = (Get-Date).AddSeconds(30)
 $held = $false
@@ -62,7 +67,9 @@ if ($update.ExitCode -ne 0) {
 }
 $out = (& $exe --version | Out-String).Trim()
 if ($out -ne "MirrorBridge $version") { throw "After the update the exe printed '$out'" }
-Write-Host "2. The update waited for MirrorBridge to quit, then installed"
+$now = (Get-ItemProperty -Path $run -Name MirrorBridge).MirrorBridge
+if ($now -ne "`"$exe`"") { throw "After the update, the Run value is '$now', not the installed exe" }
+Write-Host "2. The update waited for MirrorBridge to quit, then installed, and Start with Windows starts the installed exe"
 
 # 3. Uninstall (unins000.exe hands over to a copy of itself in TEMP and returns at once).
 $uninstaller = Join-Path $dir "unins000.exe"
@@ -71,4 +78,8 @@ $deadline = (Get-Date).AddSeconds(90)
 while ((Get-Date) -lt $deadline -and ((Test-Path $exe) -or (Test-Path $key))) { Start-Sleep -Milliseconds 500 }
 if (Test-Path $exe) { throw "Uninstalling left $exe" }
 if (Test-Path $key) { throw "Uninstalling left its uninstall entry" }
-Write-Host "3. Uninstalled"
+if ((Get-ItemProperty -Path $run -Name MirrorBridge -ErrorAction SilentlyContinue).MirrorBridge) {
+    throw "Uninstalling left the Start with Windows Run value"
+}
+if ($hadRun) { Set-ItemProperty -Path $run -Name MirrorBridge -Value $hadRun }
+Write-Host "3. Uninstalled (Start with Windows too)"
