@@ -16,8 +16,11 @@ is tried again later. A download that breaks off is resumed where it stopped, an
 already downloaded and checked is not downloaded again.
 
 The installer (packaging/installer.iss) is started with /UPDATE: it waits for this copy of
-MirrorBridge to quit, replaces the exe, and with /RELAUNCH starts the new one. A copy run from
-elsewhere (the exe in Downloads) updates into the installed one: the installer moves Start with
+MirrorBridge to quit, replaces the exe, and with /RELAUNCH starts the new one. Installing is
+updating when MirrorBridge is installed already: the installer finds it by its AppId and writes
+over it in its folder, never a second copy, and refuses an older version. A copy run from
+elsewhere (the exe in Downloads) starts the installed one when that is as new or newer
+(hand_over_to), and otherwise updates into it: the installer moves Start with
 Windows over to it, so the old copy does not come back at the next logon.
 """
 
@@ -185,6 +188,17 @@ def fetch_releases(url: str = "") -> list:
     return releases
 
 
+def for_install(releases: object, current: str = __version__, prereleases: bool = True) -> Optional[Release]:
+    """The release to install this copy from: the newest newer one, else this version's own (its
+    installer puts this same version in place); None when neither is published."""
+    newer = newest(releases, current, prereleases)
+    if newer:
+        return newer
+    own = [item for item in releases if isinstance(item, dict) and item.get("tag_name") == f"v{current}"] \
+        if isinstance(releases, list) else []
+    return newest(own, "0.0.0", prereleases=True)  # this version, even as a pre-release
+
+
 def check(current: str = __version__, prereleases: bool = True, url: str = "") -> Optional[Release]:
     """The release to update to, or None when this is the newest; UpdateError when it is not known."""
     release = newest(fetch_releases(url), current, prereleases)
@@ -306,6 +320,51 @@ def clean(folder: Optional[Path] = None, keep: str = "") -> None:
 
 
 # -- install -----------------------------------------------------------------
+
+
+def _uninstall_value(name: str) -> Optional[str]:
+    """A value of the uninstall entry the installer wrote (installer.iss's AppId); None without one."""
+    if sys.platform != "win32":
+        return None
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as key:
+            value, _ = winreg.QueryValueEx(key, name)
+    except OSError:
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def installed_exe() -> Optional[Path]:
+    """MirrorBridge.exe where the installer put it, when it is installed and the file is there."""
+    folder = _uninstall_value("InstallLocation")
+    exe = Path(folder) / "MirrorBridge.exe" if folder else None
+    return exe if exe and exe.is_file() else None
+
+
+def installed_version() -> Optional[str]:
+    return _uninstall_value("DisplayVersion")
+
+
+def is_installed_copy(exe: Optional[Path] = None) -> bool:
+    """This process is the installed MirrorBridge.exe (not a copy run from Downloads or elsewhere)."""
+    exe = exe or installed_exe()
+    if exe is None or not getattr(sys, "frozen", False):
+        return False
+    try:
+        return Path(sys.executable).resolve() == exe.resolve()
+    except OSError:
+        return False
+
+
+def hand_over_to(installed: Optional[Path], version: Optional[str], current: str = __version__) -> bool:
+    """Whether a copy run from elsewhere should start the installed one instead: there is one, and it
+    is this version or newer (an older one is updated over by this copy's updates instead)."""
+    if installed is None or version is None:
+        return False
+    theirs, mine = parse_version(version), parse_version(current)
+    return theirs is not None and mine is not None and theirs >= mine
 
 
 def can_install() -> bool:

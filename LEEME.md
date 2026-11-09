@@ -10,7 +10,10 @@ pantalla* necesita un controlador, que MirrorBridge ofrece instalar la primera v
 Cada versión trae también `MirrorBridge-Setup-<versión>.exe`, un instalador que pone
 MirrorBridge solo para tu usuario (en `%LOCALAPPDATA%\Programs\MirrorBridge`, sin contraseña
 de administrador) con su entrada en el menú Inicio; se desinstala desde *Configuración* >
-*Aplicaciones*. El exe suelto y el instalado comparten ajustes y emparejamientos.
+*Aplicaciones*. Si MirrorBridge ya está instalado, el instalador lo actualiza en su carpeta (nunca
+queda una segunda copia) y no pone una versión más vieja sobre una más nueva. El exe suelto y el
+instalado comparten ajustes y emparejamientos; si abres el suelto y el instalado es igual o más
+nuevo, se abre el instalado.
 
 MirrorBridge busca una versión nueva en los GitHub Releases un minuto después de abrirse y
 luego una vez al día. Cuando la hay, avisa y el menú muestra **Actualizar a MirrorBridge

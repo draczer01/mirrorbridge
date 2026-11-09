@@ -14,6 +14,11 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   Windows' *Apps* settings. Settings and TV pairings stay where they were, in
   `%APPDATA%\MirrorBridge`, so the portable `MirrorBridge.exe` and the installed one share them.
   When *Start with Windows* was on for a copy elsewhere, the installed one starts instead.
+  When MirrorBridge is installed already, the installer updates it in its folder (its last page
+  says *Update 0.3.0 to 0.4.0*), so there is never a second copy, and it refuses to put an older
+  version over a newer one. `MirrorBridge.exe` run from elsewhere (Downloads, a USB stick) starts
+  the installed copy instead when that one is as new or newer; otherwise *More options* >
+  *Updates* > *Install MirrorBridge on this PC* installs it, or updates the installed copy.
 - Updates: MirrorBridge looks for a newer version in its GitHub Releases a minute after it starts
   and then once a day, and says so in a notification and at the top of its tray menu (*Update to
   MirrorBridge X.Y.Z*). Choosing it downloads the new installer, checks it against the release's

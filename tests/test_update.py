@@ -316,3 +316,36 @@ def test_the_release_publishes_the_installer():
     assert "build_installer.ps1" in workflow and "test_installer.ps1" in workflow
     assert '--installer "$env:SETUP"' in workflow
     assert "tests/test_update.py" in workflow
+
+
+# -- installed already: update in place, never a second copy -------------------
+
+
+@pytest.mark.parametrize("installed, version, hands_over", [
+    (Path("C:/x/MirrorBridge.exe"), "0.4.0", True),   # the same version installed: start that one
+    (Path("C:/x/MirrorBridge.exe"), "0.5.0", True),   # a newer one installed
+    (Path("C:/x/MirrorBridge.exe"), "0.3.9", False),  # an older one: this copy runs, and its updates go over it
+    (None, "0.5.0", False), (Path("C:/x/MirrorBridge.exe"), None, False), (Path("C:/x/MirrorBridge.exe"), "junk", False),
+])
+def test_a_copy_from_elsewhere_hands_over_to_the_installed_one(installed, version, hands_over):
+    assert update.hand_over_to(installed, version, "0.4.0") is hands_over
+
+
+def test_installing_from_a_portable_copy_takes_a_newer_release_or_its_own():
+    releases = [_release("v0.4.0", prerelease=True), _release("v0.3.0")]
+    assert update.for_install(releases, "0.4.0").version == "0.4.0"  # its own installer, even a pre-release
+    assert update.for_install(releases + [_release("v0.5.0")], "0.4.0").version == "0.5.0"
+    assert update.for_install(releases, "0.4.1") is None  # not published (a test build)
+    assert update.for_install("junk", "0.4.0") is None
+
+
+def test_the_installer_updates_in_place_and_never_downgrades():
+    script = (ROOT / "packaging" / "installer.iss").read_text(encoding="utf-8")
+    assert "UsePreviousAppDir=yes" in script and "DisableDirPage=auto" in script
+    app_id = update.UNINSTALL_KEY.rsplit("\\", 1)[1]
+    assert app_id in script  # it reads the version installed before from its own uninstall entry
+    setup = script[script.index("function InitializeSetup"):script.index("function PrepareToInstall")]
+    assert "CompareVersions(InstalledVersion, '{#AppVersion}') > 0" in setup and "/ALLOWDOWNGRADE" in setup
+    assert "UpdateFrom" in script and "UpdateButton" in script
+    test = (ROOT / "packaging" / "test_installer.ps1").read_text(encoding="utf-8")
+    assert '"99.0.0"' in test and "entries in Apps" in test

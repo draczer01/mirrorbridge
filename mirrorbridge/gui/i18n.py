@@ -211,6 +211,11 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "Actualizar detiene lo que se ve en la TV ahora. MirrorBridge vuelve a abrirse solo en un minuto.",
     },
     "update_now": {"en": "Update now", "es": "Actualizar ahora"},
+    "install_here": {"en": "Install MirrorBridge on this PC", "es": "Instalar MirrorBridge en esta PC"},
+    "install_not_published": {
+        "en": "this version has no installer on GitHub Releases",
+        "es": "esta versión no tiene instalador en GitHub Releases",
+    },
     # Notifications
     "tray_hint": {
         "en": "MirrorBridge is running here. Click the icon for the menu.",

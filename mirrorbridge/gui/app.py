@@ -144,6 +144,25 @@ def _notify_running_instance(message: str) -> bool:
     return True
 
 
+def _start_installed_copy(open_window: bool) -> bool:
+    """A MirrorBridge.exe run from elsewhere (Downloads, a USB stick) when MirrorBridge is installed,
+    as new or newer: start the installed one instead, so there are never two copies with their own
+    updates and Start with Windows. True when it was started."""
+    if not getattr(sys, "frozen", False) or update.is_installed_copy():
+        return False
+    installed = update.installed_exe()
+    if not update.hand_over_to(installed, update.installed_version()):
+        return False
+    import subprocess
+
+    try:
+        subprocess.Popen([str(installed), "gui"] + (["--open"] if open_window else []),  # pylint: disable=consider-using-with
+                         close_fds=True, cwd=str(installed.parent))
+    except OSError:
+        return False
+    return True
+
+
 def run_gui(open_window: bool = False) -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
@@ -155,6 +174,8 @@ def run_gui(open_window: bool = False) -> int:
     # One copy per user. The lock decides who runs; the local socket is how a second
     # launch asks the running copy to show itself.
     request = "open" if open_window else "hello"
+    if _start_installed_copy(open_window):
+        return 0
     lock = QLockFile(os.path.join(app_data_dir(), "mirrorbridge.lock"))
     lock.setStaleLockTime(0)  # never expire by age; a crashed owner is detected by PID
     if not lock.tryLock(0):

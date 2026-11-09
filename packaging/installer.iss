@@ -65,6 +65,14 @@ en.CloseFirst=MirrorBridge is open. Quit it (its icon next to the clock > Quit),
 es.CloseFirst=MirrorBridge está abierto. Ciérralo (su icono junto al reloj > Salir) y pulsa Reintentar.
 en.StillBusy=MirrorBridge.exe is still in use. Close every MirrorBridge window, then click Retry.
 es.StillBusy=MirrorBridge.exe sigue en uso. Cierra todas las ventanas de MirrorBridge y pulsa Reintentar.
+en.NewerInstalled=MirrorBridge %1 is installed, newer than this installer (%2). Nothing was changed.
+es.NewerInstalled=Ya está instalado MirrorBridge %1, más nuevo que este instalador (%2). No se cambió nada.
+en.UpdateFrom=Update MirrorBridge %1 to %2 (your settings and TV pairings stay)
+es.UpdateFrom=Actualizar MirrorBridge %1 a %2 (tus ajustes y emparejamientos con la TV se conservan)
+en.Reinstall=Install MirrorBridge %1 again over the installed copy (a repair; settings stay)
+es.Reinstall=Volver a instalar MirrorBridge %1 sobre la copia instalada (una reparación; los ajustes se conservan)
+en.UpdateButton=&Update
+es.UpdateButton=&Actualizar
 en.StartApp=Start MirrorBridge
 es.StartApp=Abrir MirrorBridge
 
@@ -161,9 +169,43 @@ begin
   Result := FileIsFree(FileName);
 end;
 
+const
+  UninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{8F1C2D7A-4B3E-4E59-9C1A-6D2B5E7F9A10}_is1';
+
+var
+  InstalledVersion: String;
+
+{ The version installed before (its uninstall entry), or '' when MirrorBridge is not installed. Installing
+  over it is an update in place: the same AppId, so the same folder (UsePreviousAppDir), never a second copy. }
+function PreviousVersion: String;
+begin
+  if not RegQueryStringValue(HKCU, UninstallKey, 'DisplayVersion', Result) then
+    Result := '';
+end;
+
+{ -1, 0 or 1 as A is older than, the same as or newer than B (X.Y.Z); 0 when either does not parse. }
+function CompareVersions(const A, B: String): Integer;
+var
+  PA, PB: Int64;
+begin
+  Result := 0;
+  if StrToVersion(A, PA) and StrToVersion(B, PB) then
+    Result := ComparePackedVersion(PA, PB);
+end;
+
 function InitializeSetup: Boolean;
 begin
   Result := True;
+  InstalledVersion := PreviousVersion;
+  if InstalledVersion <> '' then
+    Log('MirrorBridge ' + InstalledVersion + ' is installed: this updates it in place');
+  { Never put an older version over a newer one (a stale download, an old update): /ALLOWDOWNGRADE to force it. }
+  if (InstalledVersion <> '') and (CompareVersions(InstalledVersion, '{#AppVersion}') > 0) and not HasParam('/ALLOWDOWNGRADE') then
+  begin
+    SuppressibleMsgBox(FmtMessage(CustomMessage('NewerInstalled'), [InstalledVersion, '{#AppVersion}']), mbInformation, MB_OK, IDOK);
+    Result := False;
+    Exit;
+  end;
   if HasParam('/UPDATE') then
     WaitForAppToQuit(90);
   { By hand, or an update whose MirrorBridge did not quit: ask (silent, the answer is Cancel). }
@@ -189,6 +231,27 @@ begin
       Result := CustomMessage('StillBusy');
       Exit;
     end;
+end;
+
+{ Installed already: the last page says Update, and what it updates from. }
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if (CurPageID = wpReady) and (InstalledVersion <> '') then
+    WizardForm.NextButton.Caption := CustomMessage('UpdateButton');
+end;
+
+function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo, MemoTypeInfo, MemoComponentsInfo,
+  MemoGroupInfo, MemoTasksInfo: String): String;
+begin
+  Result := '';
+  if InstalledVersion = '' then
+    Result := MemoDirInfo
+  else if CompareVersions(InstalledVersion, '{#AppVersion}') = 0 then
+    Result := FmtMessage(CustomMessage('Reinstall'), ['{#AppVersion}']) + NewLine + NewLine + MemoDirInfo
+  else
+    Result := FmtMessage(CustomMessage('UpdateFrom'), [InstalledVersion, '{#AppVersion}']) + NewLine + NewLine + MemoDirInfo;
+  if MemoTasksInfo <> '' then
+    Result := Result + NewLine + NewLine + MemoTasksInfo;
 end;
 
 { Someone who had Start with Windows on for a copy elsewhere (the exe run from Downloads) now gets

@@ -281,6 +281,8 @@ class TrayMenu(QObject):
         self._action(sub, tr("update_checking") if u.busy == "checking" else tr("update_check_now"),
                      lambda: u.check(by_hand=True), enabled=not u.busy)
         self._action(sub, tr("update_notes"), u.open_notes)
+        if u.portable():  # a copy run from Downloads: put it on the PC, or update the copy installed there
+            self._action(sub, tr("install_here"), u.install_here, enabled=not u.busy)
         sub.addSeparator()
         self._action(sub, tr("update_auto"), lambda on: self.c.update_settings(check_updates=on),
                      checkable=True, checked=s.check_updates)

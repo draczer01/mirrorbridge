@@ -79,10 +79,45 @@ class Updates(QObject):
 
     # -- installing --------------------------------------------------------
 
+    @staticmethod
+    def portable() -> bool:
+        """This is MirrorBridge.exe run from elsewhere than where the installer puts it."""
+        return update.can_install() and not update.is_installed_copy()
+
+    def install_here(self) -> None:
+        """More options > Updates > Install on this PC, for a copy run from Downloads: this version's
+        installer (or a newer one's), which updates an installed copy in place."""
+        if self.busy:
+            return
+        self.busy = "checking"
+        self.changed.emit()
+        prereleases = self.c.settings.update_prereleases
+
+        def find():
+            return update.for_install(update.fetch_releases(), __version__, prereleases)
+
+        def found(release) -> None:
+            self.busy = ""
+            self.changed.emit()
+            if release is None:
+                self.c.notify.emit(APP_NAME, tr("update_check_failed", reason=tr("install_not_published")), True)
+                return
+            self._download_and_run(release)
+
+        def failed(exc: BaseException) -> None:
+            self.busy = ""
+            self.changed.emit()
+            self.c.notify.emit(APP_NAME, tr("update_check_failed", reason=str(exc)), True)
+
+        self.c.run_blocking(find, on_ok=found, on_err=failed)
+
     def install(self) -> None:
         release = self.available
         if release is None or self.busy:
             return
+        self._download_and_run(release)
+
+    def _download_and_run(self, release: update.Release) -> None:
         if not update.can_install():
             QDesktopServices.openUrl(QUrl(release.page))
             return

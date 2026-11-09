@@ -3,7 +3,8 @@
 #   1. install silently, as by hand, and check the installed exe and its uninstall entry;
 #   2. install again as an update (/UPDATE) while MirrorBridge runs: the installer must wait for
 #      it to quit instead of failing or leaving the old exe;
-#   3. uninstall, and check that the program folder and its uninstall entry are gone.
+#   3. an installer older than the installed version changes nothing (no downgrade over a newer one);
+#   4. uninstall, and check that the program folder and its uninstall entry are gone.
 #   .\packaging\test_installer.ps1 build\installer\MirrorBridge-Setup-0.4.0.exe
 param([Parameter(Mandatory = $true)][string]$Setup)
 $ErrorActionPreference = "Stop"
@@ -71,7 +72,22 @@ $now = (Get-ItemProperty -Path $run -Name MirrorBridge).MirrorBridge
 if ($now -ne "`"$exe`"") { throw "After the update, the Run value is '$now', not the installed exe" }
 Write-Host "2. The update waited for MirrorBridge to quit, then installed, and Start with Windows starts the installed exe"
 
-# 3. Uninstall (unins000.exe hands over to a copy of itself in TEMP and returns at once).
+# Installing over an installed copy updates it in place: still one MirrorBridge in Windows' Apps list.
+$entries = @(Get-ChildItem "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall" |
+    Where-Object { (Get-ItemProperty $_.PSPath).DisplayName -like "MirrorBridge*" })
+if ($entries.Count -ne 1) { throw "There are $($entries.Count) MirrorBridge entries in Apps after the update, not 1" }
+
+# 3. A newer version installed (as the uninstall entry says): this older installer must refuse.
+Set-ItemProperty -Path $key -Name DisplayVersion -Value "99.0.0"
+$before = (Get-FileHash $exe).Hash
+$old = Start-Process -FilePath $Setup -PassThru -Wait -ArgumentList @(
+    "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/LOG=$logs\setup-3.log")
+if ($old.ExitCode -eq 0) { throw "An older installer went over MirrorBridge 99.0.0 (exit code 0)" }
+if ((Get-FileHash $exe).Hash -ne $before) { throw "An older installer replaced the newer exe" }
+Set-ItemProperty -Path $key -Name DisplayVersion -Value $version
+Write-Host "3. An older installer left the newer version alone (exit code $($old.ExitCode))"
+
+# 4. Uninstall (unins000.exe hands over to a copy of itself in TEMP and returns at once).
 $uninstaller = Join-Path $dir "unins000.exe"
 Start-Process -FilePath $uninstaller -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -Wait
 $deadline = (Get-Date).AddSeconds(90)
@@ -82,4 +98,4 @@ if ((Get-ItemProperty -Path $run -Name MirrorBridge -ErrorAction SilentlyContinu
     throw "Uninstalling left the Start with Windows Run value"
 }
 if ($hadRun) { Set-ItemProperty -Path $run -Name MirrorBridge -Value $hadRun }
-Write-Host "3. Uninstalled (Start with Windows too)"
+Write-Host "4. Uninstalled (Start with Windows too)"
