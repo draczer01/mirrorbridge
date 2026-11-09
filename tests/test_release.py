@@ -610,8 +610,9 @@ def _fake_gpg(monkeypatch, stdout: str = GOOD_SIGNATURE, returncode: int = 0) ->
         # The keyring and the home folder are given relative to the folder gpg runs in, with no drive:
         # Git for Windows' gpgv reads "C:/..." there as a URL, or as a path relative to its own folder.
         name, home = args[args.index("--keyring") + 1], args[args.index("--homedir") + 1]
-        assert name.startswith(("./", "../")) and ":" not in name + home and "\\" not in name, (name, home)
-        keyring = Path(name).read_bytes()
+        files = args[-2:]
+        assert all(arg.startswith("./") and ":" not in arg and "\\" not in arg for arg in [name, home, *files]), args
+        keyring = (Path(kwargs["cwd"]) / name).read_bytes()
         calls.append({"args": args, "keyring": keyring})
         return subprocess.CompletedProcess(args, returncode, stdout, "gpgv: Signature made ...\n")
 

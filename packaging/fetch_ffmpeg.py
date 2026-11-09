@@ -265,17 +265,6 @@ def find_gpg() -> str | None:
     return None
 
 
-def _relative(path: Path) -> str:
-    """path as gpg should be given it: relative to this folder when it can be (no drive letter, which
-    Git for Windows' gpg misreads in a keyring), with forward slashes; "./" first, so a keyring name
-    is never taken for a file in the home folder."""
-    try:
-        text = Path(os.path.relpath(path)).as_posix()
-    except ValueError:  # another drive
-        return path.as_posix()
-    return text if text.startswith(("./", "../")) else f"./{text}"
-
-
 def verify_signature(data: Path, signature: Path, fingerprint: str, key: Path = KEY, gpg: str | None = None) -> None:
     """Stops unless signature is a good signature of data by the key with that fingerprint."""
     gpg = gpg or find_gpg()
@@ -285,16 +274,17 @@ def verify_signature(data: Path, signature: Path, fingerprint: str, key: Path = 
     with tempfile.TemporaryDirectory(dir=data.parent, prefix=".gpg-") as home:
         keyring = Path(home) / "ffmpeg-release-key.gpg"
         keyring.write_bytes(dearmor(key.read_text(encoding="ascii")))
-        # Forward slashes: Git for Windows' gpg takes C:/... for the files it checks, but not for its
-        # keyring: as a --keyring, "C:/..." is a URL with the scheme "C" ("invalid key resource URL"),
-        # and a bare name is joined to a --homedir of C:/... as if that were relative
-        # ("/d/a/repo/C:/Users/..."). Relative paths with forward slashes work, as for the tarball: so
-        # the home folder is made next to the tarball, and both are given relative to this folder.
-        home_arg, keyring_arg = _relative(Path(home)), _relative(keyring)
-        args = [gpg, "--homedir", home_arg, "--status-fd", "1", "--keyring", keyring_arg]
+        # Git for Windows' gpgv misreads a keyring given with a drive letter: as a --keyring, "C:/..." is
+        # a URL with the scheme "C" ("invalid key resource URL"), and a bare name is joined to a
+        # --homedir of C:/... as if that were relative ("/d/a/repo/C:/Users/..."). So gpg runs in the
+        # tarball's folder, where the home folder was made, and is given every path relative to it.
+        folder, home_name = data.parent, Path(home).name
+        args = [gpg, "--homedir", f"./{home_name}", "--status-fd", "1", "--keyring", f"./{home_name}/{keyring.name}"]
         if not Path(gpg).name.lower().startswith("gpgv"):  # gpg: only that keyring, which is trusted as pinned
             args += ["--batch", "--no-default-keyring", "--trust-model", "always", "--verify"]
-        result = subprocess.run(args + [signature.as_posix(), data.as_posix()], capture_output=True,
+        if signature.parent.resolve() != folder.resolve():
+            raise SystemExit(f"{signature} is not next to {data}")
+        result = subprocess.run(args + [f"./{signature.name}", f"./{data.name}"], cwd=folder, capture_output=True,
                                 encoding="utf-8", errors="replace", timeout=600, check=False)
     status = [line.split()[1:] for line in result.stdout.splitlines() if line.startswith("[GNUPG:] ")]
     signers = {fields[-1].upper() for fields in status if fields and fields[0] == "VALIDSIG"}  # primary key
