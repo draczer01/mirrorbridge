@@ -632,7 +632,7 @@ class MirrorSession:
     async def _start(self) -> None:
         loop = asyncio.get_running_loop()
         s = self.settings
-        if self.target.needs_fairplay:
+        if self.target.fairplay_off:
             raise needs_fairplay(self.target.name)
         self._stopping = self._timing_probed = self._timing_quiet = self._dropped_at_once = False
         self._first_sent_ns = self._sound_first_ns = None
@@ -1208,7 +1208,7 @@ class MirrorSession:
     def _sound_wanted(self, output: bool = True) -> tuple[bool, str]:
         """Whether this session sends the PC's sound, and why not: for now only when asked for
         (sound.SOUND_BY_DEFAULT), never for the probe, never with Include computer sound off,
-        and not once the TV closed the session when it started (_retry_without_sound).
+        not to an Apple TV (FairPlay's audio cipher), and not once the TV closed the session when it started (_retry_without_sound).
         `output`: also that Windows has a sound output to record (_loopback, from _start)."""
         knobs = self._knobs
         if self.sound_asked is False:
@@ -1217,6 +1217,8 @@ class MirrorSession:
             return False, "Include computer sound is off"
         if knobs.enable is False:
             return False, f"{sound.ENV}=0"
+        if self.target.needs_fairplay:  # its audio wants FairPlay's AES-CBC, which is not written yet
+            return False, "an Apple TV's sound needs FairPlay's audio cipher, which MirrorBridge does not have yet"
         forced = self.sound_asked is True  # mirror --sound, --beep, --sound-trial
         if not (forced or knobs.enable or sound.SOUND_BY_DEFAULT):
             return False, f"not turned on yet (mirror --sound, or {sound.ENV}=1)"

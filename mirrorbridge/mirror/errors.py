@@ -56,9 +56,19 @@ def message_of(ex: BaseException) -> str:
 def needs_fairplay(device: str) -> MirrorError:
     """An Apple TV or a Mac: their screen mirroring is FairPlay's."""
     return MirrorError(Text(
-        "mirror_fairplay", "{device} needs FairPlay for screen mirroring (an Apple TV or a Mac), which MirrorBridge "
-        "does not have yet. Cast to it as usual instead.", device=device,
+        "mirror_fairplay", "{device} needs FairPlay for screen mirroring (an Apple TV or a Mac), which is experimental "
+        "and off in MirrorBridge: turn it on with More options > Debug > Mirror to Apple TVs. "
+        "Cast to it as usual instead.", device=device,
     ), step="classify")
+
+
+def fairplay_failed(device: str, step: str, answer: str, code: Optional[int] = None) -> MirrorError:
+    """The FairPlay handshake an Apple TV or a Mac wants before mirroring did not go through."""
+    return MirrorError(Text(
+        "mirror_fairplay_failed", "{device} did not complete the FairPlay handshake that screen mirroring to an "
+        "Apple TV needs ({step}: {answer}). Please report this TV, with mirrorbridge.log; casting still works.",
+        device=device, step=step, answer=answer,
+    ), step=step, code=code, steps={step: answer})
 
 
 def no_timing(port: int, steps: dict) -> MirrorError:

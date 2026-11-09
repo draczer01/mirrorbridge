@@ -1136,6 +1136,7 @@ class _StubChannel:
 
     local_ip, remote_ip = "192.168.1.10", "192.168.1.20"
     closed = out_of_step = False
+    fairplay = None  # not an Apple TV
 
     def __init__(self, answers=(), headers=None) -> None:
         self.answers = list(answers)

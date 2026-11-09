@@ -49,10 +49,10 @@ _STRINGS: dict[str, dict[str, str]] = {
               "AirPlay 2 de otras marcas ya emparejadas (TCL, Roku, Samsung, LG…); todavía sin sonido.",
     },
     "mirror_apple_tv": {
-        "en": "Screen mirroring to Apple TVs and Macs is coming in a later version. For now, cast to them with "
-              "Start casting.",
-        "es": "La duplicación de pantalla en Apple TV y Mac llegará en una versión futura. Por ahora, transmite a "
-              "ellos con Transmitir.",
+        "en": "Screen mirroring to Apple TVs and Macs is experimental and off: turn it on with {menu_apple_tv}. "
+              "For now, cast to them with Start casting.",
+        "es": "La duplicación de pantalla en Apple TV y Mac es experimental y está apagada: actívala con "
+              "{menu_apple_tv}. Por ahora, transmite a ellos con Transmitir.",
     },
     "mirror_pair_first": {
         "en": "Pair with this TV first: {menu_pair}.",
@@ -174,6 +174,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     "debug_scaler_gfx": {"en": "Windows capture on the graphics card (test)",
                          "es": "Captura de Windows en la tarjeta de video (prueba)"},
     "debug_on_arrival": {"en": "Show frames on arrival (test)", "es": "Mostrar cuadros al llegar (prueba)"},
+    "debug_apple_tv": {
+        "en": "Mirror to Apple TVs (FairPlay, experimental)",
+        "es": "Duplicar en Apple TV (FairPlay, experimental)",
+    },
     "language_menu": {"en": "Language", "es": "Idioma"},
     "quit": {"en": "Quit", "es": "Salir"},
     # Notifications
@@ -526,10 +530,16 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "{device} no dijo qué puede mostrar (GET /info: {answer}).",
     },
     "mirror_fairplay": {
-        "en": "{device} needs FairPlay for screen mirroring (an Apple TV or a Mac), which MirrorBridge does not "
-              "have yet. Cast to it as usual instead.",
-        "es": "{device} necesita FairPlay para duplicar la pantalla (es un Apple TV o un Mac), y MirrorBridge "
-              "todavía no lo tiene. Transmite como siempre en su lugar.",
+        "en": "{device} needs FairPlay for screen mirroring (an Apple TV or a Mac), which is experimental and off "
+              "in MirrorBridge: turn it on with {menu_apple_tv}. Cast to it as usual instead.",
+        "es": "{device} necesita FairPlay para duplicar la pantalla (es un Apple TV o un Mac), que en MirrorBridge es "
+              "experimental y está apagado: actívalo con {menu_apple_tv}. Transmite como siempre en su lugar.",
+    },
+    "mirror_fairplay_failed": {
+        "en": "{device} did not complete the FairPlay handshake that screen mirroring to an Apple TV needs "
+              "({step}: {answer}). Please report this TV, with mirrorbridge.log; casting still works.",
+        "es": "{device} no completó el saludo FairPlay que necesita la duplicación de pantalla en un Apple TV "
+              "({step}: {answer}). Reporta esta TV con mirrorbridge.log; transmitir sigue funcionando.",
     },
     "mirror_no_timing": {
         "en": "The TV never asked MirrorBridge for the time (UDP port {port}), so it cannot show the picture. "
@@ -875,10 +885,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "probe_skipped": {"en": "skipped: {why}", "es": "omitida: {why}"},
     "probe_mirror_fairplay": {
-        "en": "the TV needs FairPlay for screen mirroring, as Apple TVs and Macs do, which MirrorBridge does not "
-              "have yet",
-        "es": "la TV necesita FairPlay para duplicar la pantalla, como los Apple TV y los Mac, y MirrorBridge "
-              "todavía no lo tiene",
+        "en": "the TV needs FairPlay for screen mirroring, as Apple TVs and Macs do, which is experimental and off: "
+              "turn it on with {menu_apple_tv}",
+        "es": "la TV necesita FairPlay para duplicar la pantalla, como los Apple TV y los Mac, que es experimental y "
+              "está apagado: actívalo con {menu_apple_tv}",
     },
     "probe_mirror_unsupported": {
         "en": "the TV does not say that it takes screen mirroring",
@@ -1090,6 +1100,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "En una Apple TV tu pantalla aparece con unos segundos de retraso, con sonido. La duplicación al "
               "instante para Apple TV llegará en una versión futura.",
     },
+    "ui_hint_apple_failed": {
+        "en": "On this Apple TV your screen appears a few seconds behind, with sound, because instant mirroring "
+              "did not work on it last time.",
+        "es": "En esta Apple TV tu pantalla aparece con unos segundos de retraso, con sonido, porque la "
+              "duplicación al instante no funcionó en ella la última vez.",
+    },
     "ui_hint_cast": {
         "en": "Your screen appears on this TV a few seconds behind, with sound.",
         "es": "Tu pantalla aparece en esta TV con unos segundos de retraso, con sonido.",
@@ -1192,6 +1208,7 @@ def _menu_paths() -> dict[str, str]:
         "menu_720p": (_item("source_menu"), _item("extend_size"), "720p"),
         "menu_probe": (_item("more"), _item("probe")),
         "menu_mirror": (_item("show_no_device"),),
+        "menu_apple_tv": (_item("more"), _item("debug_menu"), _item("debug_apple_tv")),
     }
     return {name: " > ".join(words) for name, words in paths.items()}
 

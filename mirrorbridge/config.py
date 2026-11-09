@@ -44,7 +44,7 @@ CHOICES: dict[str, tuple] = {
     "mirror_keyframes": (0, 10, 2),  # in the Debug menu's order (ffmpeg.MIRROR_KEYFRAME_CHOICES)
     "mirror_scaler": ("auto", "cpu", "gfx"),  # in the Debug menu's order (gui.tray.SCALERS)
 }
-CHECKED = set(CHOICES) | {"mirror_encoder_extra", "mirror_sharp"}
+CHECKED = set(CHOICES) | {"mirror_encoder_extra", "mirror_sharp", "mirror_apple_tv"}
 
 
 @dataclass
@@ -95,6 +95,8 @@ class Settings:
     mirror_scaler: str = "auto"
     mirror_on_arrival: bool = False  # ask the TV to show each frame as it comes, not at its time
     mirror_encoder_extra: str = ""  # settings.json only: FFmpeg options after the encoder's, for experiments
+    # Apple TVs and Macs: mirror with FairPlay (experimental, not yet seen working on one); off, they are cast to
+    mirror_apple_tv: bool = False
 
     # App
     language: str = "en"  # a gui.i18n.LANGUAGES code; any other ("" once meant "as Windows") is English

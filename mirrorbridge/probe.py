@@ -82,9 +82,9 @@ def mirroring_skipped(device: Device) -> Optional[Text]:
     target = Target.from_device(device)
     if not target.offers_mirroring:
         return Text("probe_mirror_unsupported", "the TV does not say that it takes screen mirroring")
-    if target.needs_fairplay:
+    if target.fairplay_off:
         return Text("probe_mirror_fairplay", "the TV needs FairPlay for screen mirroring, as Apple TVs and Macs do, "
-                    "which MirrorBridge does not have yet")
+                    "which is experimental and off: turn it on with More options > Debug > Mirror to Apple TVs")
     if not target.credentials:  # pair-verify keys the session and the video
         return Text("probe_mirror_unpaired", "MirrorBridge is not paired with this TV, and screen mirroring needs "
                     "it: use Device > Pair with PIN first")

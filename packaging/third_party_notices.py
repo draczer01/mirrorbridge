@@ -40,6 +40,9 @@ ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "build" / "pyinstaller" / "MirrorBridge"
 EXE = ROOT / "dist" / "MirrorBridge.exe"
 GNU_LICENSES = Path(__file__).resolve().parent / "licenses"  # GNU texts some packages name but lack
+FAIRPLAY = ROOT / "mirrorbridge" / "fairplay"  # MirrorBridge's port of doubletake's FairPlay SAP: LGPL-3.0
+FAIRPLAY_TEXTS = ("LICENSE", "COPYING.GPL")
+FAIRPLAY_FOLDER = "doubletake-fairplay"
 SOURCE_URL = "https://github.com/draczer01/mirrorbridge"
 FFMPEG_IN_EXE = "ffmpeg/ffmpeg.exe"  # where MirrorBridge.spec puts it
 # PyInstaller's launcher, loader and runtime hooks are inside every exe it makes; the rest of
@@ -564,6 +567,16 @@ def render(notices: Notices, app_version: str) -> str:
             "exe uses yours.") + [""]
         sections.append(("Qt for Python and the other LGPL libraries", lines))
 
+    lines = _paragraph("Screen mirroring to Apple TVs uses FairPlay SAP, the handshake Apple's receivers ask of a "
+                       "sender. MirrorBridge's code for it (the mirrorbridge.fairplay package) is a Python port of "
+                       "the Go code of doubletake by Omar Roth and its contributors "
+                       "(https://github.com/omarroth/doubletake), and like doubletake it is under the LGPL-3.0, not "
+                       "MIT. Licence texts: licenses/" + FAIRPLAY_FOLDER + "/. Its source is in MirrorBridge's "
+                       f"repository ({SOURCE_URL}, folder mirrorbridge/fairplay); to use MirrorBridge with a changed "
+                       "version of it, change that folder and rebuild MirrorBridge.exe as described above for the "
+                       "LGPL libraries.") + [""]
+    sections.append(("FairPlay SAP, ported from doubletake (LGPL-3.0)", lines))
+
     lines = _entry(notices.cpython)
     if notices.natives:
         lines += _paragraph("Libraries that come with this Python:") + [""]
@@ -624,6 +637,9 @@ def write(notices: Notices, out: Path, app_version: str) -> Path:
             dest = licenses / component.folder / name
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, dest)
+    (licenses / FAIRPLAY_FOLDER).mkdir(parents=True, exist_ok=True)
+    for name in FAIRPLAY_TEXTS:
+        shutil.copyfile(FAIRPLAY / name, licenses / FAIRPLAY_FOLDER / name)
     path = out / "THIRD-PARTY-NOTICES.txt"
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(render(notices, app_version))

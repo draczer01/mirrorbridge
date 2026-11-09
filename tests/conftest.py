@@ -1,5 +1,5 @@
 """For every test: no MIRRORBRIDGE_MIRROR_SOUND switch from the environment of the machine that
-runs them, and no mirroring session that looks for this PC's sound output or mutes its real
+runs them, mirroring to Apple TVs off (as it is by default: the apple_tv fixture turns it on), and no mirroring session that looks for this PC's sound output or mutes its real
 speakers (a session finds no output to record, and mutes a RecordingSpeakers). A test marked
 real_sound keeps the real ones."""
 
@@ -43,3 +43,19 @@ def no_real_sound(request, monkeypatch):
 
         monkeypatch.setattr(mirror_session.system_audio, "loopback_available", lambda: (False, "tests"))
         monkeypatch.setattr(mirror_session, "MutedSpeakers", RecordingSpeakers)
+
+
+@pytest.fixture(autouse=True)
+def apple_tv_mirroring_off(monkeypatch):
+    from mirrorbridge.mirror import control
+
+    monkeypatch.delenv(control.APPLE_TV_ENV, raising=False)
+    monkeypatch.setattr(control, "_apple_tv_allowed", False)
+
+
+@pytest.fixture
+def apple_tv_on(monkeypatch):
+    """Mirroring to Apple TVs and Macs with FairPlay turned on, as MIRRORBRIDGE_APPLE_TV=1 does."""
+    from mirrorbridge.mirror import control
+
+    monkeypatch.setenv(control.APPLE_TV_ENV, "1")
