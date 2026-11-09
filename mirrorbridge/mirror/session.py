@@ -140,7 +140,7 @@ from .errors import MirrorError, answer_of, data_closed, data_refused, needs_fai
 from .flv import CONFIG, FRAME
 from .h264 import TRAILERS, avcc_record, frame_nals, is_idr, join_avcc, parse_avcc, parse_sps, split_avcc
 from .audiopackets import SPF, SR, choose_format, ms_to_samples
-from .negotiation import NTP, PTP, AudioOffer, Established, Feedback, Negotiator
+from .negotiation import NTP, PTP, AudioOffer, Established, Feedback, Negotiator, apple_tv_offer
 from .packets import ON_ARRIVAL, VideoCipher, codec_packet, video_key
 from .sound import FAILED, AudioControl, MirrorSound, SoundKnobs
 from .source import (DESKTOP, STDERR_LINES, TEST_PATTERN, FFmpegSource, FrameQueue, Unit, build_command,
@@ -1208,7 +1208,8 @@ class MirrorSession:
     def _sound_wanted(self, output: bool = True) -> tuple[bool, str]:
         """Whether this session sends the PC's sound, and why not: for now only when asked for
         (sound.SOUND_BY_DEFAULT), never for the probe, never with Include computer sound off,
-        not to an Apple TV (FairPlay's audio cipher), and not once the TV closed the session when it started (_retry_without_sound).
+        and not once the TV closed the session when it started (_retry_without_sound). An Apple TV
+        gets it too, once mirroring to Apple TVs is turned on (_audio_offer).
         `output`: also that Windows has a sound output to record (_loopback, from _start)."""
         knobs = self._knobs
         if self.sound_asked is False:
@@ -1217,8 +1218,6 @@ class MirrorSession:
             return False, "Include computer sound is off"
         if knobs.enable is False:
             return False, f"{sound.ENV}=0"
-        if self.target.needs_fairplay:  # its audio wants FairPlay's AES-CBC, which is not written yet
-            return False, "an Apple TV's sound needs FairPlay's audio cipher, which MirrorBridge does not have yet"
         forced = self.sound_asked is True  # mirror --sound, --beep, --sound-trial
         if not (forced or knobs.enable or sound.SOUND_BY_DEFAULT):
             return False, f"not turned on yet (mirror --sound, or {sound.ENV}=1)"
@@ -1243,10 +1242,13 @@ class MirrorSession:
         _LOGGER.info("Sound format: %s", why)
         self.report.steps["sound"] = why
         gap_ms = knobs.gap_ms if knobs.gap_ms is not None else max(sound.MIN_GAP_MS, plan.lead_ms + knobs.delay_ms)
-        return AudioOffer(fmt, knobs.shape, ms_to_samples(gap_ms),
-                          None if knobs.lat_min_ms is None else ms_to_samples(knobs.lat_min_ms),
-                          None if knobs.lat_max_ms is None else ms_to_samples(knobs.lat_max_ms),
-                          knobs.is_media, knobs.redundant, knobs.ports)
+        offer = AudioOffer(fmt, knobs.shape, ms_to_samples(gap_ms),
+                           None if knobs.lat_min_ms is None else ms_to_samples(knobs.lat_min_ms),
+                           None if knobs.lat_max_ms is None else ms_to_samples(knobs.lat_max_ms),
+                           knobs.is_media, knobs.redundant, knobs.ports)
+        if self.target.needs_fairplay:
+            offer = apple_tv_offer(offer, self.target)
+        return offer
 
     async def _start_sound(self, est: Established, channel: ControlChannel) -> None:
         """The PC's sound to the TV, if it is wanted and the TV took the type-96 stream with its

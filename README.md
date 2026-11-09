@@ -370,15 +370,23 @@ pair-verify comes the FairPlay handshake (`POST /fp-setup`, m1 to m4), and the v
 FairPlay's key mixed with the pair-verify secret. An Apple TV that turns the saved pairing down
 for mirroring gets one more try with transient pairing (no PIN, where the Apple TV lets everyone
 on the network AirPlay to it). If it fails, the main button casts to that Apple TV from then on.
-No sound yet on an Apple TV (its audio needs FairPlay's cipher too). `MIRRORBRIDGE_FP_ROOT=1`
-also puts the FairPlay key (ekey, eiv) in the SETUP, a test switch for receivers that want it
-there. Please send `mirrorbridge.log` after trying it.
+The PC's sound goes too, whenever it would to another TV (*Include computer sound*, and the
+sound switch for Mirror screen). It is sealed as doubletake, the one open-source sender seen
+mirroring to real Apple TVs, seals it on a pair-verified connection: ChaCha20-Poly1305 with a
+random key in the audio stream's `shk`, the stream described in the `streamConnections` layout
+when the Apple TV advertises feature bit 59 (and asked again with `controlPort` if it says no).
+If the Apple TV closes the session when the sound starts, MirrorBridge goes on without sound
+and remembers it for that TV, as for any other. Test switches for the first tries:
+`MIRRORBRIDGE_FP_AUDIO=cbc` seals the sound with FairPlay's AES-128-CBC key instead (with
+ekey/eiv in the SETUP, as older senders do), and `MIRRORBRIDGE_FP_AUDIO_LAYOUT=controlPort` or
+`=streamConnections` picks the layout. `MIRRORBRIDGE_FP_ROOT=1` also puts the FairPlay key
+(ekey, eiv) in the SETUP, a test switch for receivers that want it there. Please send
+`mirrorbridge.log` after trying it.
 
 Known limitations for now:
 
-* **No sound** on an Apple TV: its mirroring audio is encrypted with FairPlay's AES-CBC key,
-  which MirrorBridge does not do yet, so the session goes on without sound even with
-  `mirror --sound`.
+* **Sound not yet heard on a real Apple TV**: it follows doubletake's way of sending it, and
+  the fake Apple TV in the tests opens and decodes it, but no Apple TV has played it yet.
 * **No AirPlay password**: an Apple TV that asks for a password (*Require Password* in its
   AirPlay settings, answered with 470) is not supported. MirrorBridge tries transient pairing
   once and then casts. Use *Allow Access: Everyone on the Same Network* or *Anyone on the Same

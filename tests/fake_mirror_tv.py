@@ -18,7 +18,10 @@ kind TvProfile.ptp names (fake_ptp.py) on the ports ptp_ports() gives.
 
 A type-96 (screen audio) stream gets two UDP ports of its own (AudioReceiver): the data port
 opens each packet as shairport-sync does, with the SETUP's shk, decodes it (ALAC verbatim frames
-or PCM), and asks for lost ones on the control port, where the syncs come in.
+or PCM), and asks for lost ones on the control port, where the syncs come in. A fake Apple TV
+also opens packets sealed with FairPlay's AES-CBC (no shk: the key from the session's ekey,
+mixed with the pair-verify secret, and its eiv), as UxPlay does, and takes the stream in the
+streamConnections layout (TvProfile.audio_layouts), answering its ports in the same layout.
 
 It reads the wire on its own (struct offsets, HKDF with pyatv's hkdf_expand, cryptography's
 ChaCha20-Poly1305), not with mirrorbridge.mirror.packets or audiopackets, so that the two sides
@@ -40,6 +43,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from pyatv.auth.hap_channel import AbstractHAPChannel
 from pyatv.auth.hap_session import HAPSession
@@ -115,6 +119,8 @@ class TvProfile:
     record_headers: dict = field(default_factory=dict)  # more headers in RECORD's answer, e.g. Audio-Latency
     feedback_body: Optional[dict] = None  # POST /feedback's answer (None: empty, as TCL's TVs answer)
     answer_volume: bool = True  # answer SET_PARAMETER (False: never)
+    # The type-96 layouts taken ("controlPort", "streamConnections"); another one is refused with 400.
+    audio_layouts: tuple = ("controlPort", "streamConnections")
 
 
 TCL = TvProfile()
@@ -250,7 +256,7 @@ class AudioReceiver:
     """The TV's end of one type-96 stream: a data port and a control port on 127.0.0.1."""
 
     def __init__(self, profile: TvProfile, stream: dict, session: Optional[dict] = None,
-                 on_first: Optional[Callable[[], None]] = None) -> None:
+                 on_first: Optional[Callable[[], None]] = None, aes: Optional[tuple[bytes, bytes]] = None) -> None:
         self.profile = profile
         self.received = AudioReceived(stream, dict(session or {}))
         self._on_first = on_first
@@ -259,6 +265,7 @@ class AudioReceiver:
         self._transports: list = []
         key = stream.get("shk")
         self._aead = ChaCha20Poly1305(key) if isinstance(key, bytes) and len(key) == 32 else None
+        self._aes = aes if self._aead is None else None  # (key, iv) from the session's ekey and eiv
 
     async def open(self, host: str = "127.0.0.1") -> AudioReceived:
         loop = asyncio.get_running_loop()
@@ -284,16 +291,22 @@ class AudioReceiver:
             return
         seq, rtp, ssrc = struct.unpack_from(">HII", data, 2)
         index = seq if self._highest is None else self._highest + ((seq - self._highest + 32768) & 0xFFFF) - 32768
-        if self._aead is None:
+        if self._aes is not None:  # as UxPlay: the whole blocks from the eiv each time, the rest in the clear
+            body = data[12:]
+            whole = len(body) // 16 * 16
+            decryptor = Cipher(algorithms.AES(self._aes[0]), modes.CBC(self._aes[1])).decryptor()
+            plain = decryptor.update(body[:whole]) + decryptor.finalize() + body[whole:]
+        elif self._aead is None:
             r.errors.append("no shk in the stream's SETUP to open packets with")
             return
-        try:  # as shairport-sync: the nonce is 4 zero bytes and the last 8, the additional data [4:12]
-            plain = self._aead.decrypt(b"\0" * 4 + data[-8:], data[12:-8], data[4:12])
-        except Exception:  # pylint: disable=broad-except
-            r.errors.append(f"packet {index} does not open")
-            return
-        if data[-8:] != struct.pack("<Q", index):
-            r.errors.append(f"packet {index} has the nonce {data[-8:].hex()}")
+        else:
+            try:  # as shairport-sync: the nonce is 4 zero bytes and the last 8, the additional data [4:12]
+                plain = self._aead.decrypt(b"\0" * 4 + data[-8:], data[12:-8], data[4:12])
+            except Exception:  # pylint: disable=broad-except
+                r.errors.append(f"packet {index} does not open")
+                return
+            if data[-8:] != struct.pack("<Q", index):
+                r.errors.append(f"packet {index} has the nonce {data[-8:].hex()}")
         try:
             pcm = parse_alac(plain) if r.stream.get("ct") == 2 else plain
         except ValueError as ex:
@@ -627,9 +640,15 @@ class _Handler(AirPlayServerAuth):
         answered = []
         for stream in streams:
             if stream.get("type") == 96:
+                layout = "streamConnections" if "streamConnections" in stream else "controlPort"
+                if layout not in p.audio_layouts:
+                    return self._answer(request, 400)
                 self.audio = True
+                aes = None
+                if self.tv.fp_raw_keys and "eiv" in self.mirror:
+                    aes = (fairplay.stream_key(self.tv.fp_raw_keys[-1], self.shared_key), self.mirror["eiv"])
                 receiver = AudioReceiver(p, stream, {k: v for k, v in self.mirror.items() if k != "streams"},
-                                         self._audio_started)
+                                         self._audio_started, aes)
                 audio = await receiver.open()
                 self.receivers.append(receiver)
                 self.tv.audios.append(audio)
@@ -640,6 +659,12 @@ class _Handler(AirPlayServerAuth):
                     del answer["controlPort"]
                 if not p.audio_answer_type:
                     del answer["type"]
+                if layout == "streamConnections" and "dataPort" in answer:
+                    connections = {"streamConnectionTypeRTP": {"streamConnectionKeyPort": answer.pop("dataPort")}}
+                    if "controlPort" in answer:
+                        connections["streamConnectionTypeRTCP"] = {
+                            "streamConnectionKeyPort": answer.pop("controlPort")}
+                    answer["streamConnections"] = connections
                 answered.append(answer)
             elif stream.get("type") == 110:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

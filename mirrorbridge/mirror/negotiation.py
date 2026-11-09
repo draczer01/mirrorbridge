@@ -47,12 +47,12 @@ import os
 import plistlib
 import secrets
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Optional
 
 from ..airplay_patch import format_steps
 from ..text import Text
-from .audiopackets import ALAC_44100, AudioCipher, AudioFormat, ChaChaShk, ms_to_samples
+from .audiopackets import ALAC_44100, AudioCipher, AudioFormat, ChaChaShk, FairPlayCbc, ms_to_samples
 from .control import (CONTROL_READ, CONTROL_SALT, CONTROL_WRITE, SENDER, SOURCE_VERSION, ControlChannel, Target,
                       decode_plist, sender_id)
 from .errors import ChannelClosed, MirrorError, NoAnswer, answer_of, refused
@@ -122,6 +122,11 @@ TIMESTAMP_INFO = ("SubSu", "BePxT", "AfPxT", "BefEn", "EmEnc")
 AUDIO_SHAPES = {"screen": (0, None), "minmax": (None, None), "apple": (3750, 3750), "media": (11025, 88200)}
 # The keys whose bytes a SETUP's DEBUG line leaves out (_redacted), wherever they are in it.
 SECRET_KEYS = frozenset({"shk", "shiv", "ekey", "eiv"})
+# How the type-96 dict names our control port: "controlPort" (what TCL's TVs take), or the
+# streamConnections dict Apple's senders use with receivers that advertise feature bit 59, as
+# doubletake does with Apple TVs (each of the two is tried again as the other if refused).
+LEGACY_LAYOUT, CONNECTIONS_LAYOUT = "controlPort", "streamConnections"
+FEATURE_STREAM_CONNECTIONS = 59
 
 
 @dataclass
@@ -155,6 +160,7 @@ class AudioOffer:
     # A new cipher for each attempt (its key goes into that attempt's SETUP): FairPlay TVs would
     # get one of their own here.
     cipher_factory: Callable[[Optional[ControlChannel]], AudioCipher] = ChaChaShk.for_channel
+    layout: str = LEGACY_LAYOUT  # LEGACY_LAYOUT or CONNECTIONS_LAYOUT
 
 
 @dataclass
@@ -246,6 +252,29 @@ def _redacted(value: Any) -> Any:
     return value
 
 
+# MIRRORBRIDGE_FP_AUDIO: how an Apple TV's sound is sealed. "chacha" (the default) as doubletake
+# seals it on a pair-verified connection; "cbc" FairPlay's AES-CBC with ekey/eiv in the session.
+FP_AUDIO_ENV = "MIRRORBRIDGE_FP_AUDIO"
+# MIRRORBRIDGE_FP_AUDIO_LAYOUT: "controlPort" or "streamConnections" in place of what bit 59 says.
+FP_AUDIO_LAYOUT_ENV = "MIRRORBRIDGE_FP_AUDIO_LAYOUT"
+
+
+def apple_tv_offer(offer: "AudioOffer", target: Target) -> "AudioOffer":
+    """The sound's offer for an Apple TV or a Mac (FairPlay): the streamConnections layout if it
+    advertises bit 59, and the cipher MIRRORBRIDGE_FP_AUDIO names (ChaChaShk unless it says cbc).
+    Every other TV keeps the offer as it is."""
+    layout = os.environ.get(FP_AUDIO_LAYOUT_ENV, "")
+    if layout not in (LEGACY_LAYOUT, CONNECTIONS_LAYOUT):
+        layout = CONNECTIONS_LAYOUT if target.has_feature(FEATURE_STREAM_CONNECTIONS) else LEGACY_LAYOUT
+    factory = offer.cipher_factory
+    if os.environ.get(FP_AUDIO_ENV, "").lower() == "cbc":
+        factory = FairPlayCbc.for_channel
+    _LOGGER.info("Sound to an Apple TV: %s layout, %s (%s, %s)", layout,
+                 "AES-128-CBC with FairPlay's key" if factory == FairPlayCbc.for_channel else "ChaCha20-Poly1305 (shk)",
+                 FP_AUDIO_LAYOUT_ENV, FP_AUDIO_ENV)
+    return replace(offer, layout=layout, cipher_factory=factory)
+
+
 def _port(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and 0 < value < 65536
 
@@ -267,6 +296,14 @@ def audio_answer(replies: list[dict], index: int, ports: Optional[tuple[int, int
         return entry if entry is not None else {}, ports, ""
     if entry is None:
         return None, None, "the TV did not answer the audio stream"
+    connections = entry.get("streamConnections")
+    if isinstance(connections, dict):  # an answer in the streamConnections layout
+        entry = dict(entry)
+        for key, kind in (("dataPort", "streamConnectionTypeRTP"), ("controlPort", "streamConnectionTypeRTCP")):
+            port = (connections.get(kind) or {}).get("streamConnectionKeyPort") \
+                if isinstance(connections.get(kind), dict) else None
+            if _port(port):
+                entry[key] = port
     if not _port(entry.get("dataPort")):
         return entry, None, "the TV named no port for the sound"
     if not _port(entry.get("controlPort")):
@@ -476,7 +513,8 @@ class Negotiator:
         high = offer.lat_max if offer.lat_max is not None else gap if high is None else high
         return gap, low, high
 
-    def _audio_stream(self, stream_id: int, plan: Plan, cipher: AudioCipher) -> dict:
+    def _audio_stream(self, stream_id: int, plan: Plan, cipher: AudioCipher,
+                      layout: Optional[str] = None) -> dict:
         """The screen-audio stream as self.audio asks for it, with the key `cipher` gives the TV.
         By default it is the stream as it was before it carried sound: ALAC, latencies 0 and the
         lead, usingScreen."""
@@ -504,6 +542,15 @@ class Negotiator:
             stream["isMedia"] = True
         if offer.redundant:
             stream["redundantAudio"] = offer.redundant
+        if (layout or offer.layout) == CONNECTIONS_LAYOUT:
+            # As Apple's senders (and doubletake) put it: the control port and whether the
+            # stream's shk seals the packets in streamConnections; not media, so that an Apple
+            # TV routes it as the screen's sound.
+            del stream["controlPort"]
+            stream.update(isMedia=False, supportsDynamicStreamID=True, streamConnections={
+                "streamConnectionTypeRTCP": {"streamConnectionKeyPort": self.audio_port},
+                "streamConnectionTypeRTP": {"streamConnectionKeyUseStreamEncryptionKey": "shk" in stream},
+            })
         return stream
 
     def _video_stream(self, stream_id: int, plan: Plan) -> dict:
@@ -579,7 +626,7 @@ class Negotiator:
                     addresses = [str(address) for address in peer["Addresses"]]
             self._answered(replies[-1])
             if audio and plan.ordering == CONTROL_FIRST:
-                replies.append(await self._setup("setup audio", uri, {"streams": [audio]}))
+                replies.append(await self._audio_setup_request(uri, audio, audio_id, plan, cipher))
                 self._answered(replies[-1])
             if audio or plan.ordering == CONTROL_FIRST:
                 replies.append(await self._setup("setup video", video_uri, {"streams": [video]}))
@@ -622,6 +669,20 @@ class Negotiator:
             timeline_id=(self.ptp_clock_id or 0) if plan.timing == PTP else 0, ptp_addresses=addresses,
             audio=sound, audio_note=note,
         )
+
+    async def _audio_setup_request(self, uri: str, audio: dict, stream_id: int, plan: Plan,
+                                   cipher: AudioCipher) -> dict:
+        """The type-96 stream's own SETUP (control-first). One in the streamConnections layout
+        that the TV refuses as a shape is asked again once in the controlPort layout."""
+        if self.audio.layout != CONNECTIONS_LAYOUT:
+            return await self._setup("setup audio", uri, {"streams": [audio]})
+        try:
+            return await self._setup("setup audio", uri, {"streams": [audio]}, first=True)
+        except _ShapeRefused as ex:
+            _LOGGER.info("The TV refused the audio stream in the streamConnections layout (%d): "
+                         "asking again with controlPort", ex.code)
+            legacy = self._audio_stream(stream_id, plan, cipher, LEGACY_LAYOUT)
+            return await self._setup("setup audio (controlPort)", uri, {"streams": [legacy]})
 
     def _audio_setup(self, replies: list[dict], plan: Plan, stream_id: int,
                      cipher: AudioCipher) -> tuple[Optional[AudioSetup], str]:
