@@ -306,7 +306,7 @@ class TrayMenu(QObject):
 
     def _mirror_menu(self, sub: QMenu) -> None:
         """Mirror screen settings, for the sessions after they are set; each shows what a session
-        would use, whatever a hand-edited settings.json holds. Choosing a Latency puts More options >
+        would use, whatever a hand-edited settings.json holds. Sharp slides is experimental. Choosing a Latency puts More options >
         Debug > TV wait back on Automatic, which would win over it."""
         s = self.c.settings
         levels = self._radio(sub, tr("mirror_latency"), [(tr("mirror_lat_" + level), level) for level in MIRROR_LEVELS],
@@ -319,6 +319,11 @@ class TrayMenu(QObject):
                                                           for f in MIRROR_FRAMERATES], fps, "mirror_framerate")
         rates.setToolTipsVisible(True)
         rates.actions()[MIRROR_FRAMERATES.index(0)].setToolTip(tr("mirror_fps_auto_hint"))
+        sub.addSeparator()
+        sub.setToolTipsVisible(True)
+        sharp = self._action(sub, tr("mirror_sharp"), lambda on: self.c.update_settings(mirror_sharp=on),
+                             checkable=True, checked=s.mirror_sharp is True)
+        sharp.setToolTip(tr("mirror_sharp_hint"))
 
     def _quality_menu(self, sub: QMenu, google: bool = False) -> None:
         """The picture's size, bitrate and encoder; its delay is the casts' only, and its frame rate
