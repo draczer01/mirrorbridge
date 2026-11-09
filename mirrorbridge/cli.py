@@ -292,6 +292,8 @@ async def cmd_mirror(args) -> int:
         settings.capture_audio = False
     if args.keep_pc_sound:
         settings.mute_pc_audio = False
+    if args.sharp is not None:  # this run only, in place of Mirror screen settings > Sharp slides
+        settings.mirror_sharp = args.sharp
     # This run only, in place of Mirror screen settings > Frame rate: settings.json is not written.
     fps = args.framerate or int(os.environ.get("MIRRORBRIDGE_FPS", "0") or 0)  # MIRRORBRIDGE_FPS: experiment
     manager = DeviceManager(asyncio.get_running_loop())
@@ -759,6 +761,10 @@ def build_parser() -> argparse.ArgumentParser:
     mirroring.add_argument("--seconds", type=float, help="stop after this many seconds (--probe: 10)")
     mirroring.add_argument("--fps", dest="framerate", type=int,
                            help="frame rate for this run only (default: the app's choice)")
+    mirroring.add_argument("--sharp", action=argparse.BooleanOptionalAction, default=None,
+                           help="Sharp slides for this run only (experimental): up to 1440p on a TV whose screen is "
+                                "bigger than 1080p, more bitrate to match, sharper scaling (default: the app's "
+                                "Mirror screen settings)")
     mirroring.add_argument("--timing", choices=["ntp", "ptp"],
                            help="how the TV gets the time, for this run only (default: MIRRORBRIDGE_TIMING, else "
                                 "NTP). ptp is an experiment: MirrorBridge as the TV's PTP clock, which needs inbound "

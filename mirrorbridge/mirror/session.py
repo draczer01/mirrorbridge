@@ -150,6 +150,11 @@ from .stats import LOG_SECONDS, StageTimes
 _LOGGER = logging.getLogger(__name__)
 
 MAX_CANVAS = (1920, 1080)  # never more, whatever the TV's screen: 4K costs more delay than it is worth
+# Sharp slides (Settings.mirror_sharp, experimental): up to this when the TV's screen is bigger, so a
+# 1440p monitor goes to a 4K TV at its own size, with no scaling on this PC (ddagrab straight into
+# NVENC), and the bitrate raised by as many more pixels as are sent (sharp_kbps)
+SHARP_MAX_CANVAS = (2560, 1440)
+BASE_PIXELS = 1920 * 1080  # what Settings.video_bitrate_kbps is for
 FALLBACK_CANVAS = (1280, 720)  # a TV that gives no displays[] and no 1080p feature bit
 NTP_GRACE_SECONDS = 10  # from RECORD until the TV must have asked for the time
 NTP_QUIET_SECONDS = 15  # then, a pause this long in its requests is worth a warning
@@ -200,6 +205,22 @@ def canvas_limit(settings: Settings, limit: tuple[int, int] = MAX_CANVAS) -> tup
     if not height or height >= limit[1]:
         return limit
     return min(limit[0], (height * 16 // 9 + 1) // 2 * 2), height
+
+
+def sharp_canvas(settings: Settings, limit: tuple[int, int] = MAX_CANVAS) -> tuple[int, int]:
+    """The largest canvas to send: canvas_limit's, or with Sharp slides SHARP_MAX_CANVAS, unless
+    Quality > Resolution asks for less than 1080p."""
+    if not settings.mirror_sharp:
+        return canvas_limit(settings, limit)
+    if settings.output_height and settings.output_height // 2 * 2 < MAX_CANVAS[1]:
+        return canvas_limit(settings, limit)
+    return max(limit[0], SHARP_MAX_CANVAS[0]), max(limit[1], SHARP_MAX_CANVAS[1])
+
+
+def sharp_kbps(kbps: int, size: tuple[int, int]) -> int:
+    """The bitrate for a picture of `size`: `kbps` (Settings.video_bitrate_kbps, for 1080p), raised
+    by as many more pixels as it has; never lowered."""
+    return max(kbps, round(kbps * size[0] * size[1] / BASE_PIXELS))
 
 
 def extend_mode(mode: str) -> str:
@@ -651,6 +672,7 @@ class MirrorSession:
             raise refused(None, self.report.steps, "setup") from ex
         est = self.report.established
         assert est is not None and self.report.canvas is not None
+        s = self.settings  # Sharp slides may have raised the bitrate (_sharpen)
         self._stats = StageTimes(kbps=s.video_bitrate_kbps, fps=self.report.fps, lead_ms=est.plan.lead_ms)
         if self._ptp is not None:
             self._ptp.start_window()  # its figures a second, as the stats line's, not counting setting up
@@ -756,7 +778,8 @@ class MirrorSession:
         cmd = build_command(ff, s, source=self.source, encoder=encoder, width=canvas[0], height=canvas[1], fps=fps,
                             backend=backend, monitor=monitor, region=region, chain=chain,
                             extra=s.mirror_encoder_extra,
-                            keyframe_seconds=ffmpeg.mirror_keyframe_seconds(s.mirror_keyframes), bt709=True)
+                            keyframe_seconds=ffmpeg.mirror_keyframe_seconds(s.mirror_keyframes), bt709=True,
+                            sharp=s.mirror_sharp)
         self._generation += 1
         gen = self._accepting = self._generation
         self._gen_frames = 0
@@ -942,6 +965,20 @@ class MirrorSession:
             return None
         return max(0.0, KEYFRAME_RESTART_SECONDS - (now_ns() - self._last_restart_ns) / NS)
 
+    def _sharpen(self, canvas: tuple[int, int]) -> Settings:
+        """Sharp slides: the bitrate raised for the picture sent, the capture fitted into `canvas`
+        (sharp_kbps), for the rest of the session; the settings now used."""
+        size_in = None
+        if self.source == DESKTOP and len(self._capture) == 3:
+            size_in = capture.capture_size(self._using[0], self._capture[1], self._capture[2])
+        size = capture.fit_even(*size_in, canvas) if size_in else canvas
+        kbps = sharp_kbps(self.settings.video_bitrate_kbps, size)
+        _LOGGER.info("Sharp slides: up to %dx%d, %dx%d sent at %d kbit/s, scaled with %s if it must be",
+                     *canvas, *size, kbps, capture.SHARP_SCALE_FLAGS)
+        if kbps != self.settings.video_bitrate_kbps:
+            self.settings = dataclasses.replace(self.settings, video_bitrate_kbps=kbps)
+        return self.settings
+
     async def _set_up(self) -> None:
         """Connect and pair-verify, GET /info, SETUP, the video connection, RECORD, /feedback."""
         s = self.settings
@@ -1027,8 +1064,10 @@ class MirrorSession:
         assert channel is not None
         if info_answered:
             await self._info_after_setup(est, channel)
-        limit = canvas_limit(s, self.max_canvas)
+        limit = sharp_canvas(s, self.max_canvas)
         self.report.canvas = choose_canvas(self.report.info, self.target, limit)
+        if s.mirror_sharp:
+            s = self._sharpen(self.report.canvas)
         backend, encoder, _kind = self._using
         if self.fps_asked:  # mirror --fps: in place of Mirror screen settings > Frame rate
             self.report.fps = choose_fps(self.fps_asked, self.report.info)
