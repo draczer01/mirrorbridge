@@ -8,6 +8,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ### Added
 
+- *Mirror screen* sends the PC's sound with the picture by default (heard on a TCL TV). *Mirror
+  screen settings* > *PC sound on the TV with Mirror screen*, also in the window's *Advanced
+  settings* (Spanish: *Sonido del PC en la TV al duplicar la pantalla*), turns it off; it is
+  greyed out while *Include computer sound* is off. Before, it could only be turned on with
+  `MIRRORBRIDGE_MIRROR_SOUND=1` or `mirror --sound`. `mirror --no-sound` leaves it out for one
+  run. The texts that said Mirror screen has no sound are updated.
 - The PC's sound to Apple TVs and Macs in Mirror screen (with *Mirror to Apple TVs* on, so
   still experimental): sealed with ChaCha20-Poly1305 and the stream's `shk`, as doubletake seals
   it on a pair-verified connection, in the `streamConnections` layout for receivers with feature

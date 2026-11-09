@@ -28,7 +28,8 @@ from mirrorbridge.mirror.negotiation import CONTROL_FIRST, MEDIA_FIRST, NTP, PTP
 from mirrorbridge.session import State
 from mirrorbridge.text import Text
 
-SETTINGS = Settings(encoder="libx264", framerate=30, video_bitrate_kbps=1500, output_height=360)
+# The picture alone: the sound (on by default) has its own tests in test_mirror_sound_loopback.py.
+SETTINGS = Settings(encoder="libx264", framerate=30, video_bitrate_kbps=1500, output_height=360, mirror_sound=False)
 SMALL_BUFFERS = pytest.mark.skipif(sys.platform == "win32", reason="Windows holds sends in buffers of its own that "
                                    "the test cannot keep small (Wine leaves out SO_SNDBUF), so a TV that reads slowly "
                                    "or stops for a moment shows only after the session, or not at all")

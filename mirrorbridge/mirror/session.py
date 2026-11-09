@@ -77,8 +77,8 @@ not follow, the session is set up again over NTP (unless MIRRORBRIDGE_PTP_NO_FAL
 responder stays bound either way.
 
 The PC's sound (sound.py) goes over the type-96 stream the session sets up anyway, for now only
-when asked for (MIRRORBRIDGE_MIRROR_SOUND=1, mirror --sound; never for Test this TV, nor with PTP
-timing): held until the first frame has gone, then sent with the picture's lead, the test tone
+unless turned off (Mirror screen settings > PC sound on the TV, on by default; mirror --no-sound,
+MIRRORBRIDGE_MIRROR_SOUND=0; never for Test this TV, nor with PTP timing): held until the first frame has gone, then sent with the picture's lead, the test tone
 in its place for the test pattern. Nothing the sound does may stop or slow the picture: whatever
 goes wrong stops the sound alone, and the person is told once (on_notice). A TV that closes the
 session within SOUND_DROP_SECONDS of the first sound packet (SOUND_ENDED_SECONDS when it ends
@@ -1206,10 +1206,11 @@ class MirrorSession:
     # -- the sound ---------------------------------------------------------
 
     def _sound_wanted(self, output: bool = True) -> tuple[bool, str]:
-        """Whether this session sends the PC's sound, and why not: for now only when asked for
-        (sound.SOUND_BY_DEFAULT), never for the probe, never with Include computer sound off,
-        and not once the TV closed the session when it started (_retry_without_sound). An Apple TV
-        gets it too, once mirroring to Apple TVs is turned on (_audio_offer).
+        """Whether this session sends the PC's sound, and why not: as Settings.mirror_sound
+        says (on by default) unless the knobs or mirror --sound turn it on, never for the probe,
+        never with Include computer sound off, and not once the TV closed the session when it
+        started (_retry_without_sound). An Apple TV gets it too, once mirroring to Apple TVs is
+        turned on (_audio_offer).
         `output`: also that Windows has a sound output to record (_loopback, from _start)."""
         knobs = self._knobs
         if self.sound_asked is False:
@@ -1219,8 +1220,8 @@ class MirrorSession:
         if knobs.enable is False:
             return False, f"{sound.ENV}=0"
         forced = self.sound_asked is True  # mirror --sound, --beep, --sound-trial
-        if not (forced or knobs.enable or sound.SOUND_BY_DEFAULT):
-            return False, f"not turned on yet (mirror --sound, or {sound.ENV}=1)"
+        if not (forced or knobs.enable or self.settings.mirror_sound):
+            return False, "PC sound on the TV is off (Mirror screen settings)"
         if not forced and self.profile.sound == profiles.SOUND_OFF:
             return False, (f"this TV closed the session when the sound started "
                            f"({self.profile.sound_note or 'as saved for it'})")

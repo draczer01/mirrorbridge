@@ -279,7 +279,9 @@ class MainWindow(QMainWindow):
         self.audio_cb = QCheckBox()
         self.cursor_cb = QCheckBox()
         self.mute_pc_cb = QCheckBox()
+        self.mirror_sound_cb = QCheckBox()  # Mirror screen's sound, under Include computer sound
         af.addRow(self.audio_cb)
+        af.addRow(self.mirror_sound_cb)
         af.addRow(self.mute_pc_cb)
         af.addRow(self.cursor_cb)
         self.advanced_section.content.addLayout(af)
@@ -309,7 +311,8 @@ class MainWindow(QMainWindow):
         self.monitor_combo.currentIndexChanged.connect(self._source_changed)
         self.window_combo.activated.connect(self._source_changed)
         self.window_combo.lineEdit().editingFinished.connect(self._source_changed)
-        self.audio_cb.toggled.connect(lambda on: self._save(capture_audio=on))
+        self.audio_cb.toggled.connect(self._audio_toggled)
+        self.mirror_sound_cb.toggled.connect(lambda on: self._save(mirror_sound=on))
         self.cursor_cb.toggled.connect(lambda on: self._save(show_cursor=on))
         self.mute_pc_cb.toggled.connect(lambda on: self._save(mute_pc_audio=on))
         self.mirror_sharp_cb.toggled.connect(lambda on: self._save(mirror_sharp=on))
@@ -336,12 +339,14 @@ class MainWindow(QMainWindow):
         for button, key in ((self.refresh_btn, "refresh"), (self.add_ip_btn, "add_ip"), (self.pair_btn, "pair"),
                             (self.forget_btn, "forget"), (self.rb_display, "ui_show_display"),
                             (self.rb_window, "ui_show_window"), (self.rb_extend, "ui_show_extend"),
-                            (self.audio_cb, "audio"), (self.cursor_cb, "cursor"), (self.mute_pc_cb, "ui_mute_pc"),
+                            (self.audio_cb, "audio"), (self.mirror_sound_cb, "mirror_sound"), (self.cursor_cb, "cursor"),
+                            (self.mute_pc_cb, "ui_mute_pc"),
                             (self.mirror_sharp_cb, "mirror_sharp"),
                             (self.file_btn, "play_file"),
                             (self.cast_btn, "ui_cast_instead"), (self.another_btn, "ui_try_another")):
             button.setText(tr(key))
         self.refresh_win.setToolTip(tr("ui_refresh_windows"))
+        self.mirror_sound_cb.setToolTip(tr("mirror_sound_hint"))
         self.window_combo.setToolTip(tr("window_moved_hint"))
         self.mirror_sharp_cb.setToolTip(tr("mirror_sharp_hint"))
         self.extend_hint.setText(tr("ui_extend_hint") if vdisplay.available() else tr("vdd_unsupported"))
@@ -384,6 +389,11 @@ class MainWindow(QMainWindow):
             yield
         finally:
             self._loading = previous
+
+    def _audio_toggled(self, on: bool) -> None:
+        """Include computer sound; Mirror screen's sound needs it, so its box follows."""
+        self.mirror_sound_cb.setEnabled(on)
+        self._save(capture_audio=on)
 
     def _save(self, **changes) -> None:
         if self._loading:
@@ -462,6 +472,8 @@ class MainWindow(QMainWindow):
             self.monitor_combo.setCurrentIndex(max(0, self.monitor_combo.findData(s.monitor_index)))
             self.extend_combo.setCurrentIndex(max(0, self.extend_combo.findData(s.extend_mode)))
             self.audio_cb.setChecked(s.capture_audio)
+            self.mirror_sound_cb.setChecked(s.mirror_sound)
+            self.mirror_sound_cb.setEnabled(s.capture_audio)
             self.cursor_cb.setChecked(s.show_cursor)
             self.mute_pc_cb.setChecked(s.mute_pc_audio)
             self.res_combo.setCurrentIndex(max(0, self.res_combo.findData(s.output_height)))

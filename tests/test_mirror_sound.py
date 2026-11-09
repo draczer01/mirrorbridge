@@ -1499,6 +1499,15 @@ def test_the_mirror_commands_sound_options_are_for_one_run(tmp_path, monkeypatch
     (session,) = made
     assert session.kw["sound"] is None and session.kw["sound_knobs"] == sound.SoundKnobs(shape="apple")
     assert session.settings.capture_audio and session.settings.mute_pc_audio and session.kw["source"] == "test"
+    # --no-sound: off for this run, whatever the app's PC sound on the TV says; not with what sends sound
+    made.clear()
+    assert cli.main(["mirror", "-d", "TCL", "--no-sound"]) == 0
+    (session,) = made
+    assert session.kw["sound"] is False
+    made.clear()
+    assert cli.main(["mirror", "-d", "TCL", "--no-sound", "--beep"]) == 2 and made == []
+    with pytest.raises(SystemExit):
+        cli.main(["mirror", "-d", "TCL", "--sound", "--no-sound"])
     with pytest.raises(SystemExit):
         cli.main(["mirror", "-d", "TCL", "--log", str(tmp_path / "no folder" / "step1.log")])
 
@@ -1520,7 +1529,7 @@ def test_the_sound_options_are_in_the_help(capsys):
         with pytest.raises(SystemExit):
             cli.build_parser().parse_args([command, "--help"])
     out = " ".join(capsys.readouterr().out.split())
-    for option in ("--sound send this PC's sound with the picture", "--beep", "--sound-delay MS", "--no-audio",
+    for option in ("--sound send this PC's sound with the picture", "--no-sound no sound for this run", "--beep", "--sound-delay MS", "--no-audio",
                    "--keep-pc-sound", "--sound-trial", "--log PATH", "--sound check only this PC's sound"):
         assert option in out
 

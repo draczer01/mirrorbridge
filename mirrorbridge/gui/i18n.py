@@ -43,10 +43,11 @@ _STRINGS: dict[str, dict[str, str]] = {
     "mirror_hint": {
         "en": "Your screen on the TV a fraction of a second behind, instead of a cast's few seconds: the display, "
               "window or extended screen chosen under What to cast. For paired AirPlay 2 TVs of other brands (TCL, "
-              "Roku, Samsung, LG…); no sound yet.",
+              "Roku, Samsung, LG…), with the PC's sound (PC sound on the TV, in Mirror screen settings).",
         "es": "Tu pantalla en la TV con una fracción de segundo de retraso, en lugar de los segundos de una "
               "transmisión: la pantalla, la ventana o la pantalla extendida que elegiste en Qué transmitir. Para TV "
-              "AirPlay 2 de otras marcas ya emparejadas (TCL, Roku, Samsung, LG…); todavía sin sonido.",
+              "AirPlay 2 de otras marcas ya emparejadas (TCL, Roku, Samsung, LG…), con el sonido del equipo (Sonido "
+              "del PC en la TV, en Ajustes de Duplicar pantalla).",
     },
     "mirror_apple_tv": {
         "en": "Screen mirroring to Apple TVs and Macs is experimental and off: turn it on with {menu_apple_tv}. "
@@ -125,6 +126,18 @@ _STRINGS: dict[str, dict[str, str]] = {
               "cuando falla el Wi-Fi.",
     },
     "mirror_framerate": {"en": "Frame rate", "es": "Cuadros por segundo"},
+    "mirror_sound": {
+        "en": "PC sound on the TV with Mirror screen",
+        "es": "Sonido del PC en la TV al duplicar la pantalla",
+    },
+    "mirror_sound_hint": {
+        "en": "Sends this computer's sound to the TV with the picture, and mutes the computer once the TV is known "
+              "to play it. On by default. A TV that stops when the sound starts goes on without it. Needs "
+              "Include computer sound on.",
+        "es": "Envía el sonido de esta computadora a la TV junto con la imagen, y silencia la computadora cuando se "
+              "sabe que la TV lo reproduce. Activado por defecto. Si una TV se detiene cuando empieza el sonido, "
+              "sigue sin él. Requiere Incluir el sonido del equipo.",
+    },
     "mirror_fps_auto": {"en": "Automatic", "es": "Automático"},
     "mirror_fps_auto_hint": {
         "en": "60 fps when the graphics card encodes the video, 30 when the processor does or the screen capture is "
@@ -1085,10 +1098,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     "ui_hint_no_tv": {"en": "First find your TV in step 1.", "es": "Primero encuentra tu TV en el paso 1."},
     "ui_hint_pick": {"en": "Choose a TV in step 1.", "es": "Elige una TV en el paso 1."},
     "ui_hint_mirror": {
-        "en": "Your screen appears on the TV almost at once. No sound yet: for a video with sound, use Play a video "
-              "file.",
-        "es": "Tu pantalla aparece en la TV casi al instante. Todavía sin sonido: para un video con sonido, usa "
-              "Reproducir un archivo de video.",
+        "en": "Your screen appears on the TV almost at once.",
+        "es": "Tu pantalla aparece en la TV casi al instante.",
     },
     "ui_hint_mirror_first": {
         "en": "The first time, the TV shows a 4-digit code: type it in when MirrorBridge asks.",

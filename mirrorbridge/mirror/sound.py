@@ -50,7 +50,6 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-SOUND_BY_DEFAULT = False  # stage 1: the sound is on only when asked for (MIRRORBRIDGE_MIRROR_SOUND=1, mirror --sound)
 SYNC_INTERVAL_S = 1.0  # a sync this often
 WINDOW_NS = 2 * NS  # the capture base is the smallest offset of this long
 STEP_WINDOW_NS = 250_000_000  # every block this long late by JUMP_NS: samples were lost, the base moves

@@ -153,8 +153,9 @@ class TrayMenu(QObject):
 
         self._device_menu(self._submenu(menu, tr("device_menu") + (f": {_escape(screen.name)}" if screen else "")))
         self._source_menu(self._submenu(menu, tr("source_menu")))
-        # The sound and Quality's frame rate are a cast's and Google Cast mirroring's: AirPlay's Mirror
-        # screen has no sound yet, and its own frame rate (Mirror screen settings).
+        # Include computer sound and Quality's frame rate are a cast's and Google Cast mirroring's;
+        # AirPlay's Mirror screen has its own (Mirror screen settings: PC sound on the TV, on by default,
+        # needs Include computer sound on too).
         google = bool(screen and c.plan(screen)[:1] == [routes.CAST_MIRROR])
         self._mirror_menu(self._submenu(menu, tr("mirror_settings")))
         self._quality_menu(self._submenu(menu, tr("quality_menu")), google)
@@ -298,6 +299,9 @@ class TrayMenu(QObject):
         rates.actions()[MIRROR_FRAMERATES.index(0)].setToolTip(tr("mirror_fps_auto_hint"))
         sub.addSeparator()
         sub.setToolTipsVisible(True)
+        sound = self._action(sub, tr("mirror_sound"), lambda on: self.c.update_settings(mirror_sound=on),
+                             checkable=True, checked=s.mirror_sound, enabled=s.capture_audio)
+        sound.setToolTip(tr("mirror_sound_hint"))
         sharp = self._action(sub, tr("mirror_sharp"), lambda on: self.c.update_settings(mirror_sharp=on),
                              checkable=True, checked=s.mirror_sharp is True)
         sharp.setToolTip(tr("mirror_sharp_hint"))
