@@ -85,6 +85,12 @@ GFX_SPARE_FPS = 2
 # (50 ms at 60 fps, 100 ms at 30); on a 100 Mbit/s link, 4 ms.
 GFX_STILL_VBV_FRAMES = 4
 GFX_SCALE_MODE = "bilinear"  # gfxcapture's own default (bicubic is not measured)
+# swscale's filter for Sharp slides (Settings.mirror_sharp, experimental). Bilinear is a quarter less
+# CPU, but it softens text: on two slides drawn at 2560x1440 and shrunk to 1920x1080, the mean edge
+# contrast of the luma was 9 % below the same slides drawn at 1080p with bilinear, 5 % above with
+# bicubic and 9 % above with lanczos (2026-11-09; the TV's own upscaling softens it again). Lanczos
+# cost about 3 ms more a frame than bilinear on one thread.
+SHARP_SCALE_FLAGS = "lanczos"
 # The first frames of each FFmpeg whose gfxcapture repeats frames that are looked at for the black ones it
 # may begin with (gfx_black_start)
 GFX_BLACK_FRAMES = 6
@@ -351,14 +357,17 @@ def output_args(chain: Optional[Chain]) -> list[str]:
     return (list(GFX_OUTPUT) if chain.kind == GFX else []) + list(NATIVE_OUTPUT)
 
 
-def cpu_filters(prefilters: list[str], width: int, height: int, encoder: str, bt709: bool = True) -> list[str]:
+def cpu_filters(prefilters: list[str], width: int, height: int, encoder: str, bt709: bool = True,
+                sharp: bool = False) -> list[str]:
     """The CPU chain's -vf: the capture's own filters (ddagrab's frames brought to memory), then
     swscale fitting it into width x height (never up, even sides; bilinear: a quarter less CPU
-    than bicubic for a 1440p desktop on a 1080p TV, every frame) into BT.709 limited range, and
-    the frames tagged as that. Without bt709, swscale's own choice and nothing said, as before
-    (BT.601, limited: what Google Cast's VP8 is taken as, which can say nothing else)."""
+    than bicubic for a 1440p desktop on a 1080p TV, every frame; SHARP_SCALE_FLAGS for `sharp`,
+    Sharp slides) into BT.709 limited range, and the frames tagged as that. Without bt709,
+    swscale's own choice and nothing said, as before (BT.601, limited: what Google Cast's VP8 is
+    taken as, which can say nothing else)."""
+    flags = SHARP_SCALE_FLAGS if sharp else "bilinear"
     scale = (f"scale=w='min({width},iw)':h='min({height},ih)':force_original_aspect_ratio=decrease"
-             ":force_divisible_by=2:flags=bilinear")
+             f":force_divisible_by=2:flags={flags}")
     pixels = "format=yuv420p" if encoder == "libx264" else "format=nv12"
     if not bt709:
         return list(prefilters) + [scale, pixels]
