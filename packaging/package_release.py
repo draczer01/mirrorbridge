@@ -1,11 +1,12 @@
 """Put the files of a MirrorBridge release together.
 
     python packaging/package_release.py --exe dist/MirrorBridge.exe --notices build/notices \\
-        --out release [--ffmpeg-source ffmpeg-7.1.tar.xz] [--version 0.3.0]
+        --out release [--ffmpeg-source ffmpeg-7.1.tar.xz] [--installer MirrorBridge-Setup-0.3.0.exe] [--version 0.3.0]
 
 writes, in --out (which must be empty or new):
 
     MirrorBridge.exe                     the exe, as built
+    MirrorBridge-Setup-0.3.0.exe         the installer (packaging/installer.iss), which the app updates itself with
     MirrorBridge-0.3.0-windows-x64.zip   MirrorBridge-0.3.0/ with the exe, LEEME.md, README.md, LICENSE,
                                           THIRD-PARTY-NOTICES.txt and licenses/ (third_party_notices.py)
     ffmpeg-7.1.tar.xz                    FFmpeg's official source, which its GPL asks to go with the binary
@@ -36,6 +37,11 @@ NOTICES = "THIRD-PARTY-NOTICES.txt"
 EXE_NAME = "MirrorBridge.exe"
 SUMS = "SHA256SUMS"
 FFMPEG_SOURCE = re.compile(r"ffmpeg-(\d+\.\d+(?:\.\d+)?)\.tar\.xz")
+
+
+def installer_name(version: str) -> str:
+    """The name mirrorbridge/update.py looks for in a release (update.INSTALLER)."""
+    return f"MirrorBridge-Setup-{version}.exe"
 
 
 def zip_name(version: str) -> str:
@@ -93,7 +99,7 @@ def sha256(path: Path) -> str:
 
 
 def package(exe: Path, notices: Path, out: Path, version: str, ffmpeg_source: Path | None = None,
-            root: Path = ROOT) -> list[Path]:
+            root: Path = ROOT, installer: Path | None = None) -> list[Path]:
     """Write the release's files into out; returns them, SHA256SUMS last."""
     if not exe.is_file():
         raise SystemExit(f"{exe} is missing: build it first")
@@ -104,6 +110,12 @@ def package(exe: Path, notices: Path, out: Path, version: str, ffmpeg_source: Pa
         check_ffmpeg_source(ffmpeg_source)
         if ffmpeg_source.name not in notices_text.read_text(encoding="utf-8"):
             raise SystemExit(f"{NOTICES} does not name {ffmpeg_source.name}: it was made for another FFmpeg")
+    if installer is not None:
+        if installer.name != installer_name(version):
+            raise SystemExit(f"{installer.name} is not named {installer_name(version)}: the app would not find it")
+        with open(installer, "rb") as f:
+            if f.read(2) != b"MZ":
+                raise SystemExit(f"{installer} is not a Windows program")
     if out.exists() and any(out.iterdir()):
         raise SystemExit(f"{out} is not empty; everything in it would be published")
     out.mkdir(parents=True, exist_ok=True)
@@ -118,6 +130,9 @@ def package(exe: Path, notices: Path, out: Path, version: str, ffmpeg_source: Pa
     written = [out / EXE_NAME, out / zip_name(version)]
     shutil.copyfile(exe, written[0])
     write_zip(written[1], files)
+    if installer is not None:
+        written.append(out / installer.name)
+        shutil.copyfile(installer, written[-1])
     if ffmpeg_source is not None:
         written.append(out / ffmpeg_source.name)
         shutil.copyfile(ffmpeg_source, written[-1])
@@ -136,11 +151,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--version", help="defaults to the code's version, which it must equal")
     parser.add_argument("--ffmpeg-source", type=Path, help="FFmpeg's ffmpeg-<version>.tar.xz, for a release")
+    parser.add_argument("--installer", type=Path, help="MirrorBridge-Setup-<version>.exe, built by installer.iss")
     args = parser.parse_args(argv)
     version = code_version()
     if args.version and args.version != version:
         raise SystemExit(f"--version {args.version}, but the code is version {version}")
-    for path in package(args.exe, args.notices, args.out, version, args.ffmpeg_source):
+    for path in package(args.exe, args.notices, args.out, version, args.ffmpeg_source, installer=args.installer):
         print(f"{path}  ({path.stat().st_size:,} bytes)")
     return 0
 

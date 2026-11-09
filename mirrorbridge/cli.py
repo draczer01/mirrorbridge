@@ -806,6 +806,11 @@ def build_parser() -> argparse.ArgumentParser:
     install = vdd_sub.add_parser("install", help="download Parsec's driver and install it (one UAC prompt)")
     install.add_argument("-y", "--yes", action="store_true", help="accept Parsec's terms without asking")
 
+    upd = sub.add_parser("update", help="look for a newer MirrorBridge on GitHub Releases and install it")
+    upd.add_argument("--check", action="store_true", help="only say whether there is one")
+    upd.add_argument("--stable", action="store_true", help="leave out test versions (pre-releases)")
+    upd.add_argument("-v", "--verbose", action="store_true", default=argparse.SUPPRESS, help="debug logging")
+
     gui = sub.add_parser("gui", help="start the tray app (default)")
     gui.add_argument("--open", action="store_true", help="also open the main window")
     return parser
@@ -828,7 +833,7 @@ def main(argv: list[str] | None = None) -> int:
 
     handler = {"scan": cmd_scan, "pair": cmd_pair, "forget": cmd_forget, "cast": cmd_cast, "doctor": cmd_doctor,
                "probe": cmd_probe, "vdd": cmd_vdd, "mirror": cmd_mirror,
-               "googlecast": cmd_googlecast}[args.command]
+               "googlecast": cmd_googlecast, "update": cmd_update}[args.command]
     try:
         with _log_file(getattr(args, "log", None), args.verbose):
             _LOGGER.debug("%s %s: %s", APP_NAME, __version__, " ".join(sys.argv[1:] if argv is None else argv))
@@ -836,6 +841,43 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\nStopped.")
         return 0
+
+
+async def cmd_update(args) -> int:
+    """update: the newest release on GitHub Releases, downloaded, checked and installed (the
+    installer replaces MirrorBridge.exe once every running copy has quit)."""
+    from . import update
+
+    loop = asyncio.get_running_loop()
+    try:
+        release = await loop.run_in_executor(None, update.check, __version__, not args.stable)
+    except update.UpdateError as ex:
+        print(f"Could not look for updates: {ex}")
+        return 1
+    if release is None:
+        print(f"{APP_NAME} {__version__} is the newest{'' if args.stable else ' (pre-releases included)'}.")
+        return 0
+    kind = "pre-release" if release.prerelease else "release"
+    print(f"{APP_NAME} {release.version} is out ({kind}): {release.page}")
+    if args.check:
+        return 0
+    if not update.can_install():
+        print("Installing needs MirrorBridge.exe on Windows; download it from the page above.")
+        return 1
+
+    def progress(have: int, size: int) -> None:
+        if size:
+            print(f"\rDownloading {release.installer_name}: {have * 100 // size}%", end="", flush=True)
+
+    try:
+        installer = await loop.run_in_executor(None, lambda: update.download(release, progress=progress))
+    except update.UpdateError as ex:
+        print(f"\nThe update did not download: {ex}")
+        return 1
+    print(f"\n{installer.name} matches SHA256SUMS; starting it. Quit MirrorBridge if it is open: the installer "
+          "waits for it.")
+    update.start_installer(installer, relaunch=False)
+    return 0
 
 
 @contextlib.contextmanager

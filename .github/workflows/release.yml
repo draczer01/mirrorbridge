@@ -1,7 +1,8 @@
 name: Release
 
 # Pushing a tag vX.Y.Z builds MirrorBridge.exe on Windows and publishes it as a pre-release, with
-# the zip (exe, docs, licences), FFmpeg's source and SHA256SUMS. The owner turns it into a full
+# its installer (MirrorBridge-Setup-X.Y.Z.exe, which the app's updates download), the zip (exe,
+# docs, licences), FFmpeg's source and SHA256SUMS. The owner turns it into a full
 # release after trying it on a TV. Started by hand (Actions > Release > Run workflow), it builds the
 # same files and keeps them as an Actions artifact, without publishing anything.
 on:
@@ -44,7 +45,7 @@ jobs:
       - run: pip install -r packaging/requirements-build.txt pytest pytest-asyncio
       - run: pip install --no-deps -e .
       - name: Unit tests that run on Windows
-        run: pytest -q tests/test_ffmpeg.py tests/test_hls_server.py tests/test_patch.py tests/test_vdisplay.py tests/test_migration.py tests/test_session.py tests/test_devices.py tests/test_release.py tests/test_i18n.py tests/test_probe.py tests/test_mirror.py tests/test_mirror_loopback.py tests/test_mirror_gui.py tests/test_mirror_extend.py tests/test_latency_meter.py tests/test_googlecast.py tests/test_capture.py tests/test_ptp.py tests/test_mirror_sound.py tests/test_mirror_sound_loopback.py tests/test_awake.py
+        run: pytest -q tests/test_ffmpeg.py tests/test_hls_server.py tests/test_patch.py tests/test_vdisplay.py tests/test_migration.py tests/test_session.py tests/test_devices.py tests/test_release.py tests/test_i18n.py tests/test_probe.py tests/test_mirror.py tests/test_mirror_loopback.py tests/test_mirror_gui.py tests/test_mirror_extend.py tests/test_latency_meter.py tests/test_googlecast.py tests/test_capture.py tests/test_ptp.py tests/test_mirror_sound.py tests/test_mirror_sound_loopback.py tests/test_awake.py tests/test_update.py
       # The FFmpeg inside the exe (packaging/ffmpeg_pin.json), checked by size and SHA-256.
       - name: Fetch the pinned FFmpeg
         run: python -I packaging/fetch_ffmpeg.py
@@ -80,11 +81,18 @@ jobs:
             Write-Host "::warning title=FFmpeg source not pinned::Put source_sha256 $sha256 in packaging/ffmpeg_pin.json (checked here against FFmpeg's signature only)"
           }
           Add-Content -Path $env:GITHUB_ENV -Value "FFMPEG_SOURCE=$file"
+      # The installer (packaging/installer.iss): per user, no administrator rights; the app updates itself with it.
+      - name: Build the installer
+        run: |
+          $setup = .\packaging\build_installer.ps1 | Select-Object -Last 1
+          Add-Content -Path $env:GITHUB_ENV -Value "SETUP=$setup"
+      - name: Install, update while running, and uninstall
+        run: .\packaging\test_installer.ps1 "$env:SETUP"
       - name: Package
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           $env:SOURCE_DATE_EPOCH = git log -1 --format=%ct
-          python packaging/package_release.py --exe dist/MirrorBridge.exe --notices build/notices --ffmpeg-source "$env:FFMPEG_SOURCE" --out release
+          python packaging/package_release.py --exe dist/MirrorBridge.exe --notices build/notices --ffmpeg-source "$env:FFMPEG_SOURCE" --installer "$env:SETUP" --out release
           Get-Content release/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
@@ -117,6 +125,10 @@ jobs:
           test -s "$notes" || { echo "::error::$notes is missing"; exit 1; }
           (cd release && sha256sum -c SHA256SUMS)
           compgen -G "release/ffmpeg-*.tar.xz" > /dev/null || { echo "::error::FFmpeg's source is missing"; exit 1; }
+          # The app's updates take a release only with its installer and a SHA256SUMS line for it.
+          setup="MirrorBridge-Setup-${VERSION}.exe"
+          test -s "release/$setup" || { echo "::error::$setup is missing"; exit 1; }
+          grep -q "  $setup\$" release/SHA256SUMS || { echo "::error::SHA256SUMS has no line for $setup"; exit 1; }
           if gh release view "$TAG" > /dev/null 2>&1; then
             echo "Release $TAG exists (a re-run): replacing its files"
             gh release upload "$TAG" release/* --clobber

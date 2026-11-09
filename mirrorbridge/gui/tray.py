@@ -10,7 +10,7 @@ from PySide6.QtCore import QObject
 from PySide6.QtGui import QAction, QActionGroup, QCursor, QFont
 from PySide6.QtWidgets import QFileDialog, QMenu, QSystemTrayIcon
 
-from .. import APP_NAME, ffmpeg, routes, vdisplay
+from .. import APP_NAME, __version__, ffmpeg, routes, vdisplay
 from ..config import CHOICES, app_data_dir
 from ..mirror.negotiation import DEFAULT_LEAD_MS
 from ..mirror.session import MIRROR_LATENCIES, lead_override, mirror_latency, on_arrival
@@ -20,6 +20,7 @@ from .extend import EXTEND_SIZES, error_text, size_label, size_name
 from .i18n import LANGUAGES, language, language_menu_title, tr
 from .latency import LatencyMeter
 from .theme import app_icon
+from .updates import Updates
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -43,9 +44,11 @@ def _escape(name: str) -> str:
 
 
 class TrayMenu(QObject):
-    def __init__(self, controller: Controller, open_window: Callable[[], None], quit_app: Callable[[], None]) -> None:
+    def __init__(self, controller: Controller, open_window: Callable[[], None], quit_app: Callable[[], None],
+                 updates: Updates | None = None) -> None:
         super().__init__()
         self.c = controller
+        self.updates = updates
         self.open_window = open_window
         self.quit_app = quit_app
         self.icons = {state: app_icon(state) for state in ("idle", "active", "busy")}
@@ -133,6 +136,11 @@ class TrayMenu(QObject):
         font.setBold(True)
         open_action.setFont(font)
         menu.setDefaultAction(open_action)
+        if self.updates and self.updates.available:  # a newer MirrorBridge is out: say so at the top
+            u = self.updates
+            text = (tr("update_downloading", percent=u.progress) if u.busy == "downloading"
+                    else tr("update_install", version=u.available.version))
+            self._action(menu, text, u.install, enabled=not u.busy)
         menu.addSeparator()
 
         self._action(menu, c.status()[1], enabled=False)
@@ -180,6 +188,8 @@ class TrayMenu(QObject):
         debug = self._submenu(more, tr("debug_menu"))
         self._action(debug, tr("latency_meter"), self._show_latency_meter)
         self._mirror_switches(debug)
+        if self.updates:
+            self._updates_menu(self._submenu(more, tr("update_menu")))
         self._language_menu(self._submenu(menu, language_menu_title()))
         menu.addSeparator()
         self._action(menu, tr("quit"), lambda: self.quit_app())
@@ -263,6 +273,21 @@ class TrayMenu(QObject):
         sub.addSeparator()
         self._action(sub, tr("cursor"), lambda on: c.update_settings(show_cursor=on),
                      checkable=True, checked=s.show_cursor)
+
+    def _updates_menu(self, sub: QMenu) -> None:
+        """This version, a check by hand, the release notes, and the daily check's switches."""
+        u, s = self.updates, self.c.settings
+        self._action(sub, tr("update_version", version=__version__), enabled=False)
+        self._action(sub, tr("update_checking") if u.busy == "checking" else tr("update_check_now"),
+                     lambda: u.check(by_hand=True), enabled=not u.busy)
+        self._action(sub, tr("update_notes"), u.open_notes)
+        if u.portable():  # a copy run from Downloads: put it on the PC, or update the copy installed there
+            self._action(sub, tr("install_here"), u.install_here, enabled=not u.busy)
+        sub.addSeparator()
+        self._action(sub, tr("update_auto"), lambda on: self.c.update_settings(check_updates=on),
+                     checkable=True, checked=s.check_updates)
+        self._action(sub, tr("update_prereleases"), lambda on: self.c.update_settings(update_prereleases=on),
+                     checkable=True, checked=s.update_prereleases)
 
     def _language_menu(self, sub: QMenu) -> None:
         """Each language in its own words; choosing one shows everything in it at once."""

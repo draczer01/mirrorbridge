@@ -8,6 +8,27 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ### Added
 
+- An installer, `MirrorBridge-Setup-<version>.exe`, in every release: it installs MirrorBridge for
+  the current user only (in `%LOCALAPPDATA%\Programs\MirrorBridge`, with no administrator rights
+  and no UAC prompt), adds it to the Start menu (and, if chosen, the desktop), and uninstalls from
+  Windows' *Apps* settings. Settings and TV pairings stay where they were, in
+  `%APPDATA%\MirrorBridge`, so the portable `MirrorBridge.exe` and the installed one share them.
+  When *Start with Windows* was on for a copy elsewhere, the installed one starts instead.
+  When MirrorBridge is installed already, the installer updates it in its folder (its last page
+  says *Update 0.3.0 to 0.4.0*), so there is never a second copy, and it refuses to put an older
+  version over a newer one. `MirrorBridge.exe` run from elsewhere (Downloads, a USB stick) starts
+  the installed copy instead when that one is as new or newer; otherwise *More options* >
+  *Updates* > *Install MirrorBridge on this PC* installs it, or updates the installed copy.
+- Updates: MirrorBridge looks for a newer version in its GitHub Releases a minute after it starts
+  and then once a day, and says so in a notification and at the top of its tray menu (*Update to
+  MirrorBridge X.Y.Z*). Choosing it downloads the new installer, checks it against the release's
+  `SHA256SUMS` (and its size, and that it is a Windows program), and runs it: the installer waits
+  for MirrorBridge to quit, replaces it and starts the new version. A broken download resumes
+  where it stopped; one that does not check out is deleted and never run; no network, or GitHub's
+  limit on requests, leaves everything as it is until the next check. *More options* > *Updates*
+  has *Check for updates now*, the release notes, and switches for the daily check and for test
+  versions (pre-releases, on at first: every release is one until it has been tried on TVs).
+  `MirrorBridge.exe update [--check] [--stable]` does the same from the command line.
 - *Mirror screen settings* > *Sharp slides (experimental)* (also in the window's advanced
   settings, and `mirror --sharp`), off by default, for slides and text that looked soft on the
   TV: up to 2560x1440 when the TV's screen is bigger than 1080p (a 1440p monitor then goes

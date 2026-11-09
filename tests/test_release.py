@@ -607,8 +607,13 @@ def _fake_gpg(monkeypatch, stdout: str = GOOD_SIGNATURE, returncode: int = 0) ->
     calls = []
 
     def run(args, **kwargs):
-        keyring = Path(args[args.index("--keyring") + 1]).read_bytes()
-        calls.append({"args": args, "keyring": keyring})
+        # The keyring and the home folder are given relative to the folder gpg runs in, with no drive:
+        # Git for Windows' gpgv reads "C:/..." there as a URL, or as a path relative to its own folder.
+        name, home = args[args.index("--keyring") + 1], args[args.index("--homedir") + 1]
+        files = args[-2:]
+        assert all(arg.startswith("./") and ":" not in arg and "\\" not in arg for arg in [name, home, *files]), args
+        keyring = (Path(kwargs["cwd"]) / name).read_bytes()
+        calls.append({"args": args, "keyring": keyring, "cwd": kwargs["cwd"]})
         return subprocess.CompletedProcess(args, returncode, stdout, "gpgv: Signature made ...\n")
 
     monkeypatch.setattr(fetch_ffmpeg.subprocess, "run", run)
@@ -635,7 +640,9 @@ def test_the_source_is_downloaded_and_its_signature_checked(source_mirror, monke
     assert (source_mirror.folder / "ffmpeg-9.9.tar.xz.asc").is_file()
     [call] = calls
     args = call["args"]
-    assert args[0] == gpg and args[-2:] == [(path.parent / "ffmpeg-9.9.tar.xz.asc").as_posix(), path.as_posix()]
+    assert args[0] == gpg and args[-2:] == ["./ffmpeg-9.9.tar.xz.asc", "./ffmpeg-9.9.tar.xz"]
+    assert Path(call["cwd"]) == path.parent  # where those two are, and the keyring's folder
+    assert not list(path.parent.glob(".gpg-*"))  # which goes once the check is done
     assert call["keyring"] == fetch_ffmpeg.dearmor(fetch_ffmpeg.KEY.read_text(encoding="ascii"))  # binary, for gpgv
     if "gpgv" in gpg:
         assert "--verify" not in args
@@ -872,7 +879,10 @@ def test_the_release_build_checks_the_tag_against_the_code_before_building():
     assert "$file = python -I packaging/fetch_ffmpeg.py --source build/ffmpeg-source" in script
     assert "python packaging/third_party_notices.py --ffmpeg-version" in script
     assert "if ($ffmpeg -ne $pin.version)" in script and "Invoke-WebRequest" not in script
-    assert '--ffmpeg-source "$env:FFMPEG_SOURCE" --out release' in script
+    assert '--ffmpeg-source "$env:FFMPEG_SOURCE" --installer "$env:SETUP" --out release' in script
+    # The installer is built, then installed, updated while running and uninstalled, before it is packaged.
+    assert names.index("Build the installer") < names.index("Install, update while running, and uninstall") \
+        < names.index("Package")
     assert '"MirrorBridge $env:VERSION"' in script and "doctor --timeout 2" in script
     assert all(step.get("shell", "pwsh") == "pwsh" for step in package["steps"])
     assert package["defaults"]["run"]["shell"] == "pwsh"
@@ -895,7 +905,9 @@ def test_both_workflows_use_the_same_actions_and_windows_tests():
     assert windows_tests(ci["jobs"]["windows-build"]) == windows_tests(release["jobs"]["package"])
     assert "tests/test_session.py tests/test_devices.py tests/test_release.py" in windows_tests(release["jobs"]["package"])
     ci_script = _runs(ci["jobs"]["windows-build"])
-    assert "python packaging/package_release.py --exe dist/MirrorBridge.exe --notices build/notices --out release" in ci_script
+    assert ("python packaging/package_release.py --exe dist/MirrorBridge.exe --notices build/notices "
+            '--installer "$setup" --out release') in ci_script
+    assert ".\\packaging\\build_installer.ps1" in ci_script and ".\\packaging\\test_installer.ps1" in ci_script
 
 
 def test_both_windows_builds_fetch_the_pinned_ffmpeg_before_building():
@@ -927,3 +939,21 @@ def test_the_changelog_starts_with_this_version():
                                                           reverse=True)
     for version in versions:
         assert re.search(rf"^\[{re.escape(version)}\]: https://github\.com/draczer01/mirrorbridge/", changelog, re.M)
+
+
+def test_the_installer_goes_in_the_release_with_its_checksum(exe, tmp_path):
+    setup = tmp_path / f"MirrorBridge-Setup-{VERSION}.exe"
+    setup.write_bytes(b"MZ" + os.urandom(1024))
+    out = tmp_path / "release"
+    written = package_release.package(exe, _notices(tmp_path / "notices"), out, VERSION, installer=setup)
+    assert setup.name in [p.name for p in written]
+    assert _sums(out)[setup.name] == hashlib.sha256(setup.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("name, data", [("MirrorBridge-Setup-9.9.9.exe", b"MZ"), ("Setup.exe", b"MZ"),
+                                        (f"MirrorBridge-Setup-{VERSION}.exe", b"<html>")])
+def test_an_installer_the_app_would_not_take_stops_the_package(exe, tmp_path, name, data):
+    setup = tmp_path / name
+    setup.write_bytes(data)
+    with pytest.raises(SystemExit):
+        package_release.package(exe, _notices(tmp_path / "notices"), tmp_path / "release", VERSION, installer=setup)

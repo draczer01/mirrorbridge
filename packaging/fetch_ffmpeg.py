@@ -271,14 +271,20 @@ def verify_signature(data: Path, signature: Path, fingerprint: str, key: Path = 
     if not gpg:
         raise SystemExit("Neither gpgv nor gpg is installed (Git for Windows comes with them), so FFmpeg's "
                          "signature cannot be checked")
-    with tempfile.TemporaryDirectory() as home:
+    with tempfile.TemporaryDirectory(dir=data.parent, prefix=".gpg-") as home:
         keyring = Path(home) / "ffmpeg-release-key.gpg"
         keyring.write_bytes(dearmor(key.read_text(encoding="ascii")))
-        # Forward slashes: Git for Windows' gpg takes C:/... as well as the shell's own paths.
-        args = [gpg, "--homedir", Path(home).as_posix(), "--status-fd", "1", "--keyring", keyring.as_posix()]
+        # Git for Windows' gpgv misreads a keyring given with a drive letter: as a --keyring, "C:/..." is
+        # a URL with the scheme "C" ("invalid key resource URL"), and a bare name is joined to a
+        # --homedir of C:/... as if that were relative ("/d/a/repo/C:/Users/..."). So gpg runs in the
+        # tarball's folder, where the home folder was made, and is given every path relative to it.
+        folder, home_name = data.parent, Path(home).name
+        args = [gpg, "--homedir", f"./{home_name}", "--status-fd", "1", "--keyring", f"./{home_name}/{keyring.name}"]
         if not Path(gpg).name.lower().startswith("gpgv"):  # gpg: only that keyring, which is trusted as pinned
             args += ["--batch", "--no-default-keyring", "--trust-model", "always", "--verify"]
-        result = subprocess.run(args + [signature.as_posix(), data.as_posix()], capture_output=True,
+        if signature.parent.resolve() != folder.resolve():
+            raise SystemExit(f"{signature} is not next to {data}")
+        result = subprocess.run(args + [f"./{signature.name}", f"./{data.name}"], cwd=folder, capture_output=True,
                                 encoding="utf-8", errors="replace", timeout=600, check=False)
     status = [line.split()[1:] for line in result.stdout.splitlines() if line.startswith("[GNUPG:] ")]
     signers = {fields[-1].upper() for fields in status if fields and fields[0] == "VALIDSIG"}  # primary key

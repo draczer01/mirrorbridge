@@ -11,6 +11,22 @@ system tray. Every feature is in the tray icon's menu; the full window only open
 you choose **Open MirrorBridge** in that menu. The interface is in English, or in Spanish
 once you choose it under **Language / Idioma**. There is also a command line.
 
+## Installing and updating
+
+Each release also has `MirrorBridge-Setup-<version>.exe`, which installs MirrorBridge for the
+current user only (`%LOCALAPPDATA%\Programs\MirrorBridge`, no administrator rights) with a Start
+menu entry; it uninstalls from Windows' *Apps* settings. Over an installed copy it updates in place (never a
+second copy) and refuses to downgrade. The portable exe and the installed one share settings and
+pairings; the portable one starts the installed copy instead when that is as new or newer.
+
+MirrorBridge looks for a newer version in its GitHub Releases a minute after it starts and then
+once a day. When there is one, it says so and the tray menu shows **Update to MirrorBridge X.Y.Z**
+at the top: it downloads the installer, checks its SHA-256 against that release's `SHA256SUMS`,
+quits, installs it and starts again (`mirrorbridge/update.py`, `packaging/installer.iss`).
+Anything that goes wrong leaves the running version as it is. **More options** > **Updates**
+checks by hand, opens the release notes and turns off the daily check or test versions
+(pre-releases). From a console: `MirrorBridge.exe update` (or `update --check`).
+
 ## Formerly AirCast
 
 MirrorBridge was called AirCast up to version 0.2.1. To move over, quit AirCast (its tray
