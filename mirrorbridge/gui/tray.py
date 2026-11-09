@@ -154,7 +154,7 @@ class TrayMenu(QObject):
         self._device_menu(self._submenu(menu, tr("device_menu") + (f": {_escape(screen.name)}" if screen else "")))
         self._source_menu(self._submenu(menu, tr("source_menu")))
         # Include computer sound and Quality's frame rate are a cast's and Google Cast mirroring's;
-        # AirPlay's Mirror screen has its own (Mirror screen settings: PC sound on the TV, experimental,
+        # AirPlay's Mirror screen has its own (Mirror screen settings: PC sound on the TV, on by default,
         # needs Include computer sound on too).
         google = bool(screen and c.plan(screen)[:1] == [routes.CAST_MIRROR])
         self._mirror_menu(self._submenu(menu, tr("mirror_settings")))

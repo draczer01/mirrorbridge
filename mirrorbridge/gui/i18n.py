@@ -43,11 +43,11 @@ _STRINGS: dict[str, dict[str, str]] = {
     "mirror_hint": {
         "en": "Your screen on the TV a fraction of a second behind, instead of a cast's few seconds: the display, "
               "window or extended screen chosen under What to cast. For paired AirPlay 2 TVs of other brands (TCL, "
-              "Roku, Samsung, LG…). Sound is experimental: turn on PC sound on the TV in Mirror screen settings.",
+              "Roku, Samsung, LG…), with the PC's sound (PC sound on the TV, in Mirror screen settings).",
         "es": "Tu pantalla en la TV con una fracción de segundo de retraso, en lugar de los segundos de una "
               "transmisión: la pantalla, la ventana o la pantalla extendida que elegiste en Qué transmitir. Para TV "
-              "AirPlay 2 de otras marcas ya emparejadas (TCL, Roku, Samsung, LG…). El sonido es experimental: activa "
-              "Sonido del PC en la TV en Ajustes de Duplicar pantalla.",
+              "AirPlay 2 de otras marcas ya emparejadas (TCL, Roku, Samsung, LG…), con el sonido del equipo (Sonido "
+              "del PC en la TV, en Ajustes de Duplicar pantalla).",
     },
     "mirror_apple_tv": {
         "en": "Screen mirroring to Apple TVs and Macs is coming in a later version. For now, cast to them with "
@@ -127,16 +127,16 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "mirror_framerate": {"en": "Frame rate", "es": "Cuadros por segundo"},
     "mirror_sound": {
-        "en": "PC sound on the TV with Mirror screen (experimental)",
-        "es": "Sonido del PC en la TV al duplicar la pantalla (experimental)",
+        "en": "PC sound on the TV with Mirror screen",
+        "es": "Sonido del PC en la TV al duplicar la pantalla",
     },
     "mirror_sound_hint": {
         "en": "Sends this computer's sound to the TV with the picture, and mutes the computer once the TV is known "
-              "to play it. Tried on TCL TVs only so far; a TV that stops when the sound starts goes on without it. "
-              "Needs Include computer sound on.",
+              "to play it. On by default. A TV that stops when the sound starts goes on without it. Needs "
+              "Include computer sound on.",
         "es": "Envía el sonido de esta computadora a la TV junto con la imagen, y silencia la computadora cuando se "
-              "sabe que la TV lo reproduce. Por ahora solo se probó en TV TCL; si una TV se detiene cuando empieza "
-              "el sonido, sigue sin él. Requiere Incluir el sonido del equipo.",
+              "sabe que la TV lo reproduce. Activado por defecto. Si una TV se detiene cuando empieza el sonido, "
+              "sigue sin él. Requiere Incluir el sonido del equipo.",
     },
     "mirror_fps_auto": {"en": "Automatic", "es": "Automático"},
     "mirror_fps_auto_hint": {
@@ -1080,10 +1080,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     "ui_hint_no_tv": {"en": "First find your TV in step 1.", "es": "Primero encuentra tu TV en el paso 1."},
     "ui_hint_pick": {"en": "Choose a TV in step 1.", "es": "Elige una TV en el paso 1."},
     "ui_hint_mirror": {
-        "en": "Your screen appears on the TV almost at once. Its sound is experimental (PC sound on the TV, off until you "
-              "turn it on); for a video with sound, Play a video file is the sure way.",
-        "es": "Tu pantalla aparece en la TV casi al instante. Su sonido es experimental (Sonido del PC en la TV, apagado hasta "
-              "que lo actives); para un video con sonido, Reproducir un archivo de video es lo más seguro.",
+        "en": "Your screen appears on the TV almost at once.",
+        "es": "Tu pantalla aparece en la TV casi al instante.",
     },
     "ui_hint_mirror_first": {
         "en": "The first time, the TV shows a 4-digit code: type it in when MirrorBridge asks.",

@@ -34,9 +34,8 @@ NO_SCREEN_TXT = {**TCL_TXT, "features": "0x7F8A50,0x38BCF46"}  # the TCL's, with
 SPEAKER_TXT = {"features": "0x445F8A00,0x1C340", "model": "Era 100", "manufacturer": "Sonos"}  # audio only
 SHOW = "Show my screen on TCL 55QM7L"
 OLD_WAY = "Transmit (old way, 3-7 s delay)"
-MIRRORING_HINT = ("Your screen appears on the TV almost at once. Its sound is experimental (PC sound on the TV, off "
-                  "until you turn it on); for a video with sound, Play a video file is the sure way.")
-MIRROR_SOUND = "PC sound on the TV with Mirror screen (experimental)"
+MIRRORING_HINT = "Your screen appears on the TV almost at once."
+MIRROR_SOUND = "PC sound on the TV with Mirror screen"
 VIRTUAL = r"\\.\DISPLAY9"
 
 _APP = None  # one QApplication for every test here; it must outlive them
@@ -415,16 +414,18 @@ def test_mirror_screen_settings_are_for_the_next_session(controller):
     assert _checked(_submenu(mirror_settings, "Frame rate")) == ["Automatic"]
 
 
-def test_mirror_screen_sound_is_an_experimental_switch(controller):
-    """Mirror screen settings > PC sound on the TV (experimental): off until turned on, saved at
-    once, and greyed out while Include computer sound is off, which keeps it off anyway."""
+def test_mirror_screen_sound_is_a_switch_on_by_default(controller):
+    """Mirror screen settings > PC sound on the TV: on by default, turned off and saved at once,
+    and greyed out while Include computer sound is off, which keeps it off anyway."""
     s = controller.settings
-    assert s.mirror_sound is False
+    assert s.mirror_sound is True
     controller.update_settings(capture_audio=True)  # the fixture has it off
     tray = _tray(controller)
     sound = _choices(_submenu(tray.menu, "Mirror screen settings"))[MIRROR_SOUND]
-    assert sound.isCheckable() and not sound.isChecked() and sound.isEnabled()
+    assert sound.isCheckable() and sound.isChecked() and sound.isEnabled()
     assert sound.toolTip().startswith("Sends this computer's sound to the TV")
+    sound.trigger()
+    assert s.mirror_sound is False and Settings.load().mirror_sound is False
     sound.trigger()
     assert s.mirror_sound is True and Settings.load().mirror_sound is True
 
@@ -470,15 +471,17 @@ def test_the_window_has_the_mirror_screen_settings_too(controller):
     assert window.mirror_latency_hint.text().startswith("La TV muestra cada cuadro 200 ms")
 
 
-def test_the_window_has_mirror_screens_experimental_sound(controller):
-    """Advanced settings: PC sound on the TV (experimental), off until ticked, the same setting as
-    the tray's, greyed out while Include computer sound is off."""
+def test_the_window_has_mirror_screens_sound_switch(controller):
+    """Advanced settings: PC sound on the TV, ticked by default, the same setting as the tray's,
+    greyed out while Include computer sound is off."""
     from mirrorbridge.gui.window import MainWindow
 
     controller.update_settings(capture_audio=True)  # the fixture has it off
     window = MainWindow(controller)
     box, s = window.mirror_sound_cb, controller.settings
-    assert box.text() == MIRROR_SOUND and not box.isChecked() and box.isEnabled()
+    assert box.text() == MIRROR_SOUND and box.isChecked() and box.isEnabled()
+    box.setChecked(False)
+    assert s.mirror_sound is False and Settings.load().mirror_sound is False
     box.setChecked(True)
     assert s.mirror_sound is True and Settings.load().mirror_sound is True
     window.audio_cb.setChecked(False)
@@ -488,7 +491,7 @@ def test_the_window_has_mirror_screens_experimental_sound(controller):
     controller.update_settings(mirror_sound=False)  # from the tray: the window follows
     assert not box.isChecked()
     controller.set_language("es")
-    assert box.text() == "Sonido del PC en la TV al duplicar la pantalla (experimental)"
+    assert box.text() == "Sonido del PC en la TV al duplicar la pantalla"
 
 
 # -- a session, from the tray menu ---------------------------------------------------------------------

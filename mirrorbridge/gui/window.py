@@ -276,7 +276,7 @@ class MainWindow(QMainWindow):
         self.audio_cb = QCheckBox()
         self.cursor_cb = QCheckBox()
         self.mute_pc_cb = QCheckBox()
-        self.mirror_sound_cb = QCheckBox()  # Mirror screen's sound (experimental), under Include computer sound
+        self.mirror_sound_cb = QCheckBox()  # Mirror screen's sound, under Include computer sound
         af.addRow(self.audio_cb)
         af.addRow(self.mirror_sound_cb)
         af.addRow(self.mute_pc_cb)

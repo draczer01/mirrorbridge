@@ -82,9 +82,9 @@ class Settings:
     # Mirror screen settings (framerate above is for casts only)
     mirror_latency: str = "normal"  # low | normal | smooth: how long the TV waits to show a frame
     mirror_framerate: int = 0  # 0 = automatic (60 when this PC can), 30 or 60
-    # The PC's sound with the picture (experimental, off until turned on: Mirror screen settings >
-    # PC sound on the TV); Include computer sound off still keeps it off
-    mirror_sound: bool = False
+    # The PC's sound with the picture (on unless turned off: Mirror screen settings > PC sound on
+    # the TV, mirror --no-sound); Include computer sound off also keeps it off
+    mirror_sound: bool = True
 
     # Mirror screen's test switches (More options > Debug), for the sessions after they are set;
     # Test this TV and mirror --probe leave them out

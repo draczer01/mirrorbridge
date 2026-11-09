@@ -50,9 +50,6 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-# Experimental: the sound is on only when turned on (Settings.mirror_sound, Mirror screen settings >
-# PC sound on the TV; MIRRORBRIDGE_MIRROR_SOUND=1; mirror --sound)
-SOUND_BY_DEFAULT = False
 SYNC_INTERVAL_S = 1.0  # a sync this often
 WINDOW_NS = 2 * NS  # the capture base is the smallest offset of this long
 STEP_WINDOW_NS = 250_000_000  # every block this long late by JUMP_NS: samples were lost, the base moves

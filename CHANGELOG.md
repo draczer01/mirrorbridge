@@ -8,12 +8,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ### Added
 
-- *Mirror screen settings* > *PC sound on the TV with Mirror screen (experimental)*, also in the
-  window's *Advanced settings* (Spanish: *Sonido del PC en la TV al duplicar la pantalla*): sends
-  the PC's sound to the TV with the picture, off until ticked, and greyed out while *Include
-  computer sound* is off. Before, it could only be turned on with `MIRRORBRIDGE_MIRROR_SOUND=1`
-  or `mirror --sound`. `mirror --no-sound` leaves it out for one run. The texts that said
-  Mirror screen has no sound now say it is experimental.
+- *Mirror screen* sends the PC's sound with the picture by default (heard on a TCL TV). *Mirror
+  screen settings* > *PC sound on the TV with Mirror screen*, also in the window's *Advanced
+  settings* (Spanish: *Sonido del PC en la TV al duplicar la pantalla*), turns it off; it is
+  greyed out while *Include computer sound* is off. Before, it could only be turned on with
+  `MIRRORBRIDGE_MIRROR_SOUND=1` or `mirror --sound`. `mirror --no-sound` leaves it out for one
+  run. The texts that said Mirror screen has no sound are updated.
 - While the screen is on a TV (*Mirror screen* or a cast), the PC does not go to sleep and its
   screen does not turn off, as with a video player: a slide show, a PDF or a still desktop used
   to let Windows turn the screen off after its idle time, and a screen that is off gives the
