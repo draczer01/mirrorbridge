@@ -29,8 +29,9 @@ _LOGGER = logging.getLogger(__name__)
 NTP_EPOCH_SECONDS = 2208988800  # 1900-01-01 to 1970-01-01, added on the wire only
 NS = 1_000_000_000
 
-# UDP ports MirrorBridge's mirroring listens on: the NTP responder first, then the (silent)
-# audio control port. Allow inbound UDP on these in Windows Firewall.
+# UDP ports MirrorBridge's mirroring listens on: the NTP responder first, then the audio control
+# port (the sound's syncs go out from it, and the TV's requests to send lost packets again come
+# in to it). Allow inbound UDP on these in Windows Firewall.
 TIMING_PORTS = range(7880, 7890)
 
 NTP_REQUEST = 0xD2
@@ -213,9 +214,12 @@ class PtsMapper:
         self.lowest: Optional[int] = None  # the smallest offset of the session
 
     def restart(self) -> None:
-        """A new FFmpeg, whose pts start from 0 again: forget the offsets, and the session's
-        smallest, but not the last time given, so that the times that follow never go back."""
+        """A new FFmpeg, whose pts start from 0 again: forget the offsets, the one in use (with
+        slew_ns, the new FFmpeg's is taken at once, not crept up to from the old origin) and the
+        session's smallest, but not the last time given, so that the times that follow never go
+        back."""
         self._offsets.clear()
+        self._used = None
         self.lowest = None
 
     def behind(self, pts_ms: int, arrival_ns: int) -> int:

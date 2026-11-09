@@ -4,7 +4,7 @@
 #   .\packaging\build_exe.ps1 -FFmpegZip C:\path\ffmpeg-8.1.1-essentials_build.zip   # a copy already here
 #   .\packaging\build_exe.ps1 -AllowOtherFFmpeg     # bundle $env:MIRRORBRIDGE_FFMPEG, or imageio-ffmpeg's 7.1
 # Whichever ffmpeg.exe goes inside is run first: unless it says it is the pinned version
-# (packaging\ffmpeg_pin.json) and lists the scale_d3d11 filter, the build stops (with
+# (packaging\ffmpeg_pin.json) and lists the gfxcapture filter, the build stops (with
 # -AllowOtherFFmpeg it only warns). Nothing here redirects a program's standard error: with "Stop"
 # below, Windows PowerShell would then stop at the first INFO line PyInstaller writes there.
 param(
@@ -44,7 +44,7 @@ try {
     if ($version -notmatch ('^ffmpeg version n?' + [regex]::Escape($pin.version) + '(-|\s|$)')) {
         $problems += "it is not FFmpeg $($pin.version) ('$version')"
     }
-    if ($filters -notmatch '\bscale_d3d11\b') { $problems += "it has no scale_d3d11 filter, so no scaling on the GPU" }
+    if ($filters -notmatch '\bgfxcapture\b') { $problems += "it has no gfxcapture filter, so no scaling on the GPU" }
     if ($problems) {
         $message = "The FFmpeg that would go inside MirrorBridge.exe, ${ffmpeg}: " + ($problems -join "; ")
         if (-not $AllowOtherFFmpeg) { throw "$message. Pass -AllowOtherFFmpeg to build with it anyway." }

@@ -9,8 +9,9 @@ from mirrorbridge import ffmpeg, routes, vdisplay
 from mirrorbridge.config import Settings
 from mirrorbridge.session import State
 from mirrorbridge.googlecast import CastDevice
+from mirrorbridge.mirror import MirrorError
 from mirrorbridge.text import Text
-from test_mirror_gui import APPLE_TV_TXT, NO_SCREEN_TXT, _device
+from test_mirror_gui import APPLE_TV_TXT, _device
 
 _APP = None
 
@@ -46,10 +47,20 @@ def test_a_tv_found_by_airplay_and_google_cast_is_listed_once():
 def test_the_ways_each_tv_takes(history):
     assert routes.plan(routes.Screen(airplay=_device(), cast=_cast()), history) == [
         routes.AIRPLAY_MIRROR, routes.CAST_MIRROR, routes.AIRPLAY_CAST]
-    assert routes.plan(routes.Screen(airplay=_device(txt=APPLE_TV_TXT)), history) == [  # with FairPlay
-        routes.AIRPLAY_MIRROR, routes.AIRPLAY_CAST]
+    assert routes.plan(routes.Screen(airplay=_device(txt=APPLE_TV_TXT)), history) == [routes.AIRPLAY_CAST]
     assert routes.plan(routes.Screen(cast=_cast()), history) == [routes.CAST_MIRROR]
     assert routes.plan(routes.Screen(cast=_speaker_cast()), history) == []
+
+
+def test_an_apple_tv_is_mirrored_to_first_once_turned_on(history, apple_tv_on):  # pylint: disable=unused-argument
+    assert routes.plan(routes.Screen(airplay=_device(txt=APPLE_TV_TXT)), history) == [  # with FairPlay
+        routes.AIRPLAY_MIRROR, routes.AIRPLAY_CAST]
+    apple = routes.Screen(airplay=_device(txt=APPLE_TV_TXT))
+    failure = MirrorError(Text("mirror_fairplay_failed", "x"))
+    assert routes.classify(failure) == routes.LASTING_FAILURE
+    history.failed(apple.identifier, routes.AIRPLAY_MIRROR, "fp-setup", lasting=True)
+    assert routes.plan(apple, history) == [
+        routes.AIRPLAY_CAST, routes.AIRPLAY_MIRROR]  # the handshake failed: cast first from then on
 
 
 # -- what worked before ----------------------------------------------------------------------------
@@ -155,7 +166,7 @@ def test_the_big_button_stops_trying_for_this_pcs_own_failures_and_after_stop(co
 
 
 def test_the_last_way_failing_is_reported(controller):
-    controller.devices, controller.casts = [_device(txt=NO_SCREEN_TXT, name="Kitchen")], []  # it only casts
+    controller.devices, controller.casts = [_device(txt=APPLE_TV_TXT, name="Living Room")], []
     controller.settings.last_device_id = controller.devices[0].identifier
     controller.start_primary()
     assert controller.started == [routes.AIRPLAY_CAST]

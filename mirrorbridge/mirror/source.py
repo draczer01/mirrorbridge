@@ -3,12 +3,20 @@
 Two sources: the desktop, captured as a cast captures it (ffmpeg.py: ddagrab or gdigrab, the
 same display, window and mouse pointer choices), and a test pattern (FFmpeg's testsrc: a moving
 gradient and a frame counter) that needs no screen at all. Either is scaled to fit the TV's
-screen as GET /info gives it (never up): the desktop on the graphics card or with the processor
-(capture.py, the capture chain), and encoded with ffmpeg.mirror_encoder_args: the encoder
-MirrorBridge picks for casts, with every option that makes it hold frames back turned off, and
-a keyframe every keyframe_seconds (0: only the first). FFmpeg's own queue of captured frames is
-kept short too (INPUT_QUEUE): when the encoder cannot keep up, capture waits (and the next
-picture is a newer one) instead of the frames piling up seconds late.
+screen as GET /info gives it (never up): the desktop on the graphics card (by Windows Graphics
+Capture when it must be scaled) or with the processor (capture.py, the capture chain), and
+encoded with ffmpeg.mirror_encoder_args: the encoder MirrorBridge picks for casts, with every
+option that makes it hold frames back turned off, and a keyframe every keyframe_seconds (0:
+only the first). Captured frames do not wait in FFmpeg either: ddagrab and gfxcapture run in
+the filter graph itself (-filter_complex, in_graph), so a frame is captured only when the filters
+are ready for it (and at most 2 wait for the encoder). A chain slower than the frame rate then
+gives fewer frames, each fresh, instead of as many late ones: as an input (-f lavfi -i), FFmpeg 7
+and later hold up to 10 frames between their input thread and the filters (8 packets, 2 frames),
+whatever -thread_queue_size says (only the muxer's queue takes it now). On Humberto's PC, with a
+full-screen video playing, the processor's chain made 54 of 60 fps, and as an input its frames
+came out 60 to 170 ms old, past the lead, so that frames were dropped and FFmpeg started again
+for a keyframe every 2 to 3 s. Inputs that are not filters (gdigrab; the test pattern, paced by
+-re) keep -thread_queue_size (INPUT_QUEUE), for an FFmpeg before 7.
 
 A thread of its own reads the pipe in large reads and hands each complete frame, with the time
 its last byte arrived, to the asyncio loop, where they wait in a FrameQueue.
@@ -43,7 +51,7 @@ SOURCES = (DESKTOP, TEST_PATTERN)
 READ_SIZE = 1 << 20
 STOP_SECONDS = 5
 STDERR_LINES = 30  # of FFmpeg's stderr, kept for errors() and the log
-INPUT_QUEUE = 2  # captured frames FFmpeg may hold before encoding them (its own default is 8)
+INPUT_QUEUE = 2  # frames an FFmpeg before 7 may hold of an input that is not a filter (its default is 8)
 
 
 @dataclass
@@ -95,39 +103,69 @@ def build_command(
     chain: "capture.Chain | None" = None,
     extra: str = "",
     keyframe_seconds: int = ffmpeg.MIRROR_KEYFRAME_SECONDS,
+    bt709: bool = False,
 ) -> list[str]:
     """FFmpeg: the source, fitted into width x height, encoded for mirroring, FLV to stdout.
 
-    The desktop goes through `chain` (capture.Chain; None is the CPU chain), the GPU one only
-    for ddagrab. `extra` is more FFmpeg options after the encoder's (Settings.mirror_encoder_extra),
+    The desktop goes through `chain` (capture.Chain; None is the CPU chain), the graphics card
+    ones only in place of ddagrab: GPU on ddagrab's frames, GFX with gfxcapture instead of it.
+    `extra` is more FFmpeg options after the encoder's (Settings.mirror_encoder_extra),
     keyframe_seconds the time between keyframes (0: only the first; the default is a keyframe
-    every 2 s, for callers that do not start FFmpeg again for one, as Google Cast mirroring).
+    every 2 s, for callers that do not start FFmpeg again for one, as Google Cast mirroring),
+    bt709 the CPU chain's pixels in BT.709 and tagged so (capture.cpu_filters; the default is
+    the pixels from before, for callers that do not ask, as Google Cast's VP8).
     """
     output: list[str] = []
+    kbps, rate = settings.video_bitrate_kbps, fps  # what the encoder is told
+    vbv = ffmpeg.MIRROR_VBV_FRAMES
+    gpu = chain is not None and backend == "ddagrab"
     if source == TEST_PATTERN:
         video_in = ["-re", "-f", "lavfi", "-i", f"testsrc=size={width}x{height}:rate={fps}"]
         filters = ["format=yuv420p" if encoder == "libx264" else "format=nv12"]
         noise = os.environ.get("MIRRORBRIDGE_PATTERN_NOISE", "")
         if noise.isdigit() and int(noise) > 0:  # experiment: a pattern that fills the bitrate
             filters.insert(0, f"noise=alls={int(noise)}:allf=t")
+    elif gpu and chain.kind == capture.GFX and chain.size_out is not None:
+        # Windows Graphics Capture scales the display on the graphics card; frames as it changes,
+        # and repeats of the last while it does not if this FFmpeg can (chain.repeats), each to
+        # the encoder as it comes (capture.gfx_rate)
+        video_in = capture.gfx_input(capture.gfx_monitor(monitor), chain.size_out, fps, settings.show_cursor,
+                                     chain.repeats)
+        filters = capture.gfx_filters(chain.repeats)
+        output = capture.output_args(chain)
+        kbps, rate = capture.gfx_kbps(kbps, fps), capture.gfx_rate(fps)
+        vbv = capture.vbv_frames(chain)
     else:
         settings_in = dataclasses.replace(settings, framerate=fps)
         video_in, prefilters = ffmpeg._video_input(backend, settings_in, monitor, region)  # pylint: disable=protected-access
-        if chain is not None and chain.kind == capture.GPU and backend == "ddagrab":
+        if gpu and chain.kind == capture.GPU:
             # ddagrab's frames stay on the graphics card: not brought to memory (prefilters)
             filters = capture.gpu_filters(chain)
             output = capture.output_args(chain)
         else:
-            filters = capture.cpu_filters(prefilters, width, height, encoder)
+            filters = capture.cpu_filters(prefilters, width, height, encoder, bt709=bt709)
     video_in = _paced(video_in, ff)
-    cmd = [ff, "-hide_banner", "-nostats", "-loglevel", "warning", "-thread_queue_size", str(INPUT_QUEUE), *video_in]
-    if filters:
-        cmd += ["-vf", ",".join(filters)]
+    cmd = [ff, "-hide_banner", "-nostats", "-loglevel", "warning"]
+    graph_source = in_graph(video_in)
+    if graph_source:
+        cmd += ["-filter_complex", ",".join([graph_source, *filters])]
+    else:
+        cmd += ["-thread_queue_size", str(INPUT_QUEUE), *video_in]
+        if filters:
+            cmd += ["-vf", ",".join(filters)]
     cmd += ["-an"]
-    cmd += ffmpeg.mirror_encoder_args(encoder, settings.video_bitrate_kbps, fps, keyframe_seconds=keyframe_seconds)
+    cmd += ffmpeg.mirror_encoder_args(encoder, kbps, rate, vbv_frames=vbv, keyframe_seconds=keyframe_seconds)
     cmd += output + _extra_args(extra)
     cmd += ["-flush_packets", "1", "-flvflags", "no_duration_filesize+no_metadata", "-f", "flv", "pipe:1"]
     return cmd
+
+
+def in_graph(video_in: list[str]) -> str:
+    """The source filter of an input that is only a lavfi filter (ddagrab, gfxcapture), to run in
+    the filter graph instead; "" for any other input (gdigrab, or one paced by -re)."""
+    if len(video_in) == 4 and video_in[:3] == ["-f", "lavfi", "-i"]:
+        return video_in[3]
+    return ""
 
 
 def _extra_args(extra: object) -> list[str]:
@@ -161,6 +199,10 @@ class FFmpegSource:
         threading.Thread(target=self._read, name="mirrorbridge-mirror-pipe", daemon=True).start()
         self._log_thread = threading.Thread(target=self._drain_stderr, name="mirrorbridge-mirror-log", daemon=True)
         self._log_thread.start()
+
+    def running(self) -> bool:
+        """Whether FFmpeg is still running (it was started and has not ended)."""
+        return self.proc is not None and self.proc.poll() is None
 
     def errors(self, lines: int = 8) -> str:
         """The last `lines` lines FFmpeg wrote to stderr (STDERR_LINES are kept)."""
@@ -278,6 +320,10 @@ class FrameQueue:
 
     def keyframe_waiting(self) -> bool:
         return any(unit is not None and unit.kind == FRAME and unit.keyframe for unit in self._units)
+
+    def ended(self) -> bool:
+        """Whether the end (None) is waiting: the FFmpeg these frames came from has ended."""
+        return any(unit is None for unit in self._units)
 
     def take_trimmed(self) -> int:
         """Frames that made way for newer ones since the last call."""

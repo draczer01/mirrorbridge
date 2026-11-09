@@ -42,9 +42,9 @@ CHOICES: dict[str, tuple] = {
     "mirror_latency": ("low", "normal", "smooth"),
     "mirror_framerate": (0, 30, 60),
     "mirror_keyframes": (0, 10, 2),  # in the Debug menu's order (ffmpeg.MIRROR_KEYFRAME_CHOICES)
-    "mirror_scaler": ("auto", "cpu"),
+    "mirror_scaler": ("auto", "cpu", "gfx"),  # in the Debug menu's order (gui.tray.SCALERS)
 }
-CHECKED = set(CHOICES) | {"mirror_encoder_extra"}
+CHECKED = set(CHOICES) | {"mirror_encoder_extra", "mirror_apple_tv"}
 
 
 @dataclass
@@ -71,7 +71,9 @@ class Settings:
     # Audio
     capture_audio: bool = True
     audio_bitrate_kbps: int = 160
-    mute_pc_audio: bool = True  # Cast mirroring: mute this PC's speakers while the TV plays the sound (no echo)
+    # Google Cast mirroring, and Mirror screen on a TV known to play the PC's sound: mute this PC's
+    # speakers while the TV plays the sound (no echo)
+    mute_pc_audio: bool = True
 
     # Networking
     http_port: int = 7878  # fixed so a single firewall rule covers it
@@ -85,9 +87,13 @@ class Settings:
     # Test this TV and mirror --probe leave them out
     mirror_lead_ms: int = 0  # how long the TV waits to show a frame; 0 = what is saved for the TV
     mirror_keyframes: int = 0  # seconds between keyframes: 0 = only when needed, 10 or 2
-    mirror_scaler: str = "auto"  # auto (on the graphics card when it can) | cpu (as before)
+    # auto (the graphics card when the screen fits the TV's, or gfxcapture can repeat frames) | cpu (as
+    # before) | gfx (gfxcapture to scale, even when it cannot repeat frames: a test)
+    mirror_scaler: str = "auto"
     mirror_on_arrival: bool = False  # ask the TV to show each frame as it comes, not at its time
     mirror_encoder_extra: str = ""  # settings.json only: FFmpeg options after the encoder's, for experiments
+    # Apple TVs and Macs: mirror with FairPlay (experimental, not yet seen working on one); off, they are cast to
+    mirror_apple_tv: bool = False
 
     # App
     language: str = "en"  # a gui.i18n.LANGUAGES code; any other ("" once meant "as Windows") is English

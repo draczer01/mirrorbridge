@@ -20,22 +20,39 @@ _STRINGS: dict[str, dict[str, str]] = {
     "status_idle": {"en": "Not casting", "es": "Sin transmitir"},
     "status_casting": {"en": "Casting to {device}", "es": "Transmitiendo a {device}"},
     "status_busy": {"en": "{state}…", "es": "{state}…"},
-    "start_to": {"en": "Start casting to {device}", "es": "Transmitir a {device}"},
-    "start_no_device": {"en": "Start casting (choose a device)", "es": "Transmitir (elige un dispositivo)"},
+    # The main item, "Show my screen on {device}" (ui_show_on) when a TV is chosen; texts name it as
+    # "Show my screen" ({menu_mirror}: Test this TV's verdict)
+    "show_no_device": {
+        "en": "Show my screen (choose a TV under Device)",
+        "es": "Mostrar mi pantalla (elige una TV en Dispositivo)",
+    },
     "stop": {"en": "Stop casting", "es": "Detener transmisión"},
-    "mirror_screen": {
-        "en": "Mirror screen (low latency, experimental)",
-        "es": "Duplicar pantalla (baja latencia, experimental)",
+    # The old cast (HLS), under More options: for a TV that does not show the screen otherwise
+    "cast_old_way": {
+        "en": "Transmit (old way, 3-7 s delay)",
+        "es": "Transmitir (modo anterior, 3-7 s de retraso)",
+    },
+    "cast_old_way_hint": {
+        "en": "The cast from before, for a TV that does not show your screen otherwise: it is a few seconds behind, "
+              "but it works with more TVs and has sound.",
+        "es": "La transmisión de antes, para una TV que no muestra tu pantalla de otra forma: va unos segundos atrás, "
+              "pero funciona con más TVs y lleva sonido.",
     },
     "stop_mirror": {"en": "Stop mirroring", "es": "Detener la duplicación"},
     "status_mirroring": {"en": "Mirroring to {device}", "es": "Duplicando la pantalla en {device}"},
     "mirror_hint": {
         "en": "Your screen on the TV a fraction of a second behind, instead of a cast's few seconds: the display, "
-              "window or extended screen chosen under What to cast. For paired AirPlay 2 TVs (TCL, Roku, Samsung, "
-              "LG…) and Apple TVs; no sound yet.",
+              "window or extended screen chosen under What to cast. For paired AirPlay 2 TVs of other brands (TCL, "
+              "Roku, Samsung, LG…); no sound yet.",
         "es": "Tu pantalla en la TV con una fracción de segundo de retraso, en lugar de los segundos de una "
               "transmisión: la pantalla, la ventana o la pantalla extendida que elegiste en Qué transmitir. Para TV "
-              "AirPlay 2 ya emparejadas (TCL, Roku, Samsung, LG…) y Apple TV; todavía sin sonido.",
+              "AirPlay 2 de otras marcas ya emparejadas (TCL, Roku, Samsung, LG…); todavía sin sonido.",
+    },
+    "mirror_apple_tv": {
+        "en": "Screen mirroring to Apple TVs and Macs is experimental and off: turn it on with {menu_apple_tv}. "
+              "For now, cast to them with Start casting.",
+        "es": "La duplicación de pantalla en Apple TV y Mac es experimental y está apagada: actívala con "
+              "{menu_apple_tv}. Por ahora, transmite a ellos con Transmitir.",
     },
     "mirror_pair_first": {
         "en": "Pair with this TV first: {menu_pair}.",
@@ -67,18 +84,54 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "vdd_remove": {"en": "Remove the virtual display driver", "es": "Quitar el controlador de pantalla virtual"},
     "audio": {"en": "Include computer sound", "es": "Incluir el sonido del equipo"},
+    "audio_cast": {
+        "en": "Include computer sound (only when transmitting)",
+        "es": "Incluir el sonido del equipo (solo al transmitir)",
+    },
     "cursor": {"en": "Show mouse pointer", "es": "Mostrar el puntero del mouse"},
     "quality_menu": {"en": "Quality", "es": "Calidad"},
     "resolution": {"en": "Resolution", "es": "Resolución"},
     "native": {"en": "Native", "es": "Nativa"},
     "framerate": {"en": "Frame rate", "es": "Cuadros por segundo"},
-    "latency": {"en": "Delay", "es": "Retraso"},
+    "framerate_cast": {"en": "Frame rate (when transmitting)", "es": "Cuadros por segundo (al transmitir)"},
+    "latency": {"en": "Delay (when transmitting)", "es": "Retraso (al transmitir)"},
     "lat_low": {"en": "Low (~3 s delay)", "es": "Bajo (~3 s de retraso)"},
     "lat_balanced": {"en": "Balanced (~4 s delay)", "es": "Equilibrado (~4 s de retraso)"},
     "lat_smooth": {"en": "Smooth (~7 s delay)", "es": "Fluido (~7 s de retraso)"},
     "bitrate": {"en": "Bitrate", "es": "Tasa de bits"},
     "encoder": {"en": "Encoder", "es": "Codificador"},
     "auto_encoder": {"en": "Automatic (best available)", "es": "Automático (el mejor disponible)"},
+    # Mirror screen settings (Settings.mirror_latency and mirror_framerate)
+    "mirror_settings": {"en": "Mirror screen settings", "es": "Ajustes de Duplicar pantalla"},
+    "mirror_latency": {"en": "Latency", "es": "Latencia"},
+    "mirror_lat_low": {"en": "Low", "es": "Baja"},
+    "mirror_lat_normal": {"en": "Normal", "es": "Normal"},
+    "mirror_lat_smooth": {"en": "Smooth", "es": "Suave"},
+    "mirror_lat_low_hint": {
+        "en": "The TV shows each frame {ms} ms after it was captured: the least delay, for a cable or a strong "
+              "Wi-Fi signal.",
+        "es": "La TV muestra cada cuadro {ms} ms después de capturarlo: el menor retraso, para cable o buena señal "
+              "de Wi-Fi.",
+    },
+    "mirror_lat_normal_hint": {
+        "en": "The TV shows each frame {ms} ms after it was captured, or as saved for this TV: the default.",
+        "es": "La TV muestra cada cuadro {ms} ms después de capturarlo, o lo guardado para esta TV: lo "
+              "predeterminado.",
+    },
+    "mirror_lat_smooth_hint": {
+        "en": "The TV shows each frame {ms} ms after it was captured: a little more delay, and fewer skips when the "
+              "Wi-Fi falters.",
+        "es": "La TV muestra cada cuadro {ms} ms después de capturarlo: un poco más de retraso y menos saltos "
+              "cuando falla el Wi-Fi.",
+    },
+    "mirror_framerate": {"en": "Frame rate", "es": "Cuadros por segundo"},
+    "mirror_fps_auto": {"en": "Automatic", "es": "Automático"},
+    "mirror_fps_auto_hint": {
+        "en": "60 fps when the graphics card encodes the video, 30 when the processor does or the screen capture is "
+              "slow; never more than the TV takes.",
+        "es": "60 fps cuando la tarjeta de video codifica el video, 30 cuando lo hace el procesador o la captura es "
+              "lenta; nunca más de lo que acepta la TV.",
+    },
     "play_file": {"en": "Play a video file…", "es": "Reproducir un archivo de video…"},
     "autostart": {"en": "Start with Windows", "es": "Iniciar con Windows"},
     "desktop_shortcut": {"en": "Create desktop shortcut", "es": "Crear acceso directo en el escritorio"},
@@ -90,7 +143,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "more": {"en": "More options", "es": "Más opciones"},
     "log_folder": {"en": "Open log folder", "es": "Abrir carpeta de registros"},
     "probe": {"en": "Test this TV…", "es": "Probar esta TV…"},
-    "debug_menu": {"en": "Debug", "es": "Depuración"},
+    "debug_menu": {"en": "Debug (for testing)", "es": "Depuración (para pruebas)"},
     "latency_meter": {"en": "Latency meter", "es": "Medidor de latencia"},
     "latency_meter_hint": {
         "en": "Mirror this screen, then take a photo with this screen and the TV in it: the difference between the "
@@ -103,11 +156,20 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "Sin duplicar: aquí aparecen las mediciones de este equipo mientras duplica la pantalla.",
     },
     "debug_lead": {"en": "TV wait (test)", "es": "Espera de la TV (prueba)"},
-    "debug_lead_auto": {"en": "Automatic (saved for the TV)", "es": "Automática (la guardada para la TV)"},
+    "debug_lead_auto": {"en": "Automatic (from Latency)", "es": "Automática (según la Latencia)"},
     "debug_keyframes": {"en": "Keyframes", "es": "Cuadros clave"},
     "debug_kf_needed": {"en": "Only when needed", "es": "Solo cuando hace falta"},
     "debug_kf_every": {"en": "Every {n} s", "es": "Cada {n} s"},
+    "debug_scaler": {"en": "Scaling", "es": "Escalado"},
+    "debug_scaler_auto": {"en": "Automatic", "es": "Automático"},
+    "debug_scaler_cpu": {"en": "Processor (as before)", "es": "Procesador (como antes)"},
+    "debug_scaler_gfx": {"en": "Windows capture on the graphics card (test)",
+                         "es": "Captura de Windows en la tarjeta de video (prueba)"},
     "debug_on_arrival": {"en": "Show frames on arrival (test)", "es": "Mostrar cuadros al llegar (prueba)"},
+    "debug_apple_tv": {
+        "en": "Mirror to Apple TVs (FairPlay, experimental)",
+        "es": "Duplicar en Apple TV (FairPlay, experimental)",
+    },
     "language_menu": {"en": "Language", "es": "Idioma"},
     "quit": {"en": "Quit", "es": "Salir"},
     # Notifications
@@ -129,6 +191,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "mirror_started": {"en": "Mirroring to {device}", "es": "Duplicando la pantalla en {device}"},
     "mirror_stopped": {"en": "Screen mirroring stopped", "es": "Duplicación de pantalla detenida"},
     "mirror_failed": {"en": "Screen mirroring failed", "es": "La duplicación de pantalla falló"},
+    "mirror_sound_note": {"en": "Screen mirroring sound", "es": "Sonido de la duplicación de pantalla"},
     "pair_title": {"en": "Pair with {device}", "es": "Emparejar con {device}"},
     "pair_prompt": {
         "en": "Enter the 4-digit PIN shown on your TV:",
@@ -228,8 +291,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     "vdd_finishing": {"en": "Waiting for the driver to start…", "es": "Esperando a que arranque el controlador…"},
     "vdd_ready": {"en": "Virtual screen ready", "es": "Pantalla virtual lista"},
     "vdd_ready_hint": {
-        "en": "Start casting, or Mirror screen, and the TV becomes a second screen.",
-        "es": "Transmite, o usa Duplicar pantalla, y la TV será una segunda pantalla.",
+        "en": "Choose Show my screen, and the TV becomes a second screen.",
+        "es": "Elige Mostrar mi pantalla y la TV será una segunda pantalla.",
     },
     "vdd_uac_cancelled": {
         "en": "Not installed: you cancelled the Windows permission request.",
@@ -271,10 +334,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "La pantalla virtual necesita Windows 10 u 11.",
     },
     "vdd_extend_off": {
-        "en": "Extend screen is off for now, so Start casting and Mirror screen send your display. Choose it "
-              "again once the driver works.",
-        "es": "Extender pantalla quedó desactivado, así que Transmitir y Duplicar pantalla enviarán tu "
-              "pantalla. Vuelve a elegirlo cuando el controlador funcione.",
+        "en": "Extend screen is off for now, so Show my screen sends your display. Choose it again once the "
+              "driver works.",
+        "es": "Extender pantalla quedó desactivado, así que Mostrar mi pantalla enviará tu pantalla. Vuelve a "
+              "elegirlo cuando el controlador funcione.",
     },
     "vdd_winget": {"en": "Install with winget", "es": "Instalar con winget"},
     "vdd_manual": {"en": "Download manually", "es": "Descargar manualmente"},
@@ -331,12 +394,6 @@ _STRINGS: dict[str, dict[str, str]] = {
     "close": {"en": "Close", "es": "Cerrar"},
     "ok": {"en": "OK", "es": "Aceptar"},
     "cancel": {"en": "Cancel", "es": "Cancelar"},
-    # Device status
-    "st_paired": {"en": "Paired", "es": "Emparejado"},
-    "st_ready": {"en": "Ready", "es": "Listo"},
-    "st_needs_pin": {"en": "Needs PIN", "es": "Necesita PIN"},
-    "st_audio_only": {"en": "Audio only", "es": "Solo audio"},
-    "st_restricted": {"en": "AirPlay restricted", "es": "AirPlay restringido"},
     # Main window
     "window_title": {"en": "MirrorBridge - AirPlay for Windows", "es": "MirrorBridge - AirPlay para Windows"},
     "devices": {"en": "AirPlay devices", "es": "Dispositivos AirPlay"},
@@ -364,6 +421,13 @@ _STRINGS: dict[str, dict[str, str]] = {
     # the core module's own; {menu_...} is a menu path, as the menu names it (_menu_paths).
     "checking_ffmpeg": {"en": "Checking FFmpeg and encoders", "es": "Comprobando FFmpeg y los codificadores"},
     "encoder_via": {"en": "{encoder} via {backend}", "es": "{encoder} con {backend}"},
+    # Mirror screen's {backend} in encoder_via: the capture and its chain (mirror.capture.via)
+    "via_gpu": {"en": "{capture} on the graphics card", "es": "{capture} en la tarjeta de video"},
+    "via_cpu": {"en": "{capture} and the processor", "es": "{capture} y el procesador"},
+    "via_gfx_repeats": {"en": "gfxcapture on the graphics card, repeating frames",
+                        "es": "gfxcapture en la tarjeta de video, repitiendo cuadros"},
+    "via_gfx_changes": {"en": "gfxcapture on the graphics card, frames only on changes",
+                        "es": "gfxcapture en la tarjeta de video, cuadros solo con cambios"},
     "ffmpeg_not_found": {
         "en": "FFmpeg was not found. Use the MirrorBridge.exe build (FFmpeg included), run "
               "'pip install imageio-ffmpeg', or put ffmpeg.exe next to MirrorBridge.",
@@ -458,10 +522,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "{device} no dijo qué puede mostrar (GET /info: {answer}).",
     },
     "mirror_fairplay": {
-        "en": "{device} needs FairPlay for screen mirroring (an Apple TV or a Mac), which MirrorBridge does not "
-              "have yet. Cast to it as usual instead.",
-        "es": "{device} necesita FairPlay para duplicar la pantalla (es un Apple TV o un Mac), y MirrorBridge "
-              "todavía no lo tiene. Transmite como siempre en su lugar.",
+        "en": "{device} needs FairPlay for screen mirroring (an Apple TV or a Mac), which is experimental and off "
+              "in MirrorBridge: turn it on with {menu_apple_tv}. Cast to it as usual instead.",
+        "es": "{device} necesita FairPlay para duplicar la pantalla (es un Apple TV o un Mac), que en MirrorBridge es "
+              "experimental y está apagado: actívalo con {menu_apple_tv}. Transmite como siempre en su lugar.",
     },
     "mirror_fairplay_failed": {
         "en": "{device} did not complete the FairPlay handshake that screen mirroring to an Apple TV needs "
@@ -525,8 +589,8 @@ _STRINGS: dict[str, dict[str, str]] = {
               "{errors}",
     },
     "mirror_capture_lost": {
-        "en": "Windows stopped the screen capture and it did not come back ({reason}). Try {menu_mirror} again.",
-        "es": "Windows detuvo la captura de pantalla y no volvió ({reason}). Vuelve a usar {menu_mirror}.",
+        "en": "Windows stopped the screen capture and it did not come back ({reason}). Choose {menu_mirror} again.",
+        "es": "Windows detuvo la captura de pantalla y no volvió ({reason}). Vuelve a elegir {menu_mirror}.",
     },
     "mirror_no_frames": {
         "en": "No video went to {device}: FFmpeg made no frame in {seconds} s.",
@@ -535,6 +599,28 @@ _STRINGS: dict[str, dict[str, str]] = {
     "mirror_retry_trailer": {
         "en": "The TV dropped the video at once: trying again with the other ending of the H.264 header",
         "es": "La TV cortó el video enseguida: se vuelve a intentar con el otro final de la cabecera H.264",
+    },
+    "mirror_retry_no_sound": {
+        "en": "The TV stopped when the sound started: going on without sound",
+        "es": "La TV se detuvo cuando empezó el sonido: se continúa sin sonido",
+    },
+    "mirror_sound_stopped": {
+        "en": "The sound stopped; the picture goes on.",
+        "es": "El sonido se detuvo; la imagen continúa.",
+    },
+    "mirror_sound_no_output": {
+        "en": "No sound: Windows has no sound output to record. Turn on speakers or headphones in Sound settings.",
+        "es": "Sin sonido: Windows no tiene una salida de sonido que grabar. Activa los altavoces o los auriculares "
+              "en Configuración de sonido.",
+    },
+    "mirror_sound_not_taken": {
+        "en": "This TV does not take the PC's sound with Mirror screen; for a video with sound, use Play a video file.",
+        "es": "Esta TV no acepta el sonido del equipo al duplicar la pantalla; para un video con sonido, usa "
+              "Reproducir un archivo de video.",
+    },
+    "mirror_sound_not_muted": {
+        "en": "Could not mute this PC: turn its volume down to avoid an echo.",
+        "es": "No se pudo silenciar este equipo: baja su volumen para evitar el eco.",
     },
     "mirror_tv_ended": {"en": "The TV ended screen mirroring", "es": "La TV terminó la duplicación de pantalla"},
     "mirror_time_up": {
@@ -790,6 +876,12 @@ _STRINGS: dict[str, dict[str, str]] = {
               "duplicada desde este equipo.",
     },
     "probe_skipped": {"en": "skipped: {why}", "es": "omitida: {why}"},
+    "probe_mirror_fairplay": {
+        "en": "the TV needs FairPlay for screen mirroring, as Apple TVs and Macs do, which is experimental and off: "
+              "turn it on with {menu_apple_tv}",
+        "es": "la TV necesita FairPlay para duplicar la pantalla, como los Apple TV y los Mac, que es experimental y "
+              "está apagado: actívalo con {menu_apple_tv}",
+    },
     "probe_mirror_unsupported": {
         "en": "the TV does not say that it takes screen mirroring",
         "es": "la TV no indica que admita la duplicación de pantalla",
@@ -995,6 +1087,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "La primera vez, la TV muestra un código de 4 números: escríbelo cuando MirrorBridge lo pida.",
     },
     "ui_hint_apple": {
+        "en": "On an Apple TV your screen appears a few seconds behind, with sound. Instant mirroring for Apple TV "
+              "is coming in a later version.",
+        "es": "En una Apple TV tu pantalla aparece con unos segundos de retraso, con sonido. La duplicación al "
+              "instante para Apple TV llegará en una versión futura.",
+    },
+    "ui_hint_apple_failed": {
         "en": "On this Apple TV your screen appears a few seconds behind, with sound, because instant mirroring "
               "did not work on it last time.",
         "es": "En esta Apple TV tu pantalla aparece con unos segundos de retraso, con sonido, porque la "
@@ -1043,6 +1141,9 @@ _STRINGS: dict[str, dict[str, str]] = {
     },
     "ui_advanced": {"en": "Advanced settings", "es": "Ajustes avanzados"},
     "ui_cast_latency": {"en": "Delay when casting", "es": "Retraso al transmitir"},
+    "ui_cast_framerate": {"en": "Frame rate when casting", "es": "Cuadros por segundo al transmitir"},
+    "ui_mirror_latency": {"en": "Delay when mirroring", "es": "Retraso al duplicar"},
+    "ui_mirror_framerate": {"en": "Frame rate when mirroring", "es": "Cuadros por segundo al duplicar"},
     "ui_details": {"en": "Technical details (for reporting a problem)",
                    "es": "Detalles técnicos (para reportar un problema)"},
 }
@@ -1098,7 +1199,8 @@ def _menu_paths() -> dict[str, str]:
         "menu_x264": (_item("quality_menu"), _item("encoder"), "x264 (CPU)"),
         "menu_720p": (_item("source_menu"), _item("extend_size"), "720p"),
         "menu_probe": (_item("more"), _item("probe")),
-        "menu_mirror": (_item("mirror_screen"),),
+        "menu_mirror": (_item("show_no_device"),),
+        "menu_apple_tv": (_item("more"), _item("debug_menu"), _item("debug_apple_tv")),
     }
     return {name: " > ".join(words) for name, words in paths.items()}
 

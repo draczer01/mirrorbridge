@@ -126,6 +126,7 @@ class Controller(QObject):
     def __init__(self, settings: Settings) -> None:
         super().__init__()
         self.settings = settings
+        mirror.allow_apple_tv(settings.mirror_apple_tv)
         self.bridge = UiBridge()
         self.runner = AsyncRunner(self.bridge)
         self.manager = DeviceManager(self.runner.loop)
@@ -232,6 +233,7 @@ class Controller(QObject):
     def update_settings(self, **changes: Any) -> None:
         for key, value in changes.items():
             setattr(self.settings, key, value)
+        mirror.allow_apple_tv(self.settings.mirror_apple_tv)
         self.save_settings()
 
     def save_settings(self) -> None:
@@ -580,16 +582,20 @@ class Controller(QObject):
 
     @classmethod
     def can_mirror(cls, device: Optional[Device]) -> bool:
-        """Mirror screen (experimental) needs a receiver that mirrors (Apple TVs and Macs with
-        FairPlay). Without MirrorBridge's pairing, whose pair-verify keys the video, it pairs
-        first: the TV shows a PIN."""
-        return bool(device and cls._mirrors(device))
+        """Mirror screen (experimental) needs a receiver that mirrors, and for Apple TVs and Macs,
+        FairPlay mirroring turned on (Settings.mirror_apple_tv). Without MirrorBridge's pairing, whose pair-verify keys the video,
+        it pairs first: the TV shows a PIN."""
+        return bool(device and cls._mirrors(device) and not mirror.Target.from_device(device).fairplay_off)
 
     @classmethod
     def mirror_tip(cls, device: Optional[Device]) -> str:
         """What Mirror screen does, or why it cannot start with `device`: its tooltip."""
         if device is not None and not cls._mirrors(device):
             return tr("mirror_not_offered")
+        if device is not None and mirror.Target.from_device(device).fairplay_off:
+            return say(Text("mirror_apple_tv", "Screen mirroring to Apple TVs and Macs is experimental and off: turn "
+                            "it on with More options > Debug > Mirror to Apple TVs. For now, cast to them with Start "
+                            "casting."))
         if device is not None and not device.is_paired:
             return tr("mirror_pairs_first")
         return tr("mirror_hint")
@@ -601,9 +607,9 @@ class Controller(QObject):
 
     def primary_action(self, device: Optional[Device] = None) -> str:
         """What the window's one big button does first with `device` (the chosen TV by default):
-        "mirror" (AirPlay or Google Cast screen mirroring), "cast" (the AirPlay cast, for a TV
-        that does not mirror or whose mirroring failed last time), or "" for a receiver that shows
-        no picture."""
+        "mirror" (AirPlay or Google Cast screen mirroring), "cast" (the AirPlay cast: Apple TVs and
+        Macs while FairPlay mirroring is off, or a TV whose mirroring failed), or "" for a receiver
+        that shows no picture."""
         if device is not None:
             screen = next((s for s in self.screens if s.airplay is device), routes.Screen(airplay=device))
         else:
@@ -615,8 +621,14 @@ class Controller(QObject):
 
     @staticmethod
     def is_apple(device: Device) -> bool:
-        """An Apple TV or a Mac: Mirror screen goes there with FairPlay."""
+        """An Apple TV or a Mac: Mirror screen needs FairPlay there (experimental, off unless turned
+        on), so it is cast to."""
         return mirror.Target.from_device(device).needs_fairplay
+
+    @staticmethod
+    def apple_hint() -> str:
+        """Why an Apple TV is cast to: FairPlay mirroring is off, or it did not work last time."""
+        return tr("ui_hint_apple_failed") if mirror.apple_tv_allowed() else tr("ui_hint_apple")
 
     def device_line(self, screen) -> str:
         """What choosing `screen` (a routes.Screen, or an AirPlay Device) means, in a few plain
@@ -770,8 +782,13 @@ class Controller(QObject):
         device = self.selected_device
         if self.is_active or device is None or not self.can_mirror(device) or not device.is_paired:
             return
+
+        def on_notice(text: Text) -> None:  # on the asyncio loop: what the person should know of the sound
+            self.bridge.call(lambda: self.notify.emit(tr("mirror_sound_note"), say(text), False))
+
         self._run_mirror(device, lambda on_status: mirror.MirrorSession(mirror.Target.from_device(device),
-                                                                        self.settings, on_status))
+                                                                        self.settings, on_status,
+                                                                        on_notice=on_notice))
 
     def _cast_mirror(self, screen: routes.Screen) -> None:
         """Google Cast screen mirroring (experimental), to a TV with Chromecast built-in."""

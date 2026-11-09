@@ -56,8 +56,9 @@ def message_of(ex: BaseException) -> str:
 def needs_fairplay(device: str) -> MirrorError:
     """An Apple TV or a Mac: their screen mirroring is FairPlay's."""
     return MirrorError(Text(
-        "mirror_fairplay", "{device} needs FairPlay for screen mirroring (an Apple TV or a Mac), which MirrorBridge "
-        "does not have yet. Cast to it as usual instead.", device=device,
+        "mirror_fairplay", "{device} needs FairPlay for screen mirroring (an Apple TV or a Mac), which is experimental "
+        "and off in MirrorBridge: turn it on with More options > Debug > Mirror to Apple TVs. "
+        "Cast to it as usual instead.", device=device,
     ), step="classify")
 
 

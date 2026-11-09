@@ -35,6 +35,7 @@ from typing import Optional
 
 from .. import audio as system_audio
 from .. import extended, ffmpeg, vdisplay
+from ..awake import KeepAwake
 from ..speakers import MutedSpeakers
 from ..config import Settings
 from ..mirror.clock import NS, now_ns
@@ -169,6 +170,8 @@ class GoogleCastMirror:
         self._shown = 0
         self._reported = False
         self._xscreen: Optional[extended.ExtendedScreen] = None
+        self._awake = KeepAwake(f"MirrorBridge is showing this screen on {device.name or 'a TV'}",
+                                display=source == DESKTOP)
 
     @property
     def frames_shown(self) -> int:
@@ -203,6 +206,7 @@ class GoogleCastMirror:
                 self._set(State.STOPPED, "Cancelled")
                 return
             self._starting = True
+            self._awake.start()
             try:
                 await self._start()
             finally:
@@ -223,6 +227,7 @@ class GoogleCastMirror:
             try:
                 await asyncio.shield(self._cleanup())
             finally:
+                self._awake.stop()
                 self.finished.set()
 
     async def stop(self) -> None:

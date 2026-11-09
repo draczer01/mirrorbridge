@@ -231,6 +231,51 @@ def test_the_encoder_probe_says_why_an_encoder_does_not_work(monkeypatch, caplog
     assert "Encoder x264 (CPU) does not work here: FFmpeg did not answer" in caplog.text
 
 
+def test_the_encoder_probe_keeps_the_encoder_s_own_line(monkeypatch, caplog):
+    """What FFmpeg 6.1 wrote here for NVENC without a GPU: the cause is the encoder's own line,
+    before three that every cause ends with. The warning has whole lines, the encoder's even when
+    far up."""
+    cause = "[h264_nvenc @ 0x5641a41f3b40] Cannot load libcuda.so.1\n"
+    every = ("[vost#0:0/h264_nvenc @ 0x5641a41f3780] Error while opening encoder - maybe incorrect parameters such "
+             "as bit_rate, rate, width or height.\n"
+             "Error while filtering: Operation not permitted\n"
+             "[out#0/null @ 0x5641a41f2480] Nothing was written into output file, because at least one of its "
+             "streams received no packets.\n")
+    qsv = "[h264_qsv @ 01] Error initializing an internal MFX session: unsupported (-3)\n" + every * 4
+    monkeypatch.setattr(ffmpeg, "_run", lambda args, timeout=15: subprocess.CompletedProcess(
+        args, 1, "", cause + every if "h264_nvenc" in args else qsv))
+    monkeypatch.setattr(ffmpeg, "_WORKING_ENCODERS", set())
+    monkeypatch.setattr(ffmpeg, "_WARNED", set())
+    with caplog.at_level(logging.WARNING, logger="mirrorbridge.ffmpeg"):
+        assert not ffmpeg.encoder_works("ff", "h264_nvenc", True)
+        assert not ffmpeg.encoder_works("ff", "h264_qsv", True)
+    nvenc, quick_sync = (r.getMessage() for r in caplog.records)
+    assert nvenc == "Encoder NVIDIA NVENC does not work here: " + (cause + every).strip()
+    assert quick_sync.split(": ", 1)[1].splitlines() == (
+        ["[h264_qsv @ 01] Error initializing an internal MFX session: unsupported (-3)"]
+        + (every * 4).splitlines()[-ffmpeg.PROBE_TAIL_LINES:])
+
+
+def test_the_encoder_probe_warns_once_for_a_cause_whatever_ffmpegs_addresses(monkeypatch, caplog):
+    """Each FFmpeg names its encoder at another address ("[h264_nvenc @ 000001d2c3a4b5c0]"): the
+    same cause from the next probe (the next session) is not another warning."""
+    addresses = iter(["000001d2c3a4b5c0", "000002a1b2c3d4e5", "0x5641a41f3b40"])
+
+    def run(args, timeout=15):
+        return subprocess.CompletedProcess(args, 1, "", f"[h264_nvenc @ {next(addresses)}] Cannot load nvcuda.dll\n")
+
+    monkeypatch.setattr(ffmpeg, "_run", run)
+    monkeypatch.setattr(ffmpeg, "_WORKING_ENCODERS", set())
+    monkeypatch.setattr(ffmpeg, "_WARNED", set())
+    with caplog.at_level(logging.DEBUG, logger="mirrorbridge.ffmpeg"):
+        for _ in range(3):
+            assert not ffmpeg.encoder_works("ff", "h264_nvenc", True)
+    said = [(r.levelno, r.getMessage()) for r in caplog.records if "does not work here" in r.getMessage()]
+    assert [level for level, _ in said] == [logging.WARNING, logging.DEBUG, logging.DEBUG]
+    assert said[0][1] == ("Encoder NVIDIA NVENC does not work here: [h264_nvenc @ 000001d2c3a4b5c0] Cannot load "
+                          "nvcuda.dll")
+
+
 def _wait_segments(path, n, timeout=20):
     deadline = time.time() + timeout
     while time.time() < deadline:

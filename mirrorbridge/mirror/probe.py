@@ -41,7 +41,7 @@ from . import profiles
 from .clock import NtpResponder, bind_udp
 from .control import SOURCE_VERSION, USER_AGENT, ReceiverInfo, Target, connect_failed
 from .datachannel import DataChannel
-from .errors import MirrorError, answer_of, data_closed, data_refused, message_of, no_timing, refused
+from .errors import MirrorError, answer_of, data_closed, data_refused, message_of, needs_fairplay, no_timing, refused
 from .h264 import TRAILERS
 from .negotiation import CONTROL_FIRST, MEDIA_FIRST, NTP, PTP, Established, Negotiator, Plan
 from .session import MirrorSession, SessionReport
@@ -258,6 +258,9 @@ class _Probe:
 
     async def run(self) -> ProbeResult:
         result = self.result
+        if self.target.fairplay_off:
+            result.error = message_of(needs_fairplay(self.target.name))
+            return result
         try:
             if not await self._info():
                 return result
@@ -457,7 +460,9 @@ class _Probe:
             await (self._stream(check) if self.send_test_pattern else self._hold(check))
             self.say(check.line())
             if check.worked:
-                self.result.profile = profiles.MirrorProfile.of(shape, trailer)
+                # What is known of the PC's sound on this TV stays as it was: the probe sends none.
+                self.result.profile = dataclasses.replace(profiles.MirrorProfile.of(shape, trailer),
+                                                          sound=self.start.sound, sound_note=self.start.sound_note)
                 self._save()
                 return shape
             report = check.report
@@ -500,7 +505,7 @@ class _Probe:
 
         # NTP whatever MIRRORBRIDGE_TIMING says: the probe's checks are made for it.
         session = MirrorSession(self.target, self.settings, status, source=TEST_PATTERN, profile=profile,
-                                seconds=self.seconds, remember=False, timing=NTP)
+                                seconds=self.seconds, remember=False, timing=NTP, sound=False)
         check.report = session.report
         try:
             await asyncio.wait_for(session.run(), self.seconds + STREAM_SETUP_SECONDS)

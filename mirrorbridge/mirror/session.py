@@ -20,24 +20,31 @@ the video connection holds no more than about CATCH_UP_MS of the bitrate (catch_
 past that, when the TV (or the network) takes the video slower than it comes, are frames
 dropped up to the next keyframe, and the drop ends on a keyframe that is on time, so that the
 TV is back to real time. A TV that takes nothing for VIDEO_STALL_SECONDS ends the session. So
-does FFmpeg giving no picture (FIRST_FRAME_SECONDS, FRAME_GAP_SECONDS); setting up has
-START_SECONDS in all.
+does FFmpeg giving no picture (FIRST_FRAME_SECONDS, FRAME_GAP_SECONDS), but not gfxcapture's
+without repeats once it gave a frame: it gives one only when the screen changes, so a screen
+that stays as it is is no fault (FFmpeg ending is still seen to); setting up has START_SECONDS
+in all.
 
 Keyframes come only when needed (ffmpeg.mirror_encoder_args): a keyframe made through the
 small buffer that keeps the delay down is a blur on text, so FFmpeg makes one when it starts
 and none after. When frames were dropped (or the TV took none for a while, FrameQueue), FFmpeg
 is started again (_restart): its first frame is a keyframe. That is at most once every
-KEYFRAME_RESTART_SECONDS, and the TV is told nothing: the frames' times go on from where they
-were (PtsMapper.restart) and the same picture settings need no new codec packet.
+KEYFRAME_RESTART_SECONDS, without waiting for another frame (gfxcapture without repeats gives
+none while the screen stays as it is), and the TV is told nothing: the frames' times go on from
+where they were (PtsMapper.restart) and the same picture settings need no new codec packet.
 
 FFmpeg is also started again when Windows took the screen capture away (a display or its driver
 changing, a UAC prompt, the lock screen: capture.capture_lost), after CAPTURE_RETRY_DELAYS,
 with the display looked up again; a capture that does not come back within
 CAPTURE_LOST_SECONDS ends the session with its own error. FFmpeg ending before its first frame
 for another reason (the driver refuses ddagrab, the GPU encoder is out of sessions) goes on
-the next way, as a cast does: the graphics card chain (capture.py, NVENC with ddagrab), then
-the processor's, then GDI capture, then the CPU encoder. A graphics card chain that makes a
-picture of the wrong size (its first SPS) gives way to the processor's for the rest of the run.
+the next way, as a cast does: the graphics card's chain (capture.py: NVENC with ddagrab, or with
+gfxcapture when the screen must be scaled and it repeats frames, or Scaling says so), then the
+processor's, then GDI capture, then the CPU encoder. A graphics card chain that ends so (but
+for Windows keeping the screen from it, which is no fault of the chain), or makes a picture of
+the wrong size (its first SPS), gives way to the processor's on that display for the rest of
+the run; one at the display's own size whose display comes back at a size to be scaled is
+chosen again (_rechoose_chain).
 
 Mirror screen settings: Latency (MIRROR_LATENCIES, the TV's wait for each frame, the lead:
 Normal is the one saved for the TV) and Frame rate (choose_mirror_fps: Automatic is 60 with a
@@ -45,8 +52,9 @@ hardware encoder and a capture that keeps up, else 30, and 30 once the session f
 x264). More options > Debug has test switches for the sessions after they are set (lead_override,
 keyframes_on_demand, on_arrival, Settings.mirror_scaler): the TV's wait in place of the
 Latency's, which is never saved; a keyframe every 10 or 2 seconds (every 2 s, FFmpeg is not
-started again for one); the processor's chain in place of the graphics card's; and codec
-packets that ask the TV to show each frame as it comes, not at its time
+started again for one); the processor's chain in place of the graphics card's, or gfxcapture
+to scale even without repeats; and codec packets that ask the TV to show each frame as it
+comes, not at its time
 (packets.codec_packet). Test this TV and `mirror --probe` leave them out.
 
 A TV that drops the video connection within AT_ONCE_SECONDS of the first frame of a first
@@ -67,6 +75,16 @@ MIRRORBRIDGE_PTP_LOCK_S) and that time is over without it announcing a better cl
 codec packet and the first frame come after it. If a SETUP or SETPEERS is refused or the TV does
 not follow, the session is set up again over NTP (unless MIRRORBRIDGE_PTP_NO_FALLBACK=1). The NTP
 responder stays bound either way.
+
+The PC's sound (sound.py) goes over the type-96 stream the session sets up anyway, for now only
+when asked for (MIRRORBRIDGE_MIRROR_SOUND=1, mirror --sound; never for Test this TV, nor with PTP
+timing): held until the first frame has gone, then sent with the picture's lead, the test tone
+in its place for the test pattern. Nothing the sound does may stop or slow the picture: whatever
+goes wrong stops the sound alone, and the person is told once (on_notice). A TV that closes the
+session within SOUND_DROP_SECONDS of the first sound packet (SOUND_ENDED_SECONDS when it ends
+mirroring as its remote does) gets it set up once more without sound (but for a run that asked
+for the sound), and mirroring.json keeps that for the next ones, unless the TV closed that one
+as soon.
 """
 
 from __future__ import annotations
@@ -79,14 +97,18 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
+from .. import audio as system_audio
 from .. import extended, ffmpeg, vdisplay
+from ..awake import KeepAwake
 from ..config import Settings
 from ..session import State, StatusCallback
+from ..speakers import MutedSpeakers
 from ..text import Text
-from . import capture, negotiation, profiles, ptp
+from . import capture, negotiation, profiles, ptp, sound
 
 
 def _env_float(name: str, default: float) -> float:
@@ -114,11 +136,13 @@ def _env_slew_ns() -> Optional[int]:
 from .clock import NS, TIMING_PORTS, NtpResponder, PtsMapper, bind_udp, now_ns, to_ntp
 from .control import FEATURE_1080P, ControlChannel, ReceiverInfo, Target, open_event_channel
 from .datachannel import HEARTBEAT_IDLE_ONLY, DataChannel
-from .errors import MirrorError, answer_of, data_closed, data_refused, no_timing, refused
+from .errors import MirrorError, answer_of, data_closed, data_refused, needs_fairplay, no_timing, refused
 from .flv import CONFIG, FRAME
 from .h264 import TRAILERS, avcc_record, frame_nals, is_idr, join_avcc, parse_avcc, parse_sps, split_avcc
-from .negotiation import NTP, PTP, Established, Feedback, Negotiator
+from .audiopackets import SPF, SR, choose_format, ms_to_samples
+from .negotiation import NTP, PTP, AudioOffer, Established, Feedback, Negotiator
 from .packets import ON_ARRIVAL, VideoCipher, codec_packet, video_key
+from .sound import FAILED, AudioControl, MirrorSound, SoundKnobs
 from .source import (DESKTOP, STDERR_LINES, TEST_PATTERN, FFmpegSource, FrameQueue, Unit, build_command,
                      ended_text)
 from .stats import LOG_SECONDS, StageTimes
@@ -296,7 +320,13 @@ class SessionReport:
     latency: dict = field(default_factory=dict)
     first_frame_ms: Optional[float] = None  # from starting FFmpeg to the first frame sent
     restarts: list = field(default_factory=list)  # why FFmpeg was started again while the TV waited
-    retried: str = ""  # why the session was set up a second time, with the other avcC ending
+    retried: str = ""  # why the session was set up a second time: the other avcC ending, or without sound
+    # The PC's sound: "off: ..." (why not), "sent: ...", "held: ..." or "stopped: ..." at the end
+    # (MirrorSound.final_text), and its figures (sound.SoundStats.as_dict()).
+    sound: str = "not set up"
+    sound_stats: dict = field(default_factory=dict)
+    audio_latency: str = ""  # RECORD's Audio-Latency, if the TV said it
+    feedback_body: Optional[dict] = None  # the last plist /feedback was answered with
     error: Optional[BaseException] = None
 
 
@@ -317,6 +347,10 @@ class MirrorSession:
         remember: bool = True,
         max_canvas: tuple[int, int] = MAX_CANVAS,
         timing: Optional[str] = None,
+        fps: Optional[int] = None,
+        sound: Optional[bool] = None,
+        sound_knobs: Optional[SoundKnobs] = None,
+        on_notice: Optional[Callable[[Text], None]] = None,
     ) -> None:
         self.target = target
         self.settings = dataclasses.replace(settings)  # a copy: menu changes are for the next session
@@ -329,10 +363,14 @@ class MirrorSession:
         self.remember = remember
         self.max_canvas = max_canvas
         self.timing = timing  # NTP or PTP for this run only (mirror --timing); None: MIRRORBRIDGE_TIMING, else saved
+        self.fps_asked = fps  # for this run only (mirror --fps, MIRRORBRIDGE_FPS); None: Mirror screen settings
         self.state = State.IDLE
         self.report = SessionReport(trailer=self.profile.trailer)
         self.error: Optional[Exception] = None
         self.finished = threading.Event()
+        # The PC awake while the session runs, and its screen on when it is the screen that goes
+        self._awake = KeepAwake(f"MirrorBridge is showing this screen on {target.name or 'a TV'}",
+                                display=source == DESKTOP)
         self._stop = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
         self._starting = False
@@ -368,6 +406,25 @@ class MirrorSession:
         self._retried = False
         self._xscreen: Optional[extended.ExtendedScreen] = None  # Extend screen's virtual monitor
         self.virtual_device = ""  # \\.\DISPLAYn of the virtual screen while there is one
+        # The PC's sound (sound.py): True for this run (mirror --sound), False not at all (the
+        # probe), None as the settings and MIRRORBRIDGE_MIRROR_SOUND say (_sound_wanted).
+        self.sound_asked = sound
+        self._sound_forced = sound is True
+        self._knobs = sound_knobs or SoundKnobs.from_env()
+        self.on_notice = on_notice or (lambda text: None)  # what the person should know of the sound, once
+        self._sound: Optional[MirrorSound] = None
+        self._audio_control: Optional[AudioControl] = None  # our audio control port, bound before SETUP
+        self._volume: Optional[asyncio.Future] = None  # SET_PARAMETER volume (MIRRORBRIDGE_MIRROR_SOUND_VOLUME)
+        self._speakers = MutedSpeakers()
+        self._muted = False
+        self._loopback: tuple[bool, str] = (False, "not checked")  # Windows has a sound output to record (_start)
+        self._sound_on = False  # this attempt's _sound_wanted, and why not
+        self._sound_why = ""
+        self._sound_retried = False  # set up again without sound: the TV closed the session when it started
+        self._sound_blamed = False  # and it did not drop the video without the sound too
+        self._sound_first_ns: Optional[int] = None  # when the first sound packet went
+        self._closed_ns = 0  # when the TV closed the session (its video or control connection)
+        self._noticed: set[str] = set()
         self._reset_restarts()
 
     def _reset_restarts(self) -> None:
@@ -410,6 +467,7 @@ class MirrorSession:
             if self._stop.is_set():
                 self._set(State.STOPPED, "Cancelled")
                 return
+            self._awake.start()
             try:
                 ended = await self._attempts()
             except MirrorError:
@@ -430,6 +488,7 @@ class MirrorSession:
             try:
                 await asyncio.shield(self._cleanup())
             finally:
+                self._awake.stop()
                 if switch is not None:
                     sys.setswitchinterval(before)
                 self.finished.set()
@@ -441,24 +500,45 @@ class MirrorSession:
             self._task.cancel()
 
     async def _attempts(self) -> str:
-        """One session, and once more with the other avcC ending if the TV dropped the video at
-        once on a first one."""
-        try:
-            return await self._attempt()
-        except MirrorError as ex:
-            other = self._other_trailer(ex)
-            if other is None:
-                raise
-            await self._retry_with(other)
-            if self._stop.is_set():
-                self._check_screen()
-                return "Stopped"
-            return await self._attempt()
+        """One session; once more without sound if the TV closed it when the sound started (and
+        the sound was not asked for this run: _sound_dropped); and once more with the other avcC
+        ending if the TV dropped the video at once on a first one. Each retry at most once."""
+        while True:
+            try:
+                ended = await self._attempt()
+            except MirrorError as ex:
+                if self._sound_dropped():
+                    await self._retry_without_sound()
+                else:
+                    other = self._other_trailer(ex)
+                    if other is None:
+                        raise
+                    if self._sound_retried:  # it dropped the video without the sound as well
+                        self._sound_blamed = False
+                    await self._retry_with(other)
+                if self._stop.is_set():
+                    self._check_screen()
+                    return "Stopped"
+                continue
+            if self._sound_dropped(ended=True):  # it ended the session itself: "The TV ended screen mirroring"
+                await self._retry_without_sound()
+                if self._stop.is_set():
+                    self._check_screen()
+                    return "Stopped"
+                continue
+            if self._sound_retried and self._closed_soon():
+                # Ended as soon without the sound (the person ending it, say): not the sound's doing.
+                _LOGGER.info("The TV ended the session without sound as well: the sound is not left out for it")
+                self._sound_blamed = False
+            return ended
 
     async def _attempt(self) -> str:
         self._starting = True
         try:
             await self._start()
+        except BaseException:
+            self._halt_sound()  # before run() says how it ended
+            raise
         finally:
             self._starting = False
         return await self._supervise()
@@ -483,11 +563,59 @@ class MirrorSession:
             f"the TV closed the video connection after {first.data_closed_after} frames with avcC ending "
             f"{first.trailer}"))
 
+    def _closed_after_sound(self) -> Optional[float]:
+        """Seconds from the first sound packet to the TV closing the session, if that was within
+        SOUND_DROP_SECONDS; None otherwise."""
+        first, closed = self._sound_first_ns, self._closed_ns
+        if not first or not closed or not 0 <= closed - first < sound.SOUND_DROP_SECONDS * NS:
+            return None
+        return (closed - first) / NS
+
+    def _closed_soon(self) -> bool:
+        """Whether the TV closed this session before its first frame or within SOUND_DROP_SECONDS
+        of it."""
+        first, closed = self._first_sent_ns, self._closed_ns
+        return bool(closed) and (first is None or closed - first < sound.SOUND_DROP_SECONDS * NS)
+
+    def _sound_dropped(self, ended: bool = False) -> bool:
+        """Whether the TV closed the session when the sound started, and the session is to be set
+        up again without sound: not when the sound was asked for this run (mirror --sound), nor
+        when someone heard it on this TV, nor a second time. `ended`: the TV ended mirroring
+        (both its connections closed, as its remote closes them); that counts only within
+        SOUND_ENDED_SECONDS, since later a person ending it is the likelier, and no TV is to be
+        set up again just after someone left it."""
+        after = self._closed_after_sound()
+        if after is None or self._stop.is_set():
+            return False
+        if self._sound_forced or self._sound_retried or self.profile.sound == profiles.SOUND_HEARD:
+            _LOGGER.info("The TV closed the session %.1f s after the first sound packet", after)
+            return False
+        if ended and after >= sound.SOUND_ENDED_SECONDS:
+            _LOGGER.info("The TV ended mirroring %.1f s after the first sound packet: taken for someone ending it, "
+                         "not for the sound", after)
+            return False
+        return True
+
+    async def _retry_without_sound(self) -> None:
+        after = self._closed_after_sound() or 0.0
+        _LOGGER.info("The TV closed the session %.1f s after the first sound packet: setting up again without sound",
+                     after)
+        text = Text("mirror_retry_no_sound", "The TV stopped when the sound started: going on without sound")
+        self._set(State.STARTING, text)
+        self._notice(text)
+        await asyncio.shield(self._release())
+        self._sound_retried = self._sound_blamed = True
+        self.report = SessionReport(trailer=self.profile.trailer,
+                                    retried="the TV closed the session when the sound started")
+
     async def _start(self) -> None:
         loop = asyncio.get_running_loop()
         s = self.settings
+        if self.target.fairplay_off:
+            raise needs_fairplay(self.target.name)
         self._stopping = self._timing_probed = self._timing_quiet = self._dropped_at_once = False
-        self._first_sent_ns = None
+        self._first_sent_ns = self._sound_first_ns = None
+        self._closed_ns = 0
         self._reset_restarts()
         self._set(State.STARTING, Text("checking_ffmpeg", "Checking FFmpeg and encoders"))
         ff = ffmpeg.find_ffmpeg(s.ffmpeg_path)
@@ -508,6 +636,12 @@ class MirrorSession:
             backend = await loop.run_in_executor(None, ffmpeg.pick_capture_backend, ff, s, monitor, region)
         self._capture = (ff, monitor, region)
         self._using = (backend, encoder, capture.CPU)  # the first way, for the frame rate (_set_up)
+        if self.source == DESKTOP and not self._knobs.tone and self._sound_wanted(output=False)[0]:
+            # Whether Windows has a sound output to record: soundcard's first import and COM take
+            # a while (2.5 s under Wine), so off the loop, before the TV waits for anything.
+            self._loopback = await loop.run_in_executor(None, system_audio.loopback_available)
+            found, what = self._loopback
+            _LOGGER.info("Sound to record: %s", what if found else f"none ({what})")
 
         self._set(State.CONNECTING, self.target.name)
         try:
@@ -525,12 +659,12 @@ class MirrorSession:
         # of sessions), _pump goes on with the processor's chain, GDI capture, then the CPU encoder.
         self._sources = [(backend, encoder, capture.CPU)]
         if self.source == DESKTOP:
-            gpu, why = await loop.run_in_executor(None, functools.partial(
-                capture.gpu_possible, ff, encoder=encoder, backend=backend, monitor=monitor, region=region,
+            kind, why = await loop.run_in_executor(None, functools.partial(
+                capture.choose_chain, ff, encoder=encoder, backend=backend, monitor=monitor, region=region,
                 canvas=self.report.canvas, scaler=s.mirror_scaler))
-            _LOGGER.info("Capture chain: %s (%s)", "the graphics card's" if gpu else "the processor's", why)
-            if gpu:
-                self._sources.insert(0, (backend, encoder, capture.GPU))
+            _LOGGER.info("Capture chain: %s (%s)", capture.KIND_WORDS[kind], why)
+            if kind != capture.CPU:
+                self._sources.insert(0, (backend, encoder, kind))
         if backend == "ddagrab":
             self._sources.append(("gdigrab", encoder, capture.CPU))
         if encoder != "libx264":
@@ -564,7 +698,7 @@ class MirrorSession:
 
     def _start_source(self, why: str) -> None:
         """FFmpeg with the next way of capturing and encoding (`why`, for the log)."""
-        backend, encoder, _kind = self._using = self._sources.pop(0)
+        backend, encoder, kind = self._using = self._sources.pop(0)
         label = ffmpeg.ENCODER_LABELS.get(encoder, encoder)
         if self._auto_fps:  # Frame rate Automatic: 30 for x264 and gdigrab
             fps, fps_why = choose_mirror_fps(0, self.report.info, encoder=encoder, backend=backend)
@@ -572,9 +706,23 @@ class MirrorSession:
                 self._use_fps(fps, fps_why)
         self.report.encoder = encoder
         if self._first_sent_ns is None:  # the TV is still waiting for its first frame
-            self._set(State.STARTING, Text("encoder_via", "{encoder} via {backend}", encoder=label,
-                                           backend="testsrc" if self.source == TEST_PATTERN else backend))
+            way = "testsrc" if self.source == TEST_PATTERN else capture.via(backend, self._chain_for(backend, kind),
+                                                                            encoder)
+            self._set(State.STARTING, Text("encoder_via", "{encoder} via {backend}", encoder=label, backend=way))
         self._launch(why)
+
+    def _chain_for(self, backend: str, kind: str) -> Optional[capture.Chain]:
+        """The desktop's chain of that kind for the display as it is now (the processor's when its
+        size is not known; gfxcapture repeating frames if this FFmpeg can); None for the test
+        pattern."""
+        if self.source != DESKTOP:
+            return None
+        ff, monitor, region = self._capture
+        size_in = capture.capture_size(backend, monitor, region)
+        if size_in is None:
+            kind = capture.CPU
+        return capture.chain_for(kind, size_in, self.report.canvas or FALLBACK_CANVAS,
+                                 repeats=kind == capture.GFX and capture.gfx_repeats(ff))
 
     def _use_fps(self, fps: int, why: str) -> None:
         """Another frame rate for the FFmpegs from now on, and what depends on it."""
@@ -598,21 +746,24 @@ class MirrorSession:
         backend, encoder, kind = self._using
         canvas = self.report.canvas or FALLBACK_CANVAS
         size_in = capture.capture_size(backend, monitor, region) if self.source == DESKTOP else None
-        chain = None
-        if self.source == DESKTOP:
-            chain = capture.chain_for(kind if size_in is not None else capture.CPU, size_in, canvas)
-        self._chain = chain
+        chain = self._chain = self._chain_for(backend, kind)
+        changes_only = chain is not None and chain.changes_only and backend == "ddagrab"
+        gfx = chain is not None and chain.kind == capture.GFX and backend == "ddagrab"
+        self._stats.variable_rate = changes_only  # gfxcapture without repeats: frames only as the screen changes
+        self._stats.paced_by_screen = gfx  # gfxcapture: frames at the screen's refreshes, fewer at 200 Hz
         self.report.keyframes = keyframes_text(encoder, s)
         fps = self.report.fps
         cmd = build_command(ff, s, source=self.source, encoder=encoder, width=canvas[0], height=canvas[1], fps=fps,
                             backend=backend, monitor=monitor, region=region, chain=chain,
                             extra=s.mirror_encoder_extra,
-                            keyframe_seconds=ffmpeg.mirror_keyframe_seconds(s.mirror_keyframes))
+                            keyframe_seconds=ffmpeg.mirror_keyframe_seconds(s.mirror_keyframes), bt709=True)
         self._generation += 1
         gen = self._accepting = self._generation
         self._gen_frames = 0
         frames, stats = self._frames, self._stats
         assert frames is not None
+        # gfxcapture that repeats frames may begin with black ones (capture.gfx_black_start): their times
+        first_times: Optional[list[int]] = [] if gfx and chain is not None and chain.repeats else None
 
         def take(unit: Optional[Unit]) -> None:
             if gen != self._accepting:  # from an FFmpeg stopped for a newer one
@@ -623,6 +774,10 @@ class MirrorSession:
                     self._recovering_since = 0  # the capture is back
                 self._gen_frames += 1
                 stats.arrived()
+                if first_times is not None and len(first_times) < capture.GFX_BLACK_FRAMES:
+                    first_times.append(unit.pts_ms)
+                    if len(first_times) == capture.GFX_BLACK_FRAMES:
+                        self._black_start(gen, first_times, capture.gfx_rate(fps))
             frames.put(unit)
 
         def hand_over(unit: Optional[Unit]) -> None:  # from FFmpeg's pipe thread
@@ -634,16 +789,44 @@ class MirrorSession:
         est = self.report.established
         size = f"{size_in[0]}x{size_in[1]}" if size_in else "testsrc" if self.source == TEST_PATTERN else "?"
         made = chain.size_out if chain is not None and chain.size_out else canvas
-        vbv = round(s.video_bitrate_kbps * ffmpeg.MIRROR_VBV_FRAMES / max(1, fps)) * 1000 // 8
-        _LOGGER.info("FFmpeg %d (%s): %s, %s -> %s%dx%d, %s at %d fps, %d kbit/s (VBV %d bytes), keyframes %s; "
-                     "lead %d ms (%s)", gen, why, capture.chain_label(chain, backend), size,
+        vbv_frames = capture.vbv_frames(chain)
+        vbv = round(s.video_bitrate_kbps * vbv_frames / max(1, fps)) * 1000 // 8
+        rate, gfx_said = f"VBV {vbv} bytes", ""
+        if vbv_frames != ffmpeg.MIRROR_VBV_FRAMES:
+            rate += f", {vbv_frames:g} frames"
+        if chain is not None and chain.kind == capture.GFX and backend == "ddagrab":
+            # what NVENC is told (source.build_command), and the frames it gets
+            top = capture.gfx_rate(fps)
+            rate += (f"; NVENC told {capture.gfx_kbps(s.video_bitrate_kbps, fps)} kbit/s at {top} "
+                     "fps, the same share a frame")
+            gfx_said = (f", gfxcapture's frames as the screen changes and repeats of the last while it does not, up "
+                        f"to {top} a second, each as it comes" if chain.repeats else
+                        f", frames only as the screen changes, without repeats (gfxcapture up to {top} a second)")
+        _LOGGER.info("FFmpeg %d (%s): %s, %s -> %s%dx%d, %s at %s%d fps, %d kbit/s (%s)%s, keyframes %s; "
+                     "lead %d ms (%s)",
+                     gen, why, capture.chain_label(chain, backend), size,
                      "" if chain is not None and chain.size_out else "within ", *made,
-                     ffmpeg.ENCODER_LABELS.get(encoder, encoder), fps, s.video_bitrate_kbps, vbv,
-                     self.report.keyframes, est.plan.lead_ms if est else 0, self._lead_why)
+                     ffmpeg.ENCODER_LABELS.get(encoder, encoder), "up to " if changes_only else "", fps,
+                     s.video_bitrate_kbps, rate, gfx_said, self.report.keyframes, est.plan.lead_ms if est else 0,
+                     self._lead_why)
         _LOGGER.info("FFmpeg %d: %s", gen, subprocess.list2cmdline(cmd))
         self._ffmpeg = FFmpegSource(cmd, hand_over)
         self._gen_started_ns = now_ns()
         self._ffmpeg.start()
+
+    @staticmethod
+    def _black_start(gen: int, times_ms: list[int], rate: int) -> None:
+        """Say so in the log when an FFmpeg's gfxcapture most likely began with black frames: the
+        TV then begins with a black keyframe, and the picture comes after it as an ordinary frame
+        (blurred at first, as every frame that changes the whole screen is). Not yet seen on real
+        hardware: this is how to tell."""
+        blacks = capture.gfx_black_start(times_ms, rate)
+        if blacks:
+            _LOGGER.info("FFmpeg %d: its first %s most likely black (frames at %s ms: the picture %d ms after, "
+                         "sooner than gfxcapture repeats a frame), as gfxcapture sends while Windows gives no "
+                         "picture yet: the TV began with a black keyframe", gen,
+                         "frame was" if blacks == 1 else f"{blacks} frames were",
+                         ", ".join(str(t) for t in times_ms[:blacks + 1]), times_ms[blacks] - times_ms[blacks - 1])
 
     async def _next_source(self) -> None:
         """FFmpeg ended before its first frame: the next way of capturing and encoding, on the
@@ -653,11 +836,18 @@ class MirrorSession:
         await asyncio.get_running_loop().run_in_executor(None, self._stop_ffmpeg, failed)
         backend, encoder, kind = self._using
         said = failed.errors(STDERR_LINES)
-        if kind == capture.GPU:
+        if kind in (capture.GPU, capture.GFX):
             ff, monitor, _region = self._capture
-            capture.mark_broken(ff, monitor)
-            _LOGGER.warning("%s with %s on the graphics card failed on %s, trying the processor's chain. FFmpeg "
-                            "said:\n%s", backend, encoder, capture.display_key(monitor), said)
+            lost = capture.capture_lost(said, kind=kind, returncode=failed.returncode)
+            if lost:  # Windows kept the screen from it (a UAC prompt, the lock screen): not the chain's fault
+                _LOGGER.warning("%s with %s on the graphics card could not capture %s (%s), trying the processor's "
+                                "chain. FFmpeg said:\n%s", capture.capture_name(backend, kind), encoder,
+                                capture.display_key(monitor), lost, said)
+            else:
+                capture.mark_broken(ff, monitor, kind)
+                _LOGGER.warning("%s with %s on the graphics card failed on %s (not tried there again until "
+                                "MirrorBridge quits), trying the processor's chain. FFmpeg said:\n%s",
+                                capture.capture_name(backend, kind), encoder, capture.display_key(monitor), said)
         else:
             _LOGGER.warning("%s with %s failed, trying the next option. FFmpeg said:\n%s", backend, encoder, said)
         self._frames.clear()
@@ -681,6 +871,7 @@ class MirrorSession:
             await loop.run_in_executor(None, self._kill_ffmpeg, old)
         if refresh:
             await self._refresh_capture()
+            await self._rechoose_chain()
         if self._stopping:
             return
         self._last_restart_ns = now_ns()
@@ -718,10 +909,38 @@ class MirrorSession:
                          f", the window at {window}" if window != region else "")
         self._capture = (ff, found, window)
 
+    async def _rechoose_chain(self) -> None:
+        """The graphics card chain at the display's own size (GPU) for a display that came back
+        at a size that has to be scaled now: the chain is chosen again as at the start
+        (capture.choose_chain: gfxcapture where Scaling and this FFmpeg let it, else the
+        processor's, never scale_d3d11 while it is off), the ways after it staying as they
+        were."""
+        backend, encoder, kind = self._using
+        ff, monitor, region = self._capture
+        canvas = self.report.canvas or FALLBACK_CANVAS
+        if kind != capture.GPU or not capture.needs_scaling(capture.capture_size(backend, monitor, region), canvas):
+            return
+        chosen, why = await asyncio.get_running_loop().run_in_executor(None, functools.partial(
+            capture.choose_chain, ff, encoder=encoder, backend=backend, monitor=monitor, region=region,
+            canvas=canvas, scaler=self.settings.mirror_scaler))
+        if chosen == kind:
+            return
+        _LOGGER.info("Capture chain from now on: %s (%s)", capture.KIND_WORDS[chosen], why)
+        self._using = (backend, encoder, chosen)
+        if self._sources and self._sources[0] == self._using:
+            self._sources.pop(0)  # the processor's chain is the way now, not the next one
+
     def _want_keyframe(self, why: str) -> None:
         """A keyframe is needed (`why`, for the log): FFmpeg is started again for one (_pump)."""
         if not self._keyframe_wanted and not self._stopping:
             self._keyframe_wanted = why
+
+    def _keyframe_due_in(self) -> Optional[float]:
+        """Seconds until FFmpeg may be started again for the keyframe asked for (0: now), at most
+        once every KEYFRAME_RESTART_SECONDS; None if none is asked for."""
+        if not self._keyframe_wanted or self._stopping:
+            return None
+        return max(0.0, KEYFRAME_RESTART_SECONDS - (now_ns() - self._last_restart_ns) / NS)
 
     async def _set_up(self) -> None:
         """Connect and pair-verify, GET /info, SETUP, the video connection, RECORD, /feedback."""
@@ -731,13 +950,15 @@ class MirrorSession:
         negotiator.on_reply = self._on_setup_reply
         negotiator.on_restart = self._close_events  # the event channel was the old session's
         channel = await negotiator.connect()
-        # The TV's timing requests and its (silent) audio control port, on ports a firewall rule names.
+        # The TV's timing requests and its audio control port (the sound's syncs, its resend
+        # requests), on ports a firewall rule names.
         transport, self._responder = await bind_udp(NtpResponder, channel.local_ip)
         self._transports.append(transport)
         negotiator.timing_port = self.report.timing_port = self._responder.port
-        transport, _ = await bind_udp(asyncio.DatagramProtocol, channel.local_ip, taken=(negotiator.timing_port,))
+        transport, self._audio_control = await bind_udp(AudioControl, channel.local_ip,
+                                                        taken=(negotiator.timing_port,))
         self._transports.append(transport)
-        negotiator.audio_port = transport.get_extra_info("sockname")[1]
+        negotiator.audio_port = self._audio_control.port
         _LOGGER.info("Timing (NTP) on UDP port %d, audio control on UDP port %d (allow inbound UDP %d-%d)",
                      negotiator.timing_port, negotiator.audio_port, TIMING_PORTS.start, TIMING_PORTS.stop - 1)
         info_answered = True
@@ -754,23 +975,33 @@ class MirrorSession:
             plan.lead_ms, self._lead_why = negotiation.lead_from_env(plan.lead_ms), "MIRRORBRIDGE_LEAD_MS"
         plan.audio = negotiation.audio_from_env(plan.audio)
         plan.timing = self.timing or negotiation.timing_from_env(plan.timing)
+        shown = "on arrival" if on_arrival(s) or ON_ARRIVAL else "at their time"
         _LOGGER.info("Mirroring with lead %d ms (%s), keyframes %s, frames shown %s", plan.lead_ms, self._lead_why,
-                     keyframes_text(self.report.encoder, s),
-                     "on arrival" if on_arrival(s) or ON_ARRIVAL else "at their time")
+                     keyframes_text(self.report.encoder, s), shown)
+        self._sound_on, self._sound_why = self._sound_wanted()
+        if not self._sound_on and self.source == DESKTOP and self._sound_wanted(output=False)[0]:
+            self._notice(Text("mirror_sound_no_output", "No sound: Windows has no sound output to record. Turn on "
+                              "speakers or headphones in Sound settings."))
+        negotiator.audio = self._audio_offer(plan, self._sound_on)
+        # The video's own rule (each frame at its time) is the sound's too: "on arrival" breaks it.
+        _LOGGER.info("Sound knobs: %s; frames shown %s", self._knobs.describe(), shown)
         _LOGGER.info("Experiment knobs: /feedback every %g s (MIRRORBRIDGE_FEEDBACK_S), time requests %s "
                      "(MIRRORBRIDGE_NTP_STOP_S), heartbeat %s (MIRRORBRIDGE_HEARTBEAT_IDLE_ONLY), audio stream %s "
-                     "(MIRRORBRIDGE_NO_AUDIO), %d fps asked, pattern noise %s (MIRRORBRIDGE_PATTERN_NOISE), sender %s "
-                     "with AirPlay %s (MIRRORBRIDGE_SENDER, MIRRORBRIDGE_SOURCE_VERSION), H.264 profile %s "
-                     "(MIRRORBRIDGE_H264_PROFILE), thread switch interval %g ms (MIRRORBRIDGE_SWITCH_INTERVAL_MS), "
-                     "%s timing (mirror --timing, MIRRORBRIDGE_TIMING)%s",
+                     "(MIRRORBRIDGE_NO_AUDIO), frame rate %s (mirror --fps, MIRRORBRIDGE_FPS), pattern noise %s "
+                     "(MIRRORBRIDGE_PATTERN_NOISE), sender %s with AirPlay %s (MIRRORBRIDGE_SENDER, "
+                     "MIRRORBRIDGE_SOURCE_VERSION), H.264 profile %s (MIRRORBRIDGE_H264_PROFILE), thread switch "
+                     "interval %g ms (MIRRORBRIDGE_SWITCH_INTERVAL_MS), "
+                     "%s timing (mirror --timing, MIRRORBRIDGE_TIMING)%s, sound %s (MIRRORBRIDGE_MIRROR_SOUND, mirror "
+                     "--sound)",
                      negotiation.FEEDBACK_INTERVAL,
                      f"answered for {_env_float('MIRRORBRIDGE_NTP_STOP_S', 0):g} s only"
                      if "MIRRORBRIDGE_NTP_STOP_S" in os.environ else "always answered",
                      "only when idle" if HEARTBEAT_IDLE_ONLY else "every second",
-                     "set up" if plan.audio else "left out", self.settings.framerate,
+                     "set up" if plan.audio else "left out",
+                     f"{self.fps_asked} asked" if self.fps_asked else "as Mirror screen settings say",
                      os.environ.get("MIRRORBRIDGE_PATTERN_NOISE") or "off", negotiation.SENDER_MODEL,
-                     negotiation.SOURCE_VERSION, ffmpeg.MIRROR_PROFILE, sys.getswitchinterval() * 1000, plan.timing.upper(),
-                     self._ptp_knobs(plan))
+                     negotiation.SOURCE_VERSION, ffmpeg.MIRROR_PROFILE, sys.getswitchinterval() * 1000,
+                     plan.timing.upper(), self._ptp_knobs(plan), "on" if self._sound_on else f"off: {self._sound_why}")
         if self.report.info is not None and "PTPInfo" in self.report.info.raw:
             _LOGGER.info("The TV's GET /info has PTPInfo: %r", self.report.info.raw["PTPInfo"])
         elif plan.timing == PTP:  # a TV without it may have no PTP clock at all
@@ -799,9 +1030,15 @@ class MirrorSession:
         limit = canvas_limit(s, self.max_canvas)
         self.report.canvas = choose_canvas(self.report.info, self.target, limit)
         backend, encoder, _kind = self._using
-        self.report.fps, fps_why = choose_mirror_fps(s.mirror_framerate, self.report.info, encoder=encoder,
-                                                     backend=backend)
-        self._auto_fps = s.mirror_framerate not in (SLOW_FPS, FAST_FPS)
+        if self.fps_asked:  # mirror --fps: in place of Mirror screen settings > Frame rate
+            self.report.fps = choose_fps(self.fps_asked, self.report.info)
+            fps_why = "mirror --fps or MIRRORBRIDGE_FPS" + (
+                f", the TV takes {self.report.fps} at most" if self.report.fps < self.fps_asked else "")
+            self._auto_fps = False
+        else:
+            self.report.fps, fps_why = choose_mirror_fps(s.mirror_framerate, self.report.info, encoder=encoder,
+                                                         backend=backend)
+            self._auto_fps = s.mirror_framerate not in (SLOW_FPS, FAST_FPS)
         _LOGGER.info("Mirroring into %dx%d at %d fps (%s)", *self.report.canvas, self.report.fps, fps_why)
 
         self._send_buffer = send_buffer(s.video_bitrate_kbps, self.report.fps)
@@ -817,8 +1054,15 @@ class MirrorSession:
         self._cipher = VideoCipher(video_key(channel.derive, est.video_id))
         await negotiator.record(est)
         self._record_ns = now_ns()
+        self.report.audio_latency = next((str(value) for key, value in est.record_headers.items()
+                                          if key.lower() == "audio-latency"), "")
         self._feedback = Feedback(channel)
         self._feedback.start()
+        if self._sound_on and est.audio is not None and self._knobs.volume_db is not None:
+            # After the first /feedback, and never waited for: a TV that does not answer it must
+            # not hold the picture. Its answer is logged; it is never fatal.
+            self._volume = asyncio.ensure_future(negotiator.set_volume(est, self._knobs.volume_db))
+        await self._start_sound(est, channel)
 
     @staticmethod
     def _ptp_knobs(plan: negotiation.Plan) -> str:
@@ -920,6 +1164,201 @@ class MirrorSession:
         if info.displays:
             self.report.info = info
 
+    # -- the sound ---------------------------------------------------------
+
+    def _sound_wanted(self, output: bool = True) -> tuple[bool, str]:
+        """Whether this session sends the PC's sound, and why not: for now only when asked for
+        (sound.SOUND_BY_DEFAULT), never for the probe, never with Include computer sound off,
+        not to an Apple TV (FairPlay's audio cipher), and not once the TV closed the session when it started (_retry_without_sound).
+        `output`: also that Windows has a sound output to record (_loopback, from _start)."""
+        knobs = self._knobs
+        if self.sound_asked is False:
+            return False, "off for this session"
+        if not self.settings.capture_audio:
+            return False, "Include computer sound is off"
+        if knobs.enable is False:
+            return False, f"{sound.ENV}=0"
+        if self.target.needs_fairplay:  # its audio wants FairPlay's AES-CBC, which is not written yet
+            return False, "an Apple TV's sound needs FairPlay's audio cipher, which MirrorBridge does not have yet"
+        forced = self.sound_asked is True  # mirror --sound, --beep, --sound-trial
+        if not (forced or knobs.enable or sound.SOUND_BY_DEFAULT):
+            return False, f"not turned on yet (mirror --sound, or {sound.ENV}=1)"
+        if not forced and self.profile.sound == profiles.SOUND_OFF:
+            return False, (f"this TV closed the session when the sound started "
+                           f"({self.profile.sound_note or 'as saved for it'})")
+        if self._sound_retried:  # and its type-96 stream as it always was
+            return False, "going on without sound: the TV closed the session when it started"
+        if output and self.source == DESKTOP and not knobs.tone and not self._loopback[0]:
+            return False, self._loopback[1]
+        return True, ""
+
+    def _audio_offer(self, plan: negotiation.Plan, wanted: bool) -> AudioOffer:
+        """What the type-96 stream asks for: as it always was when the sound is not wanted (every
+        knob left out); else the format the TV's screenStream calls for, and the gap of the lead
+        and the delay, with the knobs' latencies."""
+        if not wanted:
+            return AudioOffer()
+        knobs = self._knobs
+        info = self.report.info
+        fmt, why = choose_format(info.screen_formats if info is not None else None, knobs.codec)
+        _LOGGER.info("Sound format: %s", why)
+        self.report.steps["sound"] = why
+        gap_ms = knobs.gap_ms if knobs.gap_ms is not None else max(sound.MIN_GAP_MS, plan.lead_ms + knobs.delay_ms)
+        return AudioOffer(fmt, knobs.shape, ms_to_samples(gap_ms),
+                          None if knobs.lat_min_ms is None else ms_to_samples(knobs.lat_min_ms),
+                          None if knobs.lat_max_ms is None else ms_to_samples(knobs.lat_max_ms),
+                          knobs.is_media, knobs.redundant, knobs.ports)
+
+    async def _start_sound(self, est: Established, channel: ControlChannel) -> None:
+        """The PC's sound to the TV, if it is wanted and the TV took the type-96 stream with its
+        ports; otherwise why not, in the report. Never stops the session."""
+        off, refused = self._sound_why, False
+        if not off:
+            if est.audio is None:  # no type-96 stream, or the TV did not name its ports for it
+                off, refused = est.audio_note or "no audio stream in this TV's plan", est.plan.audio
+                if not est.plan.audio and not negotiation.audio_from_env(True):
+                    off += " (MIRRORBRIDGE_NO_AUDIO=1)"
+            elif est.plan.timing == PTP:
+                off = "no sound with PTP timing yet"
+        if off:
+            self.report.sound = self.report.steps["sound"] = f"off: {off}"
+            _LOGGER.info("Sound: %s", off)
+            if refused:
+                self._notice(Text("mirror_sound_not_taken", "This TV does not take the PC's sound with Mirror "
+                                  "screen; for a video with sound, use Play a video file."))
+            return
+        assert est.audio is not None and self._audio_control is not None
+        # Kept before anything is awaited: a stop meanwhile must find it to stop it. The test
+        # pattern has the test tone for its sound, as mirror --beep the screen.
+        self._sound = MirrorSound(est.audio, knobs=self._knobs, control=self._audio_control,
+                                  local_ip=channel.local_ip, tv_ip=channel.remote_ip,
+                                  tone=self._knobs.tone or self.source != DESKTOP,
+                                  on_first_packet=self._sound_started, on_failed=self._sound_failed,
+                                  on_device_changed=self._device_changed)
+        self.report.sound = f"on: {est.audio.format.name}"
+        try:
+            await self._sound.start()
+        except Exception as ex:  # pylint: disable=broad-except
+            _LOGGER.debug("The sound did not start", exc_info=True)
+            self._sound.fail(f"it did not start ({ex!r})")
+
+    def _sound_started(self) -> None:
+        """The first sound packet went: when (_sound_dropped), and the PC muted if the TV is known
+        to play the sound (or the knob says so), so that it does not echo."""
+        self._sound_first_ns = now_ns()
+        first = self._first_sent_ns
+        _LOGGER.info("Sound: first packet %s", f"{(self._sound_first_ns - first) / 1e6:.0f} ms after the first frame"
+                     if first is not None else "before the first frame")
+        if (self.source == DESKTOP and not self._knobs.tone and self.settings.mute_pc_audio
+                and (self.profile.sound == profiles.SOUND_HEARD or self._knobs.mute)):
+            self._mute()
+
+    def _mute(self) -> None:
+        if self._speakers.mute():
+            self._muted = True
+        elif getattr(self._speakers, "error", ""):  # not when they were muted already
+            self._notice(Text("mirror_sound_not_muted", "Could not mute this PC: turn its volume down to avoid an "
+                              "echo."))
+
+    def _device_changed(self) -> None:
+        """The sound comes from another output device now: that one is muted instead."""
+        if self._muted:
+            self._restore_speakers()
+            self._mute()
+
+    def _restore_speakers(self) -> None:
+        self._muted = False
+        try:
+            self._speakers.restore()
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.exception("Could not give the speakers back")
+
+    def _halt_sound(self) -> None:
+        """Stop the sound at once and give the speakers back (synchronous, and as often as asked):
+        before the session says it stopped, and when it is released."""
+        if self._sound is not None:
+            try:
+                self._sound.stop()
+            except Exception:  # pylint: disable=broad-except
+                _LOGGER.exception("Stopping the sound failed")
+        self._restore_speakers()
+
+    def _sound_failed(self, reason: str) -> None:
+        """The sound stopped for `reason` (MirrorSound.fail); the picture goes on. Said to the
+        person only while the session itself goes on: when the TV ends it, the sound's errors
+        are only its end."""
+        self._restore_speakers()
+        channel = self._negotiator.channel if self._negotiator is not None else None
+        ending = (self._stopping or self._feedback is None or self._feedback.lost.is_set()
+                  or (self._data is not None and self._data.closed.is_set()) or channel is None or channel.closed)
+        if ending:
+            self.report.sound = self.report.steps["sound"] = f"stopped: the session ended ({reason})"
+            _LOGGER.debug("The sound stopped as the session ended (%s)", reason)
+            return
+        _LOGGER.warning("The sound stopped (%s); the picture goes on", reason)
+        self.report.sound = self.report.steps["sound"] = f"stopped: {reason}"
+        self._notice(Text("mirror_sound_stopped", "The sound stopped; the picture goes on."))
+
+    def _check_sound(self, now: int, log: bool) -> None:
+        """The supervisor's look at the sound (and its log line every LOG_SECONDS): whatever it
+        finds stops the sound, not the session."""
+        if self._sound is None:
+            return
+        try:
+            self._sound.check(now)
+            if log:
+                self._sound.log_window(now)
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.exception("Checking the sound failed")
+
+    def _notice(self, text: Text) -> None:
+        """Tell the person (on_notice), once a session for each kind of notice."""
+        if text.key in self._noticed:
+            return
+        self._noticed.add(text.key)
+        _LOGGER.info("Notice: %s", text)
+        try:
+            self.on_notice(text)
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.exception("Notice callback failed")
+
+    def _sound_verdict(self) -> tuple[str, str]:
+        """What mirroring.json keeps of this TV and the sound (MirrorProfile.sound and its note):
+        "off" once it closed the session when the sound started, and kept it without (not when
+        it closed that one as soon: _attempts); nothing known again once a session asked for the
+        sound sent it for SOUND_OK_SECONDS without that; else as it was."""
+        if self._sound_retried and self._sound_blamed:
+            return profiles.SOUND_OFF, f"{time.strftime('%Y-%m-%d')}: closed the session when the sound started"
+        if (self.profile.sound == profiles.SOUND_OFF and self._sound_forced
+                and self.report.sound_stats.get("packets", 0) >= sound.SOUND_OK_SECONDS * (SR // SPF)):
+            _LOGGER.info("The TV took the sound for %d s: it is no longer left out", sound.SOUND_OK_SECONDS)
+            return profiles.SOUND_UNKNOWN, ""
+        return self.profile.sound, self.profile.sound_note
+
+    def _log_sound(self) -> None:
+        """The sound's line at the end, after the session's."""
+        report = self.report
+        stats = report.sound_stats
+        setup = report.established.audio if report.established is not None else None
+        if not stats or setup is None:
+            _LOGGER.info("Mirroring sound: %s", report.sound)
+            return
+
+        def ms(field: str) -> str:
+            return f"{stats[field] * 1000 / SR:.0f} ms"
+
+        headroom = stats["headroom_min_ms"]
+        _LOGGER.info("Mirroring sound: %s; %d packets (%.1f MB), %s, gap %d, latencies %d/%d; resent %d of %d "
+                     "asked (%d gone, %d over the limit); filled %s, kept %s, cut %s; corrections +%d/-%d; base steps "
+                     "%d; re-anchored %d; held %d blocks; overflows %d; headroom min %s ms; Audio-Latency %s; last "
+                     "/feedback %s", report.sound,
+                     stats["packets"], stats["bytes"] / 1e6, setup.format.name, setup.gap, setup.lat_min, setup.lat_max,
+                     stats["resent"], stats["asked"], stats["missed"], stats["limited"], ms("filled"), ms("kept"),
+                     ms("cut"),
+                     stats["inserted"], stats["deleted"], stats["steps"], stats["reanchors"], stats["held"],
+                     stats["overflow"], f"{headroom:.0f}" if headroom is not None else "-",
+                     report.audio_latency or "none", report.feedback_body or "none")
+
     async def _probe_loop_lag(self) -> None:
         """Experiment: how late a 10 ms sleep wakes on the session's loop, which also answers the
         TV's timing requests (so a late loop stamps them late)."""
@@ -953,11 +1392,14 @@ class MirrorSession:
                     try:
                         pump.result()  # raises what ended it
                     except _VideoClosed as ex:
+                        self._closed_ns = now
                         return await self._video_closed(str(ex))
                     return "Stopped"
                 if waits["closed"] in done:
+                    self._closed_ns = now
                     return await self._video_closed(self._data.close_reason)
                 if waits["lost"] in done:
+                    self._closed_ns = now
                     return Text("mirror_tv_ended", "The TV ended screen mirroring")
                 if self.seconds is not None and now - started >= self.seconds * NS:
                     self._stopping = True
@@ -965,9 +1407,12 @@ class MirrorSession:
                 if est.plan.timing == NTP:
                     self._check_timing(now)
                 self._check_frames(now)
-                if self._stats.due(now):
+                due = self._stats.due(now)
+                if due:
                     self._stats.log_window(now, self._responder.requests, self._ptp.summary() if self._ptp else "")
+                self._check_sound(now, due)
         finally:
+            self._halt_sound()  # before run() says the session stopped
             pump.cancel()
             lag_probe.cancel()
             for wait in waits.values():
@@ -995,8 +1440,10 @@ class MirrorSession:
         self._timing_quiet = quiet
 
     def _check_frames(self, now: int) -> None:
-        """FFmpeg must give a first frame, and then keep giving them; a screen capture that was
-        lost must come back within CAPTURE_LOST_SECONDS (the FFmpegs started meanwhile give none)."""
+        """FFmpeg must give a first frame, and then keep giving them; gfxcapture's without repeats
+        gives them only as the screen changes, so once it gave one, a gap is no fault (its end is
+        _ended's). A screen capture that was lost must come back within CAPTURE_LOST_SECONDS (the
+        FFmpegs started meanwhile give none)."""
         assert self._frames is not None and self._ffmpeg is not None
         if self._recovering_since:
             if now - self._recovering_since > CAPTURE_LOST_SECONDS * NS:
@@ -1007,6 +1454,10 @@ class MirrorSession:
         if last is None and now - self._ffmpeg.started_ns > FIRST_FRAME_SECONDS * NS:
             raise self._no_picture(FIRST_FRAME_SECONDS)
         if last is not None and now - last > FRAME_GAP_SECONDS * NS:
+            # A screen that stays as it is; if FFmpeg ended meanwhile, its end goes to _ended,
+            # which says why (a lost capture, the virtual screen gone), not this.
+            if self._stats.variable_rate and self._gen_frames:
+                return
             raise self._no_picture(FRAME_GAP_SECONDS)
 
     def _no_picture(self, seconds: int) -> MirrorError:
@@ -1025,8 +1476,8 @@ class MirrorSession:
         reason = self._lost or "no picture"
         self.report.steps["picture"] = f"capture lost ({reason})"
         return MirrorError(Text(
-            "mirror_capture_lost", "Windows stopped the screen capture and it did not come back ({reason}). Try "
-            "Mirror screen again.", reason=reason,
+            "mirror_capture_lost", "Windows stopped the screen capture and it did not come back ({reason}). Choose "
+            "Show my screen again.", reason=reason,
         ), step="capture", steps=self.report.steps)
 
     async def _video_closed(self, reason: str) -> str:
@@ -1151,24 +1602,36 @@ class MirrorSession:
         dropped_at = 0  # when frames were last dropped: what FFmpeg gives after that is fresh
 
         def restarted() -> None:
-            """Another FFmpeg: its pts start from 0 again, and it starts with a keyframe."""
-            nonlocal wait_for_idr, behind_since, late_frames, held_ns, dropped_at
+            """Another FFmpeg: its pts start from 0 again (its offset is no step of the
+            capture's), and it starts with a keyframe."""
+            nonlocal wait_for_idr, behind_since, late_frames, held_ns, dropped_at, last_offset
             mapper.restart()
+            last_offset = None
             wait_for_idr = True
             behind_since = late_frames = held_ns = 0
             dropped_at = now_ns()
 
         while True:
-            unit = await frames.get()
+            # A keyframe asked for is not left waiting for a frame: gfxcapture without repeats
+            # gives none while the screen stays as it is. Nor is it got for an FFmpeg that has
+            # ended: that end goes to _ended first (a lost capture, the next way), with the frames
+            # before it.
+            due_in = self._keyframe_due_in()
+            if due_in == 0 and not frames.ended() and self._ffmpeg.running():
+                _LOGGER.info("Starting FFmpeg again for a keyframe: %s", self._keyframe_wanted)
+                await self._restart(f"a keyframe: {self._keyframe_wanted}")
+                restarted()
+                continue
+            if not due_in:
+                unit = await frames.get()
+            else:
+                try:
+                    unit = await asyncio.wait_for(frames.get(), due_in)  # FrameQueue.get takes nothing if cancelled
+                except asyncio.TimeoutError:
+                    continue  # no frame came meanwhile: the keyframe is due now
             if unit is None:
                 if self._stopping or not await self._ended():
                     return
-                restarted()
-                continue
-            if (self._keyframe_wanted and not self._stopping
-                    and now_ns() - self._last_restart_ns >= KEYFRAME_RESTART_SECONDS * NS):
-                _LOGGER.info("Starting FFmpeg again for a keyframe: %s", self._keyframe_wanted)
-                await self._restart(f"a keyframe: {self._keyframe_wanted}")
                 restarted()
                 continue
             taken = now_ns()
@@ -1222,8 +1685,10 @@ class MirrorSession:
                 if not wait_for_idr:
                     _LOGGER.info("Dropping frames up to the next keyframe: %s", why)
                     dropped_at = taken
-                    if on_demand and not frames.keyframe_waiting():
-                        self._want_keyframe(why)
+                # A drop that begins asks for a keyframe, unless one is waiting; so does a keyframe
+                # dropped, one that waited too long (with a keyframe every 10 s, the next is far off).
+                if on_demand and (idr or not wait_for_idr) and not frames.keyframe_waiting():
+                    self._want_keyframe(why)
                 wait_for_idr = True
                 behind_since = late_frames = held_ns = 0
                 self._stats.drop()
@@ -1277,6 +1742,8 @@ class MirrorSession:
             self.report.frames_sent = self._stats.frames
             if self._stats.frames == 1:
                 self._first_sent_ns = sent
+                if self._sound is not None:
+                    self._sound.go()  # the sound starts with the picture: the next block anchors its line
                 self.report.first_frame_ms = (sent - self._ffmpeg.started_ns) / 1e6
                 if self.source == TEST_PATTERN:
                     what = Text("mirror_what_test", "the test pattern")
@@ -1305,7 +1772,7 @@ class MirrorSession:
         encoder was not asked for, or one bigger than the TV's screen, as from a rotated display.
         That chain is not used on the display again in this run."""
         chain = self._chain
-        if chain is None or chain.kind != capture.GPU or self._size_checked == self._accepting:
+        if chain is None or chain.kind not in (capture.GPU, capture.GFX) or self._size_checked == self._accepting:
             return ""
         self._size_checked = self._accepting
         made = capture.sps_size(sps)
@@ -1317,7 +1784,7 @@ class MirrorSession:
             return ""
         if problem:
             ff, monitor, _region = self._capture
-            capture.mark_broken(ff, monitor)
+            capture.mark_broken(ff, monitor, chain.kind)
             _LOGGER.warning("The graphics card chain on %s: %s. The processor's chain takes over, and is used for "
                             "that display from now on", capture.display_key(monitor), problem)
         return problem
@@ -1339,10 +1806,10 @@ class MirrorSession:
         if self._stopping:
             return False
         said = failed.errors(STDERR_LINES)
-        backend, _encoder, _kind = self._using
+        backend, _encoder, kind = self._using
         count, now = self._gen_frames, now_ns()
         ran = (now - failed.started_ns) / NS
-        lost = capture.capture_lost(said)
+        lost = capture.capture_lost(said, kind=kind, returncode=failed.returncode)
         recovering = bool(self._recovering_since)
         if (lost and (count or recovering or self._using == self._worked)) or (
                 recovering and not count and backend == "ddagrab"):
@@ -1388,10 +1855,20 @@ class MirrorSession:
     async def _release_session(self) -> None:
         loop = asyncio.get_running_loop()
         self._stopping = True
+        self._halt_sound()  # again, for a session that failed while it was set up
+        sound_, self._sound = self._sound, None
+        volume, self._volume = self._volume, None
+        if volume is not None:
+            volume.cancel()  # if still unanswered: TEARDOWN is not to wait behind it
+            try:
+                await volume
+            except (asyncio.CancelledError, Exception):  # pylint: disable=broad-except
+                pass
         feedback, self._feedback = self._feedback, None
         if feedback is not None:
             await feedback.stop()
             self.report.feedback = dict(feedback.answers)
+            self.report.feedback_body = feedback.last_body
         negotiator, self._negotiator = self._negotiator, None
         est = self.report.established
         # TEARDOWN while FFmpeg stops, so that the TV leaves mirroring at once.
@@ -1400,8 +1877,15 @@ class MirrorSession:
             jobs.append(loop.run_in_executor(None, self._stop_ffmpeg, self._ffmpeg))
         if negotiator is not None and est is not None:
             jobs.append(negotiator.teardown(est.uri))
+        if sound_ is not None and sound_.feeder is not None and sound_.feeder.is_alive():
+            jobs.append(loop.run_in_executor(None, sound_.feeder.join, 1.0))  # told to end by _halt_sound
         if jobs:
             await asyncio.gather(*jobs, return_exceptions=True)
+        if sound_ is not None:
+            self.report.sound_stats = sound_.stats.as_dict()
+            if sound_.state != FAILED:  # a failure is as _sound_failed said it
+                self.report.sound = sound_.final_text()
+            self.report.steps["sound"] = self.report.sound
         data, self._data = self._data, None
         if data is not None:
             await data.close()
@@ -1415,6 +1899,7 @@ class MirrorSession:
         for transport in self._transports:
             transport.close()
         self._transports.clear()
+        self._audio_control = None
         self.report.latency = self._stats.summary()
         self.report.frames_sent = self._stats.frames
 
@@ -1450,6 +1935,7 @@ class MirrorSession:
                      f" ({'; '.join(restarts[:10])}{'...' if len(restarts) > 10 else ''})" if restarts else "",
                      self.report.ntp_requests, self.report.feedback or "none", self.report.steps,
                      f"; PTP: {self.report.ptp}" if self.report.ptp else "")
+        self._log_sound()
         est = self.report.established
         # Remembered only once the TV has taken frames and the time: what was asked for works.
         # Not a PTP session (an experiment), nor a profile with PTP in it.
@@ -1460,6 +1946,7 @@ class MirrorSession:
             profile = profiles.MirrorProfile.of(plan, self.profile.trailer)
             if negotiation.audio_from_env(True) is False:  # nor a plan without audio (MIRRORBRIDGE_NO_AUDIO)
                 profile.audio = self.profile.audio
+            profile.sound, profile.sound_note = self._sound_verdict()
             info = self.report.info.summary() if self.report.info else ""
             try:
                 await loop.run_in_executor(None, lambda: profiles.save(

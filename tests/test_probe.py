@@ -30,7 +30,7 @@ from mirrorbridge.mirror import ProbeResult, profiles
 from mirrorbridge.mirror.h264 import TRAILER_FIXED
 from mirrorbridge.mirror.negotiation import MEDIA_FIRST, Plan
 from mirrorbridge.mirror.probe import SetupAttempt, StreamCheck
-from mirrorbridge.mirror.session import SessionReport
+from mirrorbridge.mirror.session import MirrorSession, SessionReport
 from mirrorbridge.session import CastSession
 from mirrorbridge.text import Text
 
@@ -212,7 +212,7 @@ async def test_the_probe_tries_each_way_and_says_what_the_tv_did(monkeypatch, tm
     saved = profiles.load("TCL")  # for Mirror screen, under the device's identifier
     assert saved is not None and (saved.ordering, saved.trailer) == (MEDIA_FIRST, TRAILER_FIXED)
     assert report.worked
-    assert report.conclusion() == ("Sala familiar should play your casts: it fetched MirrorBridge's video. Mirror "
+    assert report.conclusion() == ("Sala familiar should play your casts: it fetched MirrorBridge's video. Show my "
                                    "screen should work on this TV: it accepted screen mirroring and kept the video "
                                    "open.")
     assert [line.split(":")[0] for line in report.lines()] == [
@@ -348,26 +348,26 @@ def test_a_video_the_tv_ended_early_says_so():
 # -- the fourth test: screen mirroring ---------------------------------------------------------------
 
 
-async def test_an_unpaired_apple_tv_skips_the_mirroring_test(mirror_tv):
+async def test_a_tv_that_needs_fairplay_skips_the_mirroring_test(mirror_tv):
     watched = []
-    device = _device(mirror_tv, features=APPLE_TV_FEATURES, is_apple=True)
-    device.airplay.credentials = None
-    result = await probe._mirroring(device, Settings(), 2, watched.append)
-    assert result.verdict() == ("skipped: MirrorBridge is not paired with this TV, and screen mirroring needs it: use "
-                                "Device > Pair with PIN first")
+    result = await probe._mirroring(_device(mirror_tv, features=APPLE_TV_FEATURES, is_apple=True), Settings(), 2,
+                                    watched.append)
+    assert result.verdict() == ("skipped: the TV needs FairPlay for screen mirroring, as Apple TVs and Macs do, which "
+                                "is experimental and off: turn it on with More options > Debug > Mirror to Apple TVs")
     assert not result.worked and result.mirror is None and mirror_tv.connections == []  # nothing was sent
     assert watched == []  # nothing to look for on the TV
     report = _report(REFUSED, PLAYED, FETCHED, result)
-    assert report.lines()[3].startswith("4. Screen mirroring with a moving test pattern, from this PC: skipped: "
-                                        "MirrorBridge is not paired")
+    assert report.lines()[3].startswith("4. Screen mirroring with a moving test pattern, from this PC: skipped: the TV "
+                                        "needs FairPlay")
     assert report.conclusion() == "Sala familiar should play your casts: it fetched MirrorBridge's video."
     i18n.set_language("es")
-    assert i18n.say(report.lines()[3]).startswith(
-        "4. La duplicación de pantalla con una imagen de prueba en movimiento, desde este equipo: omitida: "
-        "MirrorBridge no está emparejado con esta TV")
+    assert i18n.say(report.lines()[3]) == (
+        "4. La duplicación de pantalla con una imagen de prueba en movimiento, desde este equipo: omitida: la TV "
+        "necesita FairPlay para duplicar la pantalla, como los Apple TV y los Mac, que es experimental y está apagado: "
+        "actívalo con Más opciones > Depuración > Duplicar en Apple TV")
 
 
-def test_an_apple_tv_is_given_the_mirroring_test():
+def test_an_apple_tv_is_given_the_mirroring_test_once_turned_on(apple_tv_on):  # pylint: disable=unused-argument
     assert probe.mirroring_skipped(_device(features=APPLE_TV_FEATURES, is_apple=True, airplay=PAIRED)) is None
 
 
@@ -403,8 +403,8 @@ async def test_a_tv_that_drops_the_mirrored_video_is_said_so(mirror_tv):
     assert mirror_tv.teardowns == len(mirror_tv.orderings)
     report = _report(REFUSED, PLAYED, FETCHED, result)
     assert report.conclusion() == (
-        "Sala familiar should play your casts: it fetched MirrorBridge's video. Mirror screen did not work on this TV "
-        "in the test: please send the report, and say whether the moving test pattern appeared on the TV.")
+        "Sala familiar should play your casts: it fetched MirrorBridge's video. Show my screen did not work on this "
+        "TV in the test: please send the report, and say whether the moving test pattern appeared on the TV.")
 
 
 async def test_a_tv_that_refuses_mirroring_is_said_so(mirror_tv):
@@ -508,20 +508,20 @@ def test_the_conclusion_says_when_mirror_screen_did_not_work():
         "but did not keep the video open: The TV closed the video connection after 5 frames. It may not take this "
         "video: please report this TV, with mirrorbridge.log.")
     assert report.conclusion() == (
-        "Sala familiar should play your casts: it fetched MirrorBridge's video. Mirror screen did not work on this TV "
-        "in the test: please send the report, and say whether the moving test pattern appeared on the TV.")
+        "Sala familiar should play your casts: it fetched MirrorBridge's video. Show my screen did not work on this "
+        "TV in the test: please send the report, and say whether the moving test pattern appeared on the TV.")
     nothing = _report(REFUSED, probe.TestResult(airplay_patch.QUEUE, steps={"setup130": 501}), LIVE_REFUSED, DROPPED)
     assert not nothing.worked and nothing.conclusion() == (
-        "None of the tests got Sala familiar to take the video. Mirror screen did not work on this TV in the test: "
+        "None of the tests got Sala familiar to take the video. Show my screen did not work on this TV in the test: "
         "please send the report, and say whether the moving test pattern appeared on the TV.")
     skipped = probe.TestResult(probe.MIRROR, skipped=probe.mirroring_skipped(_device(features=APPLE_TV_FEATURES)))
     assert _report(REFUSED, PLAYED, FETCHED, skipped).conclusion() == (
         "Sala familiar should play your casts: it fetched MirrorBridge's video.")  # nothing to say about mirroring
     i18n.set_language("es")
     assert i18n.say(report.conclusion()) == (
-        "Sala familiar debería reproducir tus transmisiones: descargó el video de MirrorBridge. Duplicar pantalla no "
-        "funcionó en esta TV durante la prueba: manda el informe y di si apareció la imagen de prueba en movimiento "
-        "en la TV.")
+        "Sala familiar debería reproducir tus transmisiones: descargó el video de MirrorBridge. Mostrar mi "
+        "pantalla no funcionó en esta TV durante la prueba: manda el informe y di si apareció la imagen de prueba "
+        "en movimiento en la TV.")
 
 
 def test_the_conclusion_says_mirror_screen_should_work():
@@ -530,17 +530,17 @@ def test_the_conclusion_says_mirror_screen_should_work():
         "4. Screen mirroring with a moving test pattern, from this PC: the TV accepted the screen mirroring session "
         "and kept the video open: 300 frames of the test pattern went to it, and it asked for the time 48 times. What "
         "worked: media-first, with the audio stream, NTP timing, avcC ending 02000000, lead 100 ms")
-    assert report.conclusion().endswith("Mirror screen should work on this TV: it accepted screen mirroring and kept "
-                                        "the video open.")
+    assert report.conclusion().endswith("Show my screen should work on this TV: it accepted screen mirroring and "
+                                        "kept the video open.")
     nothing_cast = _report(REFUSED, probe.TestResult(airplay_patch.QUEUE, steps={"setup130": 501}), LIVE_REFUSED,
                            MIRRORED)
     assert nothing_cast.worked and nothing_cast.conclusion() == (
-        "Sala familiar did not take the video it was sent to cast, but Mirror screen should work on this TV: it "
+        "Sala familiar did not take the video it was sent to cast, but Show my screen should work on this TV: it "
         "accepted screen mirroring and kept the video open.")
     i18n.set_language("es")
     assert i18n.say(report.conclusion()) == (
-        "Sala familiar debería reproducir tus transmisiones: descargó el video de MirrorBridge. Duplicar pantalla "
-        "debería funcionar en esta TV: aceptó la duplicación de pantalla y mantuvo abierto el video.")
+        "Sala familiar debería reproducir tus transmisiones: descargó el video de MirrorBridge. Mostrar mi "
+        "pantalla debería funcionar en esta TV: aceptó la duplicación de pantalla y mantuvo abierto el video.")
     assert i18n.say(report.lines()[3]) == (
         "4. La duplicación de pantalla con una imagen de prueba en movimiento, desde este equipo: la TV aceptó la "
         "sesión de duplicación de pantalla y mantuvo abierto el video: recibió 300 fotogramas de la imagen de prueba y "
@@ -618,10 +618,10 @@ async def test_the_command_line_runs_the_mirroring_test_too(monkeypatch, capsys,
     assert ("4. Screen mirroring with a moving test pattern, from this PC: the TV accepted the screen mirroring "
             "session and kept the video open: ") in out
     assert "What worked: media-first, with the audio stream, NTP timing, avcC ending 02000000, lead 100 ms" in out
-    # Mirror screen is the tray's; here it is the mirror command
+    # Show my screen is the tray's; here it is the mirror command
     assert ("Sala familiar should play your casts: it fetched MirrorBridge's video. mirror -d \"Sala familiar\" should "
             "work on this TV: it accepted screen mirroring and kept the video open.") in out
-    assert "Mirror screen" not in out
+    assert "Show my screen" not in out
     assert code == 0 and mirror_tv.records == 1 and mirror_tv.teardowns == len(mirror_tv.orderings)
     reports = list((tmp_path / "MirrorBridge").glob("probe-*.log"))
     assert len(reports) == 1 and "Test 4 of 4: the TV accepted the screen mirroring session" in reports[0].read_text(
@@ -634,8 +634,8 @@ def test_the_command_line_says_when_the_mirroring_test_is_skipped(monkeypatch, c
         skipped = probe.TestResult(probe.MIRROR, skipped=probe.mirroring_skipped(device))
         return _report(REFUSED, PLAYED, FETCHED, skipped)
 
-    unpaired = _device(airplay=SimpleNamespace(port=7000, credentials=None, properties={}))
-    monkeypatch.setattr(cli, "DeviceManager", lambda _loop: FakeManager(devices=[unpaired]))
+    apple_tv = _device(features=APPLE_TV_FEATURES, is_apple=True, airplay=PAIRED)
+    monkeypatch.setattr(cli, "DeviceManager", lambda _loop: FakeManager(devices=[apple_tv]))
     monkeypatch.setattr(probe, "run", run)
     monkeypatch.setattr(Settings, "load", classmethod(lambda cls: Settings()))
     pyatv_level = logging.getLogger("pyatv").level
@@ -645,8 +645,9 @@ def test_the_command_line_says_when_the_mirroring_test_is_skipped(monkeypatch, c
         logging.getLogger("pyatv").setLevel(pyatv_level)
     out = capsys.readouterr().out
     intro = next(line for line in out.splitlines() if line.startswith("Testing Sala familiar."))
-    assert intro.endswith("This takes about two minutes. The fourth test, screen mirroring, is skipped: MirrorBridge "
-                          "is not paired with this TV, and screen mirroring needs it: use pair -d \"Sala familiar\" first.")
+    assert intro.endswith("This takes about two minutes. The fourth test, screen mirroring, is skipped: the TV needs "
+                          "FairPlay for screen mirroring, as Apple TVs and Macs do, which is experimental and off: turn "
+                          "it on with --apple-tv.")
     assert "moving test pattern" not in intro and "Watch the TV now" not in out
 
 
@@ -655,6 +656,11 @@ def test_errors_name_the_test_as_the_command_line_runs_it():
     assert cli._cli_words(str(error), _device()).endswith(
         'Use probe -d "Sala familiar" to see which way of sending video it takes, and send the test\'s report with '
         'your bug report.')
+    stopped = SimpleNamespace(_lost="AcquireNextFrame failed: 887a0026", report=SessionReport())
+    lost = MirrorSession._capture_lost(stopped)  # pylint: disable=protected-access
+    assert cli._cli_words(str(lost), _device()) == (
+        'Windows stopped the screen capture and it did not come back (AcquireNextFrame failed: 887a0026). Run mirror '
+        '-d "Sala familiar" again.')
 
 
 def test_the_exe_opens_a_console_for_every_command():
@@ -777,7 +783,7 @@ def test_test_this_tv_does_not_promise_a_moving_pattern_it_will_not_send(control
     from PySide6.QtWidgets import QApplication, QMessageBox
 
     controller.set_language("es")
-    device = _device(features=TCL_FEATURES & ~(1 << 7), airplay=PAIRED)  # no bit 7: no screen mirroring
+    device = _device(features=APPLE_TV_FEATURES, is_apple=True, airplay=PAIRED)
     controller.devices = [device]
     controller.settings.last_device_id = device.identifier
     intro = []
@@ -791,8 +797,9 @@ def test_test_this_tv_does_not_promise_a_moving_pattern_it_will_not_send(control
     controller.test_tv()
     assert intro and intro[0].startswith("MirrorBridge probará tres formas de enviar un video a Sala familiar, una "
                                          "tras otra, durante unos dos minutos en total.")
-    assert ("La cuarta prueba, la duplicación de pantalla, se omite: la TV no indica que admita la duplicación de "
-            "pantalla.") in intro[0]
+    assert ("La cuarta prueba, la duplicación de pantalla, se omite: la TV necesita FairPlay para duplicar la "
+            "pantalla, como los Apple TV y los Mac, que es experimental y está apagado: actívalo con Más opciones > "
+            "Depuración > Duplicar en Apple TV.") in intro[0]
     assert "en movimiento" not in intro[0] and controller.probe_future is None
 
 
@@ -872,7 +879,7 @@ def test_the_report_dialog_speaks_the_users_language(controller):
     box = controller.probe_report_box(_report(REFUSED, PLAYED, FETCHED, MIRRORED))
     assert box.windowTitle() == "Terminó la prueba de Sala familiar"
     assert box.text() == ("Sala familiar debería reproducir tus transmisiones: descargó el video de MirrorBridge. "
-                          "Duplicar pantalla debería funcionar en esta TV: aceptó la duplicación de pantalla y "
+                          "Mostrar mi pantalla debería funcionar en esta TV: aceptó la duplicación de pantalla y "
                           "mantuvo abierto el video.")
     assert box.informativeText().splitlines() == [
         "1. POST /play (video AirPlay v1) con el video de prueba de Apple: rechazado (play=404)",

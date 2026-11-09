@@ -301,3 +301,11 @@ async def test_other_tvs_get_the_playlist_once_it_holds_12_seconds(monkeypatch, 
     session.backend, session.encoder = "test", "libx264"
     await session._launch_encoder("ffmpeg", None)
     assert waits == [("stream.m3u8", count, timeout, tmp_path / "master.m3u8" if master else None)]
+
+
+def test_a_cast_keeps_the_screen_on_unless_it_is_the_test_pattern():
+    device = SimpleNamespace(name="Sala familiar", address=TV, is_apple=None)
+    screen = CastSession(None, device, Settings(capture_backend="auto"))._awake  # pylint: disable=protected-access
+    pattern = CastSession(None, device, Settings(capture_backend="test"))._awake  # pylint: disable=protected-access
+    assert screen.display and not pattern.display
+    assert screen.reason == "MirrorBridge is casting this screen to Sala familiar"
