@@ -125,6 +125,8 @@ def test_the_cpu_chain_writes_and_tags_bt709_limited_range():
     x264 = capture.cpu_filters([], 640, 360, "libx264")
     assert x264[0].startswith("scale=w='min(640,iw)':h='min(360,ih)'") and x264[1:] == [
         "format=yuv420p", "setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709"]
+    sharp = capture.cpu_filters([], 1920, 1080, "h264_nvenc", sharp=True)
+    assert f":flags={capture.SHARP_SCALE_FLAGS}:" in sharp[0] and "bilinear" not in sharp[0]
 
 
 @pytest.fixture()

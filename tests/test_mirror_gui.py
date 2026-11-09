@@ -374,7 +374,8 @@ def test_mirror_screen_settings_are_for_the_next_session(controller):
     texts = _texts(tray)
     assert texts.index("Mirror screen settings") == texts.index("What to cast") + 1
     mirror_settings = _submenu(tray.menu, "Mirror screen settings")
-    assert [action.text() for action in mirror_settings.actions()] == ["Latency", "Frame rate"]
+    assert [action.text() for action in mirror_settings.actions()] == [
+        "Latency", "Frame rate", "", "Sharp slides (experimental)"]
     latency, fps = _submenu(mirror_settings, "Latency"), _submenu(mirror_settings, "Frame rate")
     assert list(_choices(latency)) == ["Low", "Normal", "Smooth"] and _checked(latency) == ["Normal"]
     assert latency.toolTipsVisible() and [action.toolTip() for action in latency.actions()] == [
@@ -414,6 +415,24 @@ def test_mirror_screen_settings_are_for_the_next_session(controller):
     assert _checked(_submenu(mirror_settings, "Frame rate")) == ["Automatic"]
 
 
+def test_sharp_slides_is_an_experimental_switch_in_mirror_screen_settings(controller):
+    """Sharp slides (experimental): off at first, saved at once, shown as saved; a hand-edited
+    settings.json value that is not true or false is off."""
+    tray = _tray(controller)
+    mirror_settings = _submenu(tray.menu, "Mirror screen settings")
+    sharp = next(a for a in mirror_settings.actions() if a.text() == "Sharp slides (experimental)")
+    assert sharp.isCheckable() and not sharp.isChecked() and "1440p" in sharp.toolTip()
+    sharp.trigger()
+    assert controller.settings.mirror_sharp is True and Settings.load().mirror_sharp is True
+    tray._rebuild()  # pylint: disable=protected-access
+    mirror_settings = _submenu(tray.menu, "Mirror screen settings")
+    assert next(a for a in mirror_settings.actions() if a.text() == "Sharp slides (experimental)").isChecked()
+    from mirrorbridge.gui.window import MainWindow
+    window = MainWindow(controller)
+    assert window.mirror_sharp_cb.isChecked() and window.mirror_sharp_cb.text() == "Sharp slides (experimental)"
+    window.mirror_sharp_cb.setChecked(False)
+    assert controller.settings.mirror_sharp is False and Settings.load().mirror_sharp is False
+
 
 def test_the_window_has_the_mirror_screen_settings_too(controller):
     """Advanced settings: Delay when mirroring, with what it means under it, and Frame rate when
@@ -448,6 +467,7 @@ def test_the_window_has_the_mirror_screen_settings_too(controller):
     assert (combo.currentText(), fps.currentText()) == ("Suave", "30 fps")
     assert window._row_labels["ui_mirror_latency"].text() == "Retraso al duplicar"  # pylint: disable=protected-access
     assert window.mirror_latency_hint.text().startswith("La TV muestra cada cuadro 200 ms")
+    assert window.mirror_sharp_cb.text() == "Diapositivas nítidas (experimental)"
 
 
 # -- a session, from the tray menu ---------------------------------------------------------------------
