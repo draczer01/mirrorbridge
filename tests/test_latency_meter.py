@@ -187,7 +187,7 @@ def test_the_menu_is_in_spanish_too(controller):
     assert "Depuración (para pruebas)" in [a.text() for a in more.actions()]
     items = _debug(tray)
     assert list(items) == ["Medidor de latencia", "Espera de la TV (prueba)", "Cuadros clave", "Escalado",
-                           "Mostrar cuadros al llegar (prueba)"]
+                           "Mostrar cuadros al llegar (prueba)", "Google Cast: video H.264 (experimental)"]
     assert list(_choices(items["Espera de la TV (prueba)"])) == [
         "Automática (según la Latencia)", "60 ms", "100 ms", "150 ms", "200 ms", "300 ms"]
     assert list(_choices(items["Cuadros clave"])) == ["Solo cuando hace falta", "Cada 10 s", "Cada 2 s"]
@@ -206,7 +206,8 @@ def test_mirror_screens_test_switches_are_next_to_the_latency_meter(controller):
     more = next(a.menu() for a in tray.menu.actions() if a.text() == "More options")
     assert "Debug (for testing)" in [a.text() for a in more.actions()]
     items = _debug(tray)
-    assert list(items) == ["Latency meter", "TV wait (test)", "Keyframes", "Scaling", "Show frames on arrival (test)"]
+    assert list(items) == ["Latency meter", "TV wait (test)", "Keyframes", "Scaling", "Show frames on arrival (test)",
+                           "Google Cast: H.264 video (experimental)"]
     waits, keyframes, arrival = items["TV wait (test)"], items["Keyframes"], items["Show frames on arrival (test)"]
     scaling = items["Scaling"]
     assert list(_choices(waits)) == ["Automatic (from Latency)", "60 ms", "100 ms", "150 ms", "200 ms", "300 ms"]
@@ -238,6 +239,17 @@ def test_mirror_screens_test_switches_are_next_to_the_latency_meter(controller):
     tray._rebuild()  # pylint: disable=protected-access
     items = _debug(tray)
     assert _checked(items["Scaling"]) == ["Windows capture on the graphics card (test)"]
+
+    # Google Cast mirroring in H.264 instead of VP8: experimental, off unless chosen
+    h264 = items["Google Cast: H.264 video (experimental)"]
+    assert h264.isCheckable() and not h264.isChecked() and s.cast_codec == "vp8"
+    h264.trigger()
+    assert s.cast_codec == "h264" and Settings.load().cast_codec == "h264"
+    tray._rebuild()  # pylint: disable=protected-access
+    h264 = _debug(tray)["Google Cast: H.264 video (experimental)"]
+    assert h264.isChecked()
+    h264.trigger()
+    assert s.cast_codec == "vp8"
     _choices(items["Scaling"])["Automatic"].trigger()
     assert s.mirror_scaler == "auto"
     assert items["Show frames on arrival (test)"].isChecked()
