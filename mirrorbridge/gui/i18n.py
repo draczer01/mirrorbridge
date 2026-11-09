@@ -145,6 +145,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "es": "60 fps cuando la tarjeta de video codifica el video, 30 cuando lo hace el procesador o la captura es "
               "lenta; nunca más de lo que acepta la TV.",
     },
+    # Settings.mirror_sharp
+    "mirror_sharp": {"en": "Sharp slides (experimental)", "es": "Diapositivas nítidas (experimental)"},
+    "mirror_sharp_hint": {
+        "en": "For text and slides: up to 1440p when the TV's screen is bigger than 1080p, with more bitrate to "
+              "match, and sharper scaling. Uses more Wi-Fi and a little more processor.",
+        "es": "Para texto y diapositivas: hasta 1440p cuando la pantalla de la TV es mayor que 1080p, con más "
+              "tasa de bits, y un escalado más nítido. Usa más Wi-Fi y un poco más de procesador.",
+    },
     "play_file": {"en": "Play a video file…", "es": "Reproducir un archivo de video…"},
     "autostart": {"en": "Start with Windows", "es": "Iniciar con Windows"},
     "desktop_shortcut": {"en": "Create desktop shortcut", "es": "Crear acceso directo en el escritorio"},

@@ -28,6 +28,7 @@ from mirrorbridge.mirror.errors import MirrorError, no_timing, refused
 from mirrorbridge.mirror.negotiation import CONTROL_FIRST, MEDIA_FIRST, PTP, Plan
 from mirrorbridge.mirror import session as mirror_session
 from mirrorbridge.mirror.session import (MirrorSession, catch_up_bytes, canvas_limit, choose_canvas, choose_fps,
+                                         sharp_canvas, sharp_kbps,
                                          choose_mirror_fps, keyframes_on_demand, keyframes_text, latency_lead,
                                          lead_override, mirror_latency, on_arrival, send_buffer)
 from mirrorbridge.mirror.source import DESKTOP, TEST_PATTERN, FrameQueue, Unit, build_command
@@ -668,6 +669,25 @@ def test_receiver_info_and_canvas():
     assert choose_fps(30, None) == 30
 
 
+def test_sharp_slides_send_up_to_1440p_on_a_bigger_tv_with_the_bitrate_to_match(tmp_path):
+    four_k = ReceiverInfo.parse({"displays": [{"widthPixels": 3840, "heightPixels": 2160}]})
+    hd = ReceiverInfo.parse({"displays": [{"widthPixels": 1920, "heightPixels": 1080}]})
+    target = Target("TV", "1.2.3.4")
+    sharp = Settings(mirror_sharp=True)
+    assert sharp_canvas(Settings()) == (1920, 1080)
+    assert choose_canvas(four_k, target, sharp_canvas(sharp)) == (2560, 1440)
+    assert choose_canvas(hd, target, sharp_canvas(sharp)) == (1920, 1080)  # never more than the TV's screen
+    assert sharp_canvas(Settings(mirror_sharp=True, output_height=720)) == (1280, 720)  # less, as asked
+    assert sharp_canvas(Settings(mirror_sharp=True, output_height=0)) == (2560, 1440)
+    assert sharp_kbps(8000, (2560, 1440)) == 14222
+    assert sharp_kbps(8000, (1920, 1080)) == 8000 and sharp_kbps(8000, (1280, 720)) == 8000  # never lowered
+    hand_edited = tmp_path / "settings.json"
+    hand_edited.write_text(json.dumps({"mirror_sharp": "yes"}), encoding="utf-8")
+    assert Settings.load(hand_edited).mirror_sharp is False
+    hand_edited.write_text(json.dumps({"mirror_sharp": True}), encoding="utf-8")
+    assert Settings.load(hand_edited).mirror_sharp is True
+
+
 def test_frame_rate_automatic_is_60_with_a_hardware_encoder_that_is_given_frames_fast_enough():
     """Mirror screen settings > Frame rate: Automatic (0, or anything a hand edit left) is 60 for
     NVENC, AMF, Quick Sync or Media Foundation with ddagrab or the test pattern, else 30; 30 and
@@ -1287,3 +1307,16 @@ def test_an_experiment_says_the_sender_is_an_iphone_and_picks_the_h264_profile()
         "iPhone14,3", "20F66", "16.5", "AirPlay/690.7.1", "main", "main"]
     assert run(MIRRORBRIDGE_SOURCE_VERSION="377.40.00", MIRRORBRIDGE_H264_PROFILE="nonsense")[3:] == [
         "AirPlay/377.40.00", "high", "high"]
+
+
+def test_sharp_slides_raise_the_bitrate_for_what_is_sent():
+    """A 1440p screen on a 4K TV goes at its own size with 1.78 times the bitrate; a 1080p
+    laptop's screen is sent as it is, at the bitrate chosen; the settings given stay as they are."""
+    chosen = Settings(mirror_sharp=True, video_bitrate_kbps=8000)
+    for (width, height), kbps in (((2560, 1440), 14222), ((1920, 1080), 8000), ((3840, 2160), 14222)):
+        session = MirrorSession(Target("TV", "1.2.3.4"), chosen, remember=False)
+        session._capture = ("ffmpeg", ffmpeg.Monitor(0, 0, 0, width, height, True), None)  # pylint: disable=protected-access
+        session._using = ("ddagrab", "h264_nvenc", capture.CPU)  # pylint: disable=protected-access
+        assert session._sharpen((2560, 1440)).video_bitrate_kbps == kbps  # pylint: disable=protected-access
+        assert session.settings.video_bitrate_kbps == kbps
+    assert chosen.video_bitrate_kbps == 8000

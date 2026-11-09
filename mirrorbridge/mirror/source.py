@@ -104,6 +104,7 @@ def build_command(
     extra: str = "",
     keyframe_seconds: int = ffmpeg.MIRROR_KEYFRAME_SECONDS,
     bt709: bool = False,
+    sharp: bool = False,
 ) -> list[str]:
     """FFmpeg: the source, fitted into width x height, encoded for mirroring, FLV to stdout.
 
@@ -113,7 +114,8 @@ def build_command(
     keyframe_seconds the time between keyframes (0: only the first; the default is a keyframe
     every 2 s, for callers that do not start FFmpeg again for one, as Google Cast mirroring),
     bt709 the CPU chain's pixels in BT.709 and tagged so (capture.cpu_filters; the default is
-    the pixels from before, for callers that do not ask, as Google Cast's VP8).
+    the pixels from before, for callers that do not ask, as Google Cast's VP8), sharp the CPU
+    chain's sharper scaling (Sharp slides, capture.SHARP_SCALE_FLAGS).
     """
     output: list[str] = []
     kbps, rate = settings.video_bitrate_kbps, fps  # what the encoder is told
@@ -143,7 +145,7 @@ def build_command(
             filters = capture.gpu_filters(chain)
             output = capture.output_args(chain)
         else:
-            filters = capture.cpu_filters(prefilters, width, height, encoder, bt709=bt709)
+            filters = capture.cpu_filters(prefilters, width, height, encoder, bt709=bt709, sharp=sharp)
     video_in = _paced(video_in, ff)
     cmd = [ff, "-hide_banner", "-nostats", "-loglevel", "warning"]
     graph_source = in_graph(video_in)
