@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from fake_mirror_tv import TCL_CONTROL_FIRST, FakeMirrorTV
+from fake_mirror_tv import APPLE_TV, TCL_CONTROL_FIRST, FakeMirrorTV
 from mirrorbridge import ffmpeg
 from mirrorbridge.config import Settings
 from mirrorbridge.mirror import TEST_PATTERN, MirrorError, MirrorSession, probe_mirroring, profiles, ptp, sound
@@ -35,7 +35,7 @@ DESKTOP_SETTINGS = dataclasses.replace(SETTINGS, capture_backend="test")
 M = 0xFFFFFFFF
 MS = NS // 1000
 FEEDERS = ("mirrorbridge-audio", "mirror-tone")
-KNOBS = ("MIRRORBRIDGE_NO_AUDIO", "MIRRORBRIDGE_TIMING", "MIRRORBRIDGE_LEAD_MS", "MIRRORBRIDGE_PTP_LOCK_S",
+KNOBS = ("MIRRORBRIDGE_FP_AUDIO", "MIRRORBRIDGE_FP_AUDIO_LAYOUT", "MIRRORBRIDGE_FP_ROOT", "MIRRORBRIDGE_NO_AUDIO", "MIRRORBRIDGE_TIMING", "MIRRORBRIDGE_LEAD_MS", "MIRRORBRIDGE_PTP_LOCK_S",
          "MIRRORBRIDGE_PTP_NO_FALLBACK")
 
 
@@ -1064,3 +1064,60 @@ async def test_the_sound_trial_has_the_tv_turned_down_before_raw_pcm(tv, monkeyp
     assert (first.stream["ct"], pcm.stream["ct"], pcmle.stream["ct"]) == (2, 1, 1)
     assert pcm.packets and pcm.errors == [] and pcmle.packets and pcmle.errors == []
     assert profiles.load("fake-tv") is None
+
+
+# -- an Apple TV (FairPlay, with mirroring to Apple TVs turned on) ---------------------------------------
+
+
+@pytest.fixture
+async def apple_tv(apple_tv_on):  # pylint: disable=unused-argument
+    tv = await FakeMirrorTV(APPLE_TV).start()
+    yield tv
+    await tv.stop()
+
+
+def _audio_streams(tv) -> list[dict]:
+    return [stream for body in tv.setups for stream in body.get("streams") or [] if stream.get("type") == 96]
+
+
+async def test_an_apple_tv_gets_the_sound_sealed_as_doubletake_seals_it(apple_tv, caplog):
+    caplog.set_level(logging.INFO, "mirrorbridge")
+    run = await _mirror(apple_tv, 2)
+    assert run.report.steps["fp-setup"] == "ok" and run.report.sound.startswith("sent: ")
+    audio = _streamed(apple_tv)
+    assert len(audio.packets) >= SR // SPF and audio.stream.get("shk") and len(audio.stream["shk"]) == 32
+    (stream,) = _audio_streams(apple_tv)
+    assert "controlPort" not in stream and stream["isMedia"] is False  # bit 59: streamConnections
+    assert stream["streamConnections"]["streamConnectionTypeRTP"] == {"streamConnectionKeyUseStreamEncryptionKey": True}
+    assert not any("ekey" in body for body in apple_tv.setups)  # nothing of FairPlay's at the root
+    assert "Sound to an Apple TV: streamConnections layout, ChaCha20-Poly1305 (shk)" in caplog.text
+
+
+async def test_an_apple_tv_that_refuses_stream_connections_gets_the_control_port(apple_tv):
+    apple_tv.reconfigure(audio_layouts=("controlPort",))
+    run = await _mirror(apple_tv, 2)
+    assert run.report.sound.startswith("sent: ") and _streamed(apple_tv).packets
+    first, second = _audio_streams(apple_tv)
+    assert "streamConnections" in first and second["controlPort"] and "streamConnections" not in second
+    assert run.report.steps["setup audio"] == 400 and run.report.steps["setup audio (controlPort)"] == 200
+
+
+async def test_an_apple_tvs_sound_with_fairplays_aes_cbc(apple_tv, monkeypatch):
+    monkeypatch.setenv("MIRRORBRIDGE_FP_AUDIO", "cbc")
+    monkeypatch.setenv("MIRRORBRIDGE_FP_AUDIO_LAYOUT", "controlPort")
+    run = await _mirror(apple_tv, 2)
+    assert run.report.sound.startswith("sent: ")
+    audio = _streamed(apple_tv)  # opened with the key from the ekey, mixed with pair-verify's secret
+    assert len(audio.packets) >= SR // SPF and "shk" not in audio.stream
+    (stream,) = _audio_streams(apple_tv)
+    assert stream["controlPort"] and "streamConnections" not in stream
+    (root,) = [body for body in apple_tv.setups if "ekey" in body]
+    assert "sessionUUID" in root and root["et"] == 32 and len(root["eiv"]) == 16
+    assert len(apple_tv.fp_raw_keys) == 1
+
+
+async def test_an_apple_tv_gets_no_sound_when_it_is_not_wanted(apple_tv):
+    run = await _mirror(apple_tv, 1, sound=False)
+    assert not any(audio.datagrams for audio in apple_tv.audios)
+    (stream,) = _audio_streams(apple_tv)
+    assert stream["controlPort"] and "streamConnections" not in stream  # as #7 sets it up

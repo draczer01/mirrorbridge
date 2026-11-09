@@ -8,6 +8,11 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ### Added
 
+- The PC's sound to Apple TVs and Macs in Mirror screen (with *Mirror to Apple TVs* on, so
+  still experimental): sealed with ChaCha20-Poly1305 and the stream's `shk`, as doubletake seals
+  it on a pair-verified connection, in the `streamConnections` layout for receivers with feature
+  bit 59 (asked again with `controlPort` if refused). Test switches: `MIRRORBRIDGE_FP_AUDIO=cbc`
+  (FairPlay's AES-128-CBC key, ekey/eiv in the SETUP) and `MIRRORBRIDGE_FP_AUDIO_LAYOUT`.
 - Screen mirroring to Apple TVs and Macs with FairPlay, **experimental and off by default**
   (not yet tried on a real Apple TV): turn it on with *More options > Debug > Mirror to Apple
   TVs*, `mirror --apple-tv` / `probe --apple-tv`, or `MIRRORBRIDGE_APPLE_TV=1`. Receivers that

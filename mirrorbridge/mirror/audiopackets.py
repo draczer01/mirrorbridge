@@ -42,6 +42,7 @@ import struct
 from dataclasses import dataclass
 from typing import Optional, Protocol
 
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 SR, SPF, CHANNELS = 44100, 352, 2
@@ -212,6 +213,49 @@ class ChaChaShk:
     def seal(self, index: int, header: bytes, payload: bytes) -> bytes:
         nonce = struct.pack("<LQ", 0, index)
         return self._aead.encrypt(nonce, payload, header[4:12]) + nonce[4:]
+
+
+class FairPlayCbc:
+    """AES-128-CBC with FairPlay's key, as AirPlay senders seal the sound on a connection that
+    pair-verify left in the clear: each packet's whole 16-byte blocks from the same IV, the rest
+    as it is, no tag. The receiver gets the key from the ekey and eiv in the session's first
+    SETUP (UxPlay, RPiPlay), mixed with the pair-verify secret when there is one (so it is
+    channel.fairplay.shk, as the video's).
+
+    MirrorBridge's Apple TV sessions are always pair-verified, where doubletake, the one sender
+    seen mirroring to real Apple TVs, uses ChaChaShk instead; this one is only an experiment
+    (MIRRORBRIDGE_FP_AUDIO=cbc) in case an Apple TV turns the ChaCha stream down.
+    """
+
+    name = "AES-128-CBC (FairPlay)"
+    overhead = 0
+
+    def __init__(self, key: bytes, iv: bytes, ekey: bytes = b"") -> None:
+        if len(key) != 16 or len(iv) != 16:
+            raise ValueError(f"FairPlay's key and IV are 16 bytes, not {len(key)} and {len(iv)}")
+        self.key, self.iv, self.ekey = bytes(key), bytes(iv), bytes(ekey)
+        self._cipher = Cipher(algorithms.AES(self.key), modes.CBC(self.iv))
+
+    @classmethod
+    def for_channel(cls, channel) -> "FairPlayCbc":
+        """FairPlay's key and IV from the channel's handshake (control.FairPlayKeys)."""
+        keys = getattr(channel, "fairplay", None)
+        if keys is None:
+            raise ValueError("no FairPlay handshake on this connection")
+        return cls(keys.shk, keys.iv, keys.ekey)
+
+    def stream_fields(self) -> dict:
+        return {}
+
+    def session_fields(self) -> dict:
+        return {"ekey": self.ekey, "eiv": self.iv, "et": 32}
+
+    def seal(self, index: int, header: bytes, payload: bytes) -> bytes:
+        whole = len(payload) // 16 * 16
+        if not whole:
+            return bytes(payload)
+        encryptor = self._cipher.encryptor()  # the same IV for each packet
+        return encryptor.update(bytes(payload[:whole])) + encryptor.finalize() + bytes(payload[whole:])
 
 
 class PacketRing:
