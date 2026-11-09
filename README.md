@@ -220,6 +220,14 @@ are greyed out until it stops. The full window's big button does the same.
   delay are the cast's. On a Google Cast TV the main item mirrors by Google Cast, which these
   two do not change yet: it has the PC's sound (*Include computer sound*) and *Quality*'s frame
   rate, so while one is chosen they are named without "when transmitting".
+* *Sharp slides (experimental)*, off by default (also in the window's advanced settings, and
+  `mirror --sharp` for one run): for text and slides. When the TV's screen is bigger than
+  1080p, up to 2560x1440 is sent, so a 1440p monitor reaches a 4K TV at its own size with no
+  scaling on the PC; the bitrate goes up by as many more pixels as are sent (8 Mbit/s becomes
+  about 14 at 1440p); and a screen that must still be shrunk is scaled with lanczos instead of
+  bilinear, which keeps text edges as crisp as text drawn at that size (bilinear lost about
+  9 %). It uses more Wi-Fi and a little more processor; a TV that says its screen is 1080p
+  gets 1080p as before.
 
 **What to send back** after trying it on your TV:
 

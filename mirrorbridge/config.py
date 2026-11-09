@@ -44,7 +44,7 @@ CHOICES: dict[str, tuple] = {
     "mirror_keyframes": (0, 10, 2),  # in the Debug menu's order (ffmpeg.MIRROR_KEYFRAME_CHOICES)
     "mirror_scaler": ("auto", "cpu", "gfx"),  # in the Debug menu's order (gui.tray.SCALERS)
 }
-CHECKED = set(CHOICES) | {"mirror_encoder_extra", "mirror_apple_tv"}
+CHECKED = set(CHOICES) | {"mirror_encoder_extra", "mirror_sharp", "mirror_apple_tv"}
 
 
 @dataclass
@@ -82,6 +82,9 @@ class Settings:
     # Mirror screen settings (framerate above is for casts only)
     mirror_latency: str = "normal"  # low | normal | smooth: how long the TV waits to show a frame
     mirror_framerate: int = 0  # 0 = automatic (60 when this PC can), 30 or 60
+    # Sharp slides (experimental): up to 2560x1440 when the TV's screen is bigger than 1080p, the
+    # bitrate raised to match, and sharper scaling (mirror.session.sharp_canvas, capture.SHARP_SCALE_FLAGS)
+    mirror_sharp: bool = False
 
     # Mirror screen's test switches (More options > Debug), for the sessions after they are set;
     # Test this TV and mirror --probe leave them out

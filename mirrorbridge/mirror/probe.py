@@ -217,7 +217,7 @@ class _Probe:
                  variants: Iterable[str], save: bool, progress: Callable[[str], None],
                  on_pattern: Callable[[], None], deadline: Optional[float]) -> None:
         self.target = target
-        # Without the Debug menu's test switches, the Latency or options typed into settings.json:
+        # Without the Debug menu's test switches, the Latency, Sharp slides or options typed into settings.json:
         # what the probe finds and saves is the TV's own. With a keyframe every 2 s, as the probe
         # always sent: none of its few seconds goes on FFmpeg started again for one.
         defaults = Settings()
@@ -226,7 +226,8 @@ class _Probe:
                                             mirror_keyframes=ffmpeg.MIRROR_KEYFRAME_SECONDS,
                                             mirror_scaler=defaults.mirror_scaler,
                                             mirror_encoder_extra=defaults.mirror_encoder_extra,
-                                            mirror_on_arrival=defaults.mirror_on_arrival)
+                                            mirror_on_arrival=defaults.mirror_on_arrival,
+                                            mirror_sharp=defaults.mirror_sharp)
         self.seconds = seconds
         self.send_test_pattern = send_test_pattern
         self.variants = set(variants)
