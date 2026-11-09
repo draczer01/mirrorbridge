@@ -686,7 +686,7 @@ async def test_a_network_slower_than_the_video_does_not_leave_the_tv_behind(tv, 
     the frames fall behind a little more every second. Once they have been past their lead for
     CATCH_UP_MS, frames are dropped up to a keyframe; none waits until it alone is a whole
     CATCH_UP_MS late, so none comes to the TV that late. With a keyframe every 2 s, the drop ends
-    on one that is on time. With keyframes only when needed, FFmpeg is started again for one at
+    on one that is on time (within a lead of it, for a busy test machine). With keyframes only when needed, FFmpeg is started again for one at
     once, which can still find the network behind (by a few hundred ms here): the TV is back to
     real time once it caught up."""
     ff = _ffmpeg()
@@ -705,7 +705,11 @@ async def test_a_network_slower_than_the_video_does_not_leave_the_tv_behind(tv, 
     gaps = [n for n in range(1, len(shown)) if shown[n] - shown[n - 1] > 200 * NS // 1000]
     assert gaps and all(video.frames[n][1] for n in gaps)
     if keyframes:
-        assert past[gaps[0]] <= 0 and session.report.restarts == []
+        # On time, give or take a pause of the machine running the test: here the keyframe comes
+        # about 100 ms early (the whole lead), but a GitHub runner once held it up 160 ms
+        # (59 ms past, 2026-11-09), still far from the CATCH_UP_MS the frames before it were behind.
+        lead_ns = session.report.established.plan.lead_ms * NS // 1000
+        assert past[gaps[0]] < lead_ns and session.report.restarts == []
     else:  # each drop ended on the keyframe of an FFmpeg started for it, never two within KEYFRAME_RESTART_SECONDS
         assert len(gaps) <= len(session.report.restarts) <= 7 / mirror_session.KEYFRAME_RESTART_SECONDS + 1
     assert _decode(ff, bytes(video.annexb), tmp_path)[0] == len(video.frames)
